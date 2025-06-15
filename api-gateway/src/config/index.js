@@ -1,9 +1,9 @@
-// File: src/config/index.js
+// src/config/index.js
 
 const Joi = require('joi');
 const path = require('path');
 
-// 1️⃣ Définis le schéma de validation de TOUTES les variables d'env nécessaires à la gateway
+// 1️⃣ Schéma de validation stricte pour toutes les variables d'env requises
 const schema = Joi.object({
   // Serveur
   NODE_ENV:       Joi.string().valid('development', 'production', 'test').default('development'),
@@ -20,20 +20,24 @@ const schema = Joi.object({
   SERVICE_STRIPE_URL:       Joi.string().uri().required(),
 
   // CORS
-  CORS_ORIGINS:  Joi.string().default('*'), // ou "https://app.com,https://autre.com" pour prod
+  CORS_ORIGINS:  Joi.string().default('*'), // "https://front1,https://front2"
 
   // Logging/monitoring
-  LOGS_LEVEL:   Joi.string().valid('error', 'warn', 'info', 'debug').default('info'),
-  SENTRY_DSN:   Joi.string().allow('').optional(),
+  LOGS_LEVEL:    Joi.string().valid('error', 'warn', 'info', 'debug').default('info'),
+  SENTRY_DSN:    Joi.string().allow('').optional(),
 
   // Rate limiting
   RATE_LIMIT_WINDOW_MS: Joi.number().integer().min(1000).default(60000),
   RATE_LIMIT_MAX:       Joi.number().integer().min(1).default(100),
+
+  // AML/fraude alertes (optionnel, pour webhook/email compliance)
+  FRAUD_ALERT_EMAIL: Joi.string().email().allow('').optional(),
+  FRAUD_ALERT_WEBHOOK_URL: Joi.string().uri().allow('').optional(),
 })
   .unknown()
   .required();
 
-// 2️⃣ Validation à l'exécution
+// 2️⃣ Validation au démarrage
 const { error, value: env } = schema.validate(process.env, {
   abortEarly: false,
   convert: true
@@ -47,7 +51,7 @@ if (error) {
   process.exit(1);
 }
 
-// 3️⃣ Export de la config (ultra claire)
+// 3️⃣ Export de la config centralisée
 module.exports = {
   nodeEnv:    env.NODE_ENV,
   port:       env.PORT,
@@ -62,7 +66,6 @@ module.exports = {
   },
 
   cors: {
-    // découpé en array, vide = tous autorisés
     origins: env.CORS_ORIGINS === '*' ? ['*'] :
       env.CORS_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
   },
@@ -76,5 +79,12 @@ module.exports = {
   rateLimit: {
     windowMs: env.RATE_LIMIT_WINDOW_MS,
     max:      env.RATE_LIMIT_MAX
+  },
+
+  fraudAlert: {
+    email: env.FRAUD_ALERT_EMAIL || null,
+    webhookUrl: env.FRAUD_ALERT_WEBHOOK_URL || null
   }
 };
+
+

@@ -4,13 +4,13 @@ const express = require('express');
 const Joi = require('joi');
 const axios = require('axios');
 const config = require('../src/config');
-const router = express.Router();
 const validate = require('../src/middlewares/validate');
-
+const amlMiddleware = require('../src/middlewares/aml'); // Middleware AML
+const router = express.Router();
 
 /* -------- SCHEMAS DÉTAILLÉS PAR PROVIDER -------- */
 
-// Schéma de base pour chaque transaction
+// Schéma de base commun
 const baseSchema = {
   provider: Joi.string().valid('paynoval', 'stripe', 'bank', 'mobilemoney').required(),
   amount: Joi.number().min(1).max(1000000).required(),
@@ -92,45 +92,50 @@ const cancelTxSchema = Joi.object({
 
 /* -------------------- ROUTES -------------------- */
 
-// ---- INITIATE ----
-router.post('/initiate', validateInitiate, async (req, res) => {
-  try {
-    const { provider } = req.body;
-    let targetUrl;
-    if (provider === 'paynoval') {
-      targetUrl = `${config.microservices.paynoval}/transactions/initiate`;
-    } else if (provider === 'stripe') {
-      targetUrl = `${config.microservices.stripe}/transactions/initiate`;
-    } else if (provider === 'bank') {
-      targetUrl = `${config.microservices.bank}/transactions/initiate`;
-    } else if (provider === 'mobilemoney') {
-      targetUrl = `${config.microservices.mobilemoney}/transactions/initiate`;
-    } else {
-      return res.status(400).json({ error: 'Provider inconnu.' });
-    }
+// ---- INITIATE (avec AML intégré) ----
+router.post(
+  '/initiate',
+  validateInitiate,     // 1. Validation syntaxique des données
+  amlMiddleware,        // 2. Contrôle AML (fraude, patterns suspects)
+  async (req, res) => { // 3. Forward si OK
+    try {
+      const { provider } = req.body;
+      let targetUrl;
+      if (provider === 'paynoval') {
+        targetUrl = `${config.microservices.paynoval}/transactions/initiate`;
+      } else if (provider === 'stripe') {
+        targetUrl = `${config.microservices.stripe}/transactions/initiate`;
+      } else if (provider === 'bank') {
+        targetUrl = `${config.microservices.bank}/transactions/initiate`;
+      } else if (provider === 'mobilemoney') {
+        targetUrl = `${config.microservices.mobilemoney}/transactions/initiate`;
+      } else {
+        return res.status(400).json({ error: 'Provider inconnu.' });
+      }
 
-    const response = await axios.post(targetUrl, req.body, {
-      headers: {
-        'Authorization': req.headers.authorization,
-        'x-internal-token': config.internalToken,
-      },
-      timeout: 15000,
-    });
-
-    res.status(response.status).json(response.data);
-
-  } catch (err) {
-    if (err.response) {
-      console.error('[Gateway→initiate]', err.response.status, err.response.data);
-      res.status(err.response.status).json({
-        error: err.response.data?.error || 'Erreur interne provider'
+      const response = await axios.post(targetUrl, req.body, {
+        headers: {
+          'Authorization': req.headers.authorization,
+          'x-internal-token': config.internalToken,
+        },
+        timeout: 15000,
       });
-    } else {
-      console.error('[Gateway→initiate] Axios error:', err.message);
-      res.status(502).json({ error: 'Service transactions indisponible.' });
+
+      res.status(response.status).json(response.data);
+
+    } catch (err) {
+      if (err.response) {
+        console.error('[Gateway→initiate]', err.response.status, err.response.data);
+        res.status(err.response.status).json({
+          error: err.response.data?.error || 'Erreur interne provider'
+        });
+      } else {
+        console.error('[Gateway→initiate] Axios error:', err.message);
+        res.status(502).json({ error: 'Service transactions indisponible.' });
+      }
     }
   }
-});
+);
 
 // ---- CONFIRM ----
 router.post('/confirm', validate(confirmTxSchema), async (req, res) => {

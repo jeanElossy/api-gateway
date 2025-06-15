@@ -6,6 +6,7 @@ const helmet = require('helmet');
 const config = require('./config');
 const morgan = require('morgan');
 const paymentRoutes = require('../routes/payment');
+const amlRoutes = require('../routes/aml');
 const transactionRoutes = require('../routes/transactions'); // ← ajoute si tu as transactions
 const { authMiddleware } = require('./middlewares/auth');
 const { rateLimiter } = require('./middlewares/rateLimit');
@@ -44,6 +45,7 @@ app.use(authMiddleware);
 // 5️⃣ Routing métier
 app.use('/api/pay', paymentRoutes);
 app.use('/api/transactions', transactionRoutes); // ← branche tes routes transactions ici
+app.use('/api/aml', amlRoutes);
 
 // 6️⃣ 404 global (API REST style)
 app.use((req, res, next) => {

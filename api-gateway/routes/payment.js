@@ -72,11 +72,14 @@ function validatePayment(req, res, next) {
     case 'mobilemoney': schema = mobileMoneyPaymentSchema; break;
     case 'bank': schema = bankPaymentSchema; break;
     default:
+      logger.warn('[PAYMENT] Provider non supporté', {
+        provider: req.body.provider,
+        ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+      });
       return res.status(400).json({ error: 'Provider non supporté.' });
   }
   const { error } = schema.validate(req.body, { abortEarly: false, stripUnknown: true });
   if (error) {
-    // Log l’erreur côté serveur pour monitoring
     logger.warn(`[PAYMENT][${req.body.provider}] Validation failed`, {
       details: error.details.map(d => d.message),
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
