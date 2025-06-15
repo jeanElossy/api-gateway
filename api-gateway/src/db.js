@@ -18,7 +18,7 @@ async function connectToGatewayDB() {
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });
-    logger.info(`[DB] Connexion MongoDB Gateway établie sur ${uri}`);
+    logger.info(`[DB] Connexion MongoDB Gateway établie`);
   } catch (err) {
     logger.error('[DB] Erreur de connexion MongoDB Gateway :', err);
     process.exit(1);
