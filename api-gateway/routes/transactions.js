@@ -5,6 +5,8 @@ const Joi = require('joi');
 const axios = require('axios');
 const config = require('../src/config');
 const router = express.Router();
+const validate = require('../src/middlewares/validate');
+
 
 /* -------- SCHEMAS DÉTAILLÉS PAR PROVIDER -------- */
 
