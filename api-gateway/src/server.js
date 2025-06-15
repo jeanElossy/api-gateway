@@ -2,26 +2,49 @@
 
 require('dotenv').config();
 const app = require('./app');
-const config = require('./config'); // Récupère les configs centralisées
+const config = require('./config');
+const { connectToGatewayDB } = require('./db');
+const logger = require('./logger');
 
-const PORT = config.port || 4000;
+// Fonction d'init globale (DB puis serveur Express)
+(async () => {
+  try {
+    // 1️⃣ Connexion à la base MongoDB "api-gateway"
+    await connectToGatewayDB();
 
-const server = app.listen(PORT, () => {
-  console.log(`[Gateway] API listening on port ${PORT} (${config.nodeEnv})`);
-});
+    // 2️⃣ Démarrage du serveur Express
+    const PORT = config.port || 4000;
+    const server = app.listen(PORT, () => {
+      logger.info(`[Gateway] API listening on port ${PORT} (${config.nodeEnv})`);
+    });
 
-// Gestion des erreurs serveur (port occupé, crash, etc.)
-server.on('error', (err) => {
-  console.error(`[Gateway] Erreur serveur: ${err.message}`);
-  process.exit(1);
-});
+    // 3️⃣ Gestion des erreurs serveur (port déjà utilisé, etc.)
+    server.on('error', (err) => {
+      logger.error(`[Gateway] Erreur serveur: ${err.message}`);
+      process.exit(1);
+    });
 
-// Catch des exceptions non gérées (anti-crash)
-process.on('uncaughtException', (err) => {
-  console.error('[Gateway] Uncaught Exception:', err);
-  process.exit(1);
-});
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('[Gateway] Unhandled Rejection at:', promise, 'reason:', reason);
-  process.exit(1);
-});
+    // 4️⃣ Sécurité : catch des exceptions non gérées (anti-crash)
+    process.on('uncaughtException', (err) => {
+      logger.error('[Gateway] Uncaught Exception:', err);
+      process.exit(1);
+    });
+    process.on('unhandledRejection', (reason, promise) => {
+      logger.error('[Gateway] Unhandled Rejection at:', promise, 'reason:', reason);
+      process.exit(1);
+    });
+
+    // 5️⃣ (Optionnel) Log si stop manuel
+    process.on('SIGTERM', () => {
+      logger.info('[Gateway] SIGTERM reçu. Arrêt propre du serveur...');
+      server.close(() => {
+        logger.info('[Gateway] Serveur arrêté.');
+        process.exit(0);
+      });
+    });
+
+  } catch (err) {
+    logger.error('[Gateway] Erreur fatale au démarrage :', err);
+    process.exit(1);
+  }
+})();

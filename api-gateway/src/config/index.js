@@ -3,7 +3,6 @@
 const Joi = require('joi');
 const path = require('path');
 
-// 1️⃣ Schéma de validation stricte pour toutes les variables d'env requises
 const schema = Joi.object({
   // Serveur
   NODE_ENV:       Joi.string().valid('development', 'production', 'test').default('development'),
@@ -20,7 +19,7 @@ const schema = Joi.object({
   SERVICE_STRIPE_URL:       Joi.string().uri().required(),
 
   // CORS
-  CORS_ORIGINS:  Joi.string().default('*'), // "https://front1,https://front2"
+  CORS_ORIGINS:  Joi.string().default('*'),
 
   // Logging/monitoring
   LOGS_LEVEL:    Joi.string().valid('error', 'warn', 'info', 'debug').default('info'),
@@ -30,14 +29,17 @@ const schema = Joi.object({
   RATE_LIMIT_WINDOW_MS: Joi.number().integer().min(1000).default(60000),
   RATE_LIMIT_MAX:       Joi.number().integer().min(1).default(100),
 
-  // AML/fraude alertes (optionnel, pour webhook/email compliance)
+  // DB URIs
+  MONGO_URI_USERS:   Joi.string().uri().required(),
+  MONGO_URI_GATEWAY: Joi.string().uri().required(),
+
+  // AML/fraude alertes
   FRAUD_ALERT_EMAIL: Joi.string().email().allow('').optional(),
   FRAUD_ALERT_WEBHOOK_URL: Joi.string().uri().allow('').optional(),
 })
   .unknown()
   .required();
 
-// 2️⃣ Validation au démarrage
 const { error, value: env } = schema.validate(process.env, {
   abortEarly: false,
   convert: true
@@ -51,7 +53,6 @@ if (error) {
   process.exit(1);
 }
 
-// 3️⃣ Export de la config centralisée
 module.exports = {
   nodeEnv:    env.NODE_ENV,
   port:       env.PORT,
@@ -81,10 +82,13 @@ module.exports = {
     max:      env.RATE_LIMIT_MAX
   },
 
+  dbUris: {
+    users: env.MONGO_URI_USERS,
+    gateway: env.MONGO_URI_GATEWAY,
+  },
+
   fraudAlert: {
     email: env.FRAUD_ALERT_EMAIL || null,
     webhookUrl: env.FRAUD_ALERT_WEBHOOK_URL || null
   }
 };
-
-
