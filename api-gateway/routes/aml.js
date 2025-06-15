@@ -1,6 +1,6 @@
 // routes/aml.js
 const express = require('express');
-const AMLLog = require('../models/AMLLog');
+const AMLLog = require('../src/models/AMLLog');
 const router = express.Router();
 
 // (Optionnel: ajoute un middleware adminAuth ici)
