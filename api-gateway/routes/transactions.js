@@ -17,7 +17,6 @@ function cleanSensitiveMeta(meta) {
 }
 
 // ---------------------- SCHEMAS VALIDATION ------------------------
-
 const baseSchema = {
   provider: Joi.string().valid('paynoval', 'stripe', 'bank', 'mobilemoney').required(),
   amount: Joi.number().min(1).max(1000000).required(),
@@ -153,29 +152,34 @@ router.post(
         createdAt: now
       });
 
-      // Stockage transaction
-      await Transaction.create({
-        userId,
-        provider: req.body.provider,
-        amount: req.body.amount,
-        status: statusResult,
-        toEmail: req.body.toEmail || undefined,
-        toIBAN: req.body.iban || undefined,
-        toPhone: req.body.phoneNumber || undefined,
-        currency: req.body.currency || undefined,
-        operator: req.body.operator || undefined,
-        country: req.body.country || undefined,
-        reference,
-        meta: cleanSensitiveMeta(req.body),
-        createdAt: now,
-        updatedAt: now
-      });
+      // Stockage transaction LOG dans la base Gateway
+      try {
+        await Transaction.create({
+          userId,
+          provider: req.body.provider,
+          amount: req.body.amount,
+          status: statusResult,
+          toEmail: req.body.toEmail || undefined,
+          toIBAN: req.body.iban || undefined,
+          toPhone: req.body.phoneNumber || undefined,
+          currency: req.body.currency || undefined,
+          operator: req.body.operator || undefined,
+          country: req.body.country || undefined,
+          reference,
+          meta: cleanSensitiveMeta(req.body),
+          createdAt: now,
+          updatedAt: now
+        });
+      } catch (e) {
+        console.error('[GATEWAY] ERREUR à la création du log Transaction:', e);
+      }
 
       return res.status(response.status).json(result);
 
     } catch (err) {
       const error = err.response?.data?.error || 'Erreur interne provider';
       const status = err.response?.status || 502;
+
       await AMLLog.create({
         userId,
         type: 'initiate',
@@ -188,22 +192,26 @@ router.post(
         createdAt: now
       });
 
-      await Transaction.create({
-        userId,
-        provider: req.body.provider,
-        amount: req.body.amount,
-        status: 'failed',
-        toEmail: req.body.toEmail || undefined,
-        toIBAN: req.body.iban || undefined,
-        toPhone: req.body.phoneNumber || undefined,
-        currency: req.body.currency || undefined,
-        operator: req.body.operator || undefined,
-        country: req.body.country || undefined,
-        reference: null,
-        meta: cleanSensitiveMeta({ ...req.body, error }),
-        createdAt: now,
-        updatedAt: now
-      });
+      try {
+        await Transaction.create({
+          userId,
+          provider: req.body.provider,
+          amount: req.body.amount,
+          status: 'failed',
+          toEmail: req.body.toEmail || undefined,
+          toIBAN: req.body.iban || undefined,
+          toPhone: req.body.phoneNumber || undefined,
+          currency: req.body.currency || undefined,
+          operator: req.body.operator || undefined,
+          country: req.body.country || undefined,
+          reference: null,
+          meta: cleanSensitiveMeta({ ...req.body, error }),
+          createdAt: now,
+          updatedAt: now
+        });
+      } catch (e) {
+        console.error('[GATEWAY] ERREUR à la création du log Transaction (erreur):', e);
+      }
 
       return res.status(status).json({ error });
     }
