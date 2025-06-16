@@ -1,15 +1,21 @@
-// routes/payment.js
-
 const express = require('express');
 const axios = require('axios');
 const Joi = require('joi');
 const config = require('../src/config');
-const logger = require('../src/logger'); // Winston centralisé
+const logger = require('../src/logger');
 const router = express.Router();
+const amlMiddleware = require('../src/middlewares/aml');
 
-// -------- SCHEMAS DÉDIÉS POUR CHAQUE PROVIDER --------
+function cleanSensitiveMeta(meta) {
+  const clone = { ...meta };
+  if (clone.cardNumber) clone.cardNumber = '****' + clone.cardNumber.slice(-4);
+  if (clone.cvc) delete clone.cvc;
+  if (clone.securityCode) delete clone.securityCode;
+  return clone;
+}
 
-// PAYNOVAL
+// -------- SCHEMAS --------
+
 const paynovalPaymentSchema = Joi.object({
   provider: Joi.string().valid('paynoval').required(),
   toEmail: Joi.string().email().required(),
@@ -28,7 +34,6 @@ const paynovalPaymentSchema = Joi.object({
   securityCode: Joi.string().max(32).allow('').optional(),
 });
 
-// STRIPE
 const stripePaymentSchema = Joi.object({
   provider: Joi.string().valid('stripe').required(),
   amount: Joi.number().min(1).required(),
@@ -41,7 +46,6 @@ const stripePaymentSchema = Joi.object({
   toEmail: Joi.string().email().required(),
 });
 
-// MOBILE MONEY
 const mobileMoneyPaymentSchema = Joi.object({
   provider: Joi.string().valid('mobilemoney').required(),
   amount: Joi.number().min(1).required(),
@@ -51,7 +55,6 @@ const mobileMoneyPaymentSchema = Joi.object({
   country: Joi.string().max(32).required(),
 });
 
-// BANK
 const bankPaymentSchema = Joi.object({
   provider: Joi.string().valid('bank').required(),
   amount: Joi.number().min(1).required(),
@@ -61,8 +64,6 @@ const bankPaymentSchema = Joi.object({
   country: Joi.string().max(32).required(),
   swift: Joi.string().pattern(/^[A-Z0-9]{8,11}$/).optional(),
 });
-
-// -------- MIDDLEWARE DE VALIDATION DYNAMIQUE --------
 
 function validatePayment(req, res, next) {
   let schema;
@@ -94,11 +95,12 @@ function validatePayment(req, res, next) {
   next();
 }
 
-// -------- ROUTE UNIQUE /api/pay --------
+// -------- ROUTE UNIQUE /api/v1/pay --------
 
 router.post(
   '/',
   validatePayment,
+  amlMiddleware, 
   async (req, res) => {
     const { provider } = req.body;
     let targetUrl;
@@ -121,7 +123,7 @@ router.post(
     try {
       const response = await axios.post(
         targetUrl,
-        req.body,
+        cleanSensitiveMeta(req.body),
         {
           headers: {
             'Authorization': req.headers.authorization,

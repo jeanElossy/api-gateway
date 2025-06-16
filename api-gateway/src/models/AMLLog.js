@@ -6,7 +6,7 @@ const AMLLogSchema = new mongoose.Schema({
   provider:      { type: String, required: true },
   amount:        { type: Number, required: true },
   toEmail:       { type: String },
-  details:       { type: Object }, // snapshot de la req
+  details:       { type: Object }, // snapshot de la req, jamais de données bancaires sensibles
   flagged:       { type: Boolean, default: false },
   flagReason:    { type: String, default: '' },
   reviewed:      { type: Boolean, default: false },
