@@ -4,8 +4,8 @@ const axios = require('axios');
 const config = require('../src/config');
 const validate = require('../src/middlewares/validate');
 const amlMiddleware = require('../src/middlewares/aml');
-const Transaction = require('../models/Transaction');
-const AMLLog = require('../models/AMLLog');
+const Transaction = require('../src/models/Transaction');
+const AMLLog = require('../src/models/AMLLog');
 const router = express.Router();
 
 function cleanSensitiveMeta(meta) {
