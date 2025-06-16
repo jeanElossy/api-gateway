@@ -14,6 +14,8 @@ const { loggerMiddleware } = require('./middlewares/logger');
 const logger = require('./logger');
 const mongoose = require('mongoose');
 
+const app = express(); // ← D’ABORD tu déclares app ici !
+
 // (Optionnel DEBUG) : endpoint test direct (à retirer ensuite)
 const Transaction = require('./models/Transaction');
 app.post('/api/v1/transactions/debug-write', async (req, res) => {
@@ -31,8 +33,6 @@ app.post('/api/v1/transactions/debug-write', async (req, res) => {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
-
-const app = express();
 
 app.use(helmet({
   crossOriginResourcePolicy: false,
