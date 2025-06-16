@@ -2,33 +2,53 @@ const AMLLog = require('../models/AMLLog');
 const Transaction = require('../models/Transaction');
 const blacklist = require('../aml/blacklist.json');
 
-// Logger chaque transaction (AML audit trail)
-async function logTransaction({ userId, type, provider, amount, toEmail, details, flagged = false, flagReason = '' }) {
+/**
+ * Enregistre chaque transaction AML (audit trail, compliance).
+ * 
+ * @param {Object} param0 
+ * @returns {Promise<void>}
+ */
+async function logTransaction({
+  userId,
+  type,        // "initiate", "confirm", "cancel"
+  provider,    // "paynoval", "stripe", "bank", "mobilemoney"
+  amount,
+  toEmail,
+  details,     // snapshot: iban, phone, pays, meta, etc. (attention : maskSensitive côté appelant !)
+  flagged = false,
+  flagReason = ''
+}) {
   try {
     await AMLLog.create({
       userId,
-      type,             // "initiate", "confirm", "cancel"
-      provider,         // "paynoval", "stripe", "bank", "mobilemoney"
+      type,
+      provider,
       amount,
       toEmail,
-      details,          // snapshot: iban, phone, country, meta, etc.
+      details,
       flagged,
       flagReason,
-      reviewed: false,  // pas encore examiné
+      reviewed: false, // pas encore examiné par compliance
     });
   } catch (e) {
     console.error('[AML-LOG] Failed to record log', e);
   }
 }
 
-// Statistiques transactionnelles avancées
+/**
+ * Statistiques AML avancées sur les transactions utilisateur
+ * - lastHour : nb sur 1h
+ * - dailyTotal : somme sur 24h
+ * - sameDestShortTime : structuring sur 10min
+ */
 async function getUserTransactionsStats(userId, provider) {
-  // Nombre de transactions sur 1h
+  // Nb de transactions sur la dernière heure
   const lastHour = await Transaction.countDocuments({
     userId,
     provider,
     createdAt: { $gte: new Date(Date.now() - 60 * 60 * 1000) }
   });
+
   // Montant total sur 24h
   const dailyTotalAgg = await Transaction.aggregate([
     { $match: {
@@ -41,7 +61,7 @@ async function getUserTransactionsStats(userId, provider) {
   ]);
   const dailyTotal = dailyTotalAgg.length ? dailyTotalAgg[0].total : 0;
 
-  // Structuring
+  // Structuring : nb de fois même destinataire sur 10min
   const cutoff = new Date(Date.now() - 10 * 60 * 1000);
   const recentTx = await Transaction.find({
     userId,
@@ -58,29 +78,44 @@ async function getUserTransactionsStats(userId, provider) {
   return { lastHour, dailyTotal, sameDestShortTime };
 }
 
-// Vérifie PEP/sanction (API externe simulée)
+/**
+ * Vérifie si user ou destinataire est PEP ou sanctionné.
+ * (Plug API World-Check, DowJones, sanctions OFAC, etc. ici)
+ */
 async function getPEPOrSanctionedStatus(user, { toEmail, iban, phoneNumber }) {
-  // Ex : Plugge sur API sanctionnlist / PEP réel
+  // Simulé : email gouvernemental = PEP
   if (
     user.email === 'ministere@etat.gov' ||
     (toEmail && toEmail.endsWith('@etat.gov'))
   ) {
     return { sanctioned: true, reason: 'Utilisateur/personne politiquement exposée (PEP)' };
   }
-  // Ajoute ici appel API réelle (DowJones, World-Check, etc.)
+  // Ajoute ici appel API réelle (DowJones, World-Check, OFAC...)
   return { sanctioned: false };
 }
 
-// (Facultatif) ML scoring plug
+/**
+ * (Facultatif) Scoring IA, plug ton moteur ML ici.
+ */
 async function getMLScore(payload, user) {
-  // Branche ici un endpoint IA si besoin
+  // Ex : au-dessus d’un seuil, on simule du risque
   if (payload.amount > 7000) return 0.92;
+  // À brancher avec une vraie API si besoin
   return Math.random() * 0.4;
+}
+
+// (Facultatif) Exemple de check KYB distant (à implémenter selon ta logique)
+async function getBusinessKYBStatus(businessId) {
+  // Branche une requête à ton système KYB si existant
+  // Ex : trouve la fiche entreprise, vérifie status = "validé"
+  // Simulé ici :
+  return "validé"; // ou "en_attente", "refusé", etc.
 }
 
 module.exports = {
   logTransaction,
   getUserTransactionsStats,
   getPEPOrSanctionedStatus,
-  getMLScore
+  getMLScore,
+  getBusinessKYBStatus,
 };
