@@ -7,11 +7,12 @@ const config = require('./config');
 const morgan = require('morgan');
 const paymentRoutes = require('../routes/payment');
 const amlRoutes = require('../routes/aml');
-const transactionRoutes = require('../routes/transactions'); // ← ajoute si tu as transactions
+const transactionRoutes = require('../routes/transactions');
 const { authMiddleware } = require('./middlewares/auth');
 const { rateLimiter } = require('./middlewares/rateLimit');
 const { loggerMiddleware } = require('./middlewares/logger');
-const logger = require('./logger'); // WINSTON
+const logger = require('./logger');
+const mongoose = require('mongoose'); // Pour readyState check
 
 const app = express();
 
@@ -42,17 +43,48 @@ app.use(loggerMiddleware);
 app.use(rateLimiter);
 app.use(authMiddleware);
 
+// 4bis️⃣ Sécurité : refuse toute requête si Mongo n’est pas prêt
+app.use((req, res, next) => {
+  if (mongoose.connection.readyState !== 1) {
+    logger.error('[MONGO] Requête refusée, MongoDB non connecté !');
+    return res.status(500).json({ success: false, error: 'MongoDB non connecté' });
+  }
+  next();
+});
+
 // 5️⃣ Routing métier
 app.use('/api/v1/pay', paymentRoutes);
-app.use('/api/v1/transactions', transactionRoutes); // ← branche tes routes transactions ici
+app.use('/api/v1/transactions', transactionRoutes);
 app.use('/api/v1/aml', amlRoutes);
 
-// 6️⃣ 404 global (API REST style)
+// 6️⃣ Endpoint de debug pour écriture transaction Gateway
+app.post('/api/v1/transactions/debug-write', async (req, res) => {
+  try {
+    const Transaction = require('../src/models/Transaction');
+    console.log('[DEBUG][GATEWAY] mongoose.connection.readyState:', mongoose.connection.readyState); // 1 = connecté
+    console.log('[DEBUG][GATEWAY] Transaction model db:', Transaction.db?.name);
+    const tx = await Transaction.create({
+      userId: new mongoose.Types.ObjectId(),
+      provider: 'paynoval',
+      amount: Math.floor(Math.random() * 10000) + 1,
+      status: 'pending',
+      reference: 'debug-manuel-' + Date.now(),
+      meta: { debug: true },
+    });
+    console.log('[DEBUG][GATEWAY] Transaction log créée dans la gateway:', tx._id);
+    return res.json({ success: true, tx });
+  } catch (err) {
+    console.error('[ERROR][GATEWAY] Echec écriture transaction dans gateway:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 7️⃣ 404 global (API REST style)
 app.use((req, res, next) => {
   res.status(404).json({ success: false, error: 'Ressource non trouvée' });
 });
 
-// 7️⃣ Gestion d’erreur globale (jamais de stack côté client)
+// 8️⃣ Gestion d’erreur globale (jamais de stack côté client)
 app.use((err, req, res, next) => {
   logger.error('[API ERROR]', {
     message: err.message,
@@ -63,7 +95,7 @@ app.use((err, req, res, next) => {
     ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
     userAgent: req.headers['user-agent'],
     user: req.user?.email,
-    body: req.body, // ou maskSensitive(req.body) si tu veux masquer ici aussi
+    body: req.body,
   });
   res.status(err.status || 500).json({
     success: false,

@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 
 const TransactionSchema = new mongoose.Schema({
+  
   userId:         { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   provider:       { type: String, required: true, enum: ['paynoval', 'stripe', 'bank', 'mobilemoney'] },
   amount:         { type: Number, required: true },
@@ -21,6 +22,7 @@ const TransactionSchema = new mongoose.Schema({
   createdAt:      { type: Date, default: Date.now },
   updatedAt:      { type: Date, default: Date.now }
 });
+
 
 // Index performant pour audit et requêtes multi-provider
 TransactionSchema.index({ provider: 1, status: 1, createdAt: -1 });

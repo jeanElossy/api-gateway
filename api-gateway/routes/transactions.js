@@ -152,6 +152,9 @@ router.post(
         createdAt: now
       });
 
+      console.log('[DEBUG][GATEWAY] mongoose.connection.readyState:', require('mongoose').connection.readyState);
+      console.log('[DEBUG][GATEWAY] Transaction.model db:', Transaction.db?.name);
+
       // Stockage transaction LOG dans la base Gateway
       try {
         await Transaction.create({
@@ -170,6 +173,9 @@ router.post(
           createdAt: now,
           updatedAt: now
         });
+        
+        console.log('[DEBUG][GATEWAY] Transaction créée dans la gateway:', tx._id);
+
       } catch (e) {
         console.error('[GATEWAY] ERREUR à la création du log Transaction:', e);
       }
@@ -209,6 +215,7 @@ router.post(
           createdAt: now,
           updatedAt: now
         });
+        console.log('[DEBUG][GATEWAY] Transaction créée dans la gateway:', tx._id);
       } catch (e) {
         console.error('[GATEWAY] ERREUR à la création du log Transaction (erreur):', e);
       }
@@ -403,5 +410,7 @@ router.post(
     }
   }
 );
+
+
 
 module.exports = router;
