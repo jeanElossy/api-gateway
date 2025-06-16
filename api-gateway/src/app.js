@@ -43,9 +43,9 @@ app.use(rateLimiter);
 app.use(authMiddleware);
 
 // 5️⃣ Routing métier
-app.use('/api/pay', paymentRoutes);
-app.use('/api/transactions', transactionRoutes); // ← branche tes routes transactions ici
-app.use('/api/aml', amlRoutes);
+app.use('/api/v1/pay', paymentRoutes);
+app.use('/api/v1/transactions', transactionRoutes); // ← branche tes routes transactions ici
+app.use('/api/v1/aml', amlRoutes);
 
 // 6️⃣ 404 global (API REST style)
 app.use((req, res, next) => {
