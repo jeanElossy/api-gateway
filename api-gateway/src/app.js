@@ -16,24 +16,6 @@ const mongoose = require('mongoose');
 
 const app = express(); // ← D’ABORD tu déclares app ici !
 
-// (Optionnel DEBUG) : endpoint test direct (à retirer ensuite)
-// const Transaction = require('./models/Transaction');
-// app.post('/api/v1/transactions/debug-write', async (req, res) => {
-//   try {
-//     const tx = await Transaction.create({
-//       userId: new mongoose.Types.ObjectId(),
-//       provider: 'paynoval',
-//       amount: Math.floor(Math.random() * 10000) + 1,
-//       status: 'pending',
-//       reference: 'debug-' + Date.now(),
-//       meta: { debug: true },
-//     });
-//     return res.json({ success: true, tx });
-//   } catch (err) {
-//     return res.status(500).json({ success: false, error: err.message });
-//   }
-// });
-
 app.use(helmet({
   crossOriginResourcePolicy: false,
 }));

@@ -104,6 +104,44 @@ const cancelTxSchema = Joi.object({
   transactionId: Joi.string().required(),
 });
 
+
+const PROVIDER_TO_MICROSERVICE = {
+  paynoval: config.microservices.paynoval,
+  stripe: config.microservices.stripe,
+  bank: config.microservices.bank,
+  mobilemoney: config.microservices.mobilemoney,
+};
+
+// GET /api/v1/transactions?provider=paynoval
+router.get('/', async (req, res) => {
+  try {
+    // Récupérer le provider (default = paynoval)
+    const provider = req.query.provider || 'paynoval';
+    const targetService = PROVIDER_TO_MICROSERVICE[provider];
+
+    if (!targetService) {
+      return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
+    }
+
+    // Proxy vers le microservice
+    const response = await axios.get(`${targetService}/transactions`, {
+      headers: {
+        'Authorization': req.headers.authorization,
+        'x-internal-token': config.internalToken,
+      },
+      timeout: 15000,
+    });
+
+    res.status(response.status).json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 502;
+    const error = err.response?.data?.error || 'Erreur lors du proxy GET transactions';
+    logger.error('[Gateway][TX] Erreur GET transactions:', { status, error });
+    res.status(status).json({ success: false, error });
+  }
+});
+
+
 // ---------------------- INITIATE ----------------------
 router.post(
   '/initiate',
@@ -416,5 +454,8 @@ router.post(
     }
   }
 );
+
+
+
 
 module.exports = router;
