@@ -1,3 +1,5 @@
+// routes/transactions.js
+
 const express = require('express');
 const Joi = require('joi');
 const axios = require('axios');
@@ -6,6 +8,8 @@ const validate = require('../src/middlewares/validate');
 const amlMiddleware = require('../src/middlewares/aml');
 const Transaction = require('../src/models/Transaction');
 const AMLLog = require('../src/models/AMLLog');
+const logger = require('../src/logger');
+
 const router = express.Router();
 
 function cleanSensitiveMeta(meta) {
@@ -17,6 +21,7 @@ function cleanSensitiveMeta(meta) {
 }
 
 // ---------------------- SCHEMAS VALIDATION ------------------------
+
 const baseSchema = {
   provider: Joi.string().valid('paynoval', 'stripe', 'bank', 'mobilemoney').required(),
   amount: Joi.number().min(1).max(1000000).required(),
@@ -120,6 +125,10 @@ router.post(
     }
 
     const userId = req.user?._id || null;
+    if (!userId) {
+      logger.warn('[TX] Impossible d’enregistrer la transaction, userId manquant');
+      return res.status(401).json({ error: 'Authentification requise' });
+    }
     const now = new Date();
     const amlFlag = req.amlFlag || false;
     const amlReason = req.amlReason || '';
@@ -152,12 +161,11 @@ router.post(
         createdAt: now
       });
 
-      console.log('[DEBUG][GATEWAY] mongoose.connection.readyState:', require('mongoose').connection.readyState);
-      console.log('[DEBUG][GATEWAY] Transaction.model db:', Transaction.db?.name);
-
-      // Stockage transaction LOG dans la base Gateway
+      logger.info('[TX] Tentative de création log Transaction dans gateway', {
+        userId, provider, amount: req.body.amount, status: statusResult, reference
+      });
       try {
-        await Transaction.create({
+        const tx = await Transaction.create({
           userId,
           provider: req.body.provider,
           amount: req.body.amount,
@@ -173,11 +181,9 @@ router.post(
           createdAt: now,
           updatedAt: now
         });
-        
-        console.log('[DEBUG][GATEWAY] Transaction créée dans la gateway:', tx._id);
-
+        logger.info('[TX] Transaction log créée dans la gateway:', tx._id);
       } catch (e) {
-        console.error('[GATEWAY] ERREUR à la création du log Transaction:', e);
+        logger.error('[GATEWAY] ERREUR à la création du log Transaction:', e);
       }
 
       return res.status(response.status).json(result);
@@ -199,7 +205,7 @@ router.post(
       });
 
       try {
-        await Transaction.create({
+        const tx = await Transaction.create({
           userId,
           provider: req.body.provider,
           amount: req.body.amount,
@@ -215,9 +221,9 @@ router.post(
           createdAt: now,
           updatedAt: now
         });
-        console.log('[DEBUG][GATEWAY] Transaction créée dans la gateway:', tx._id);
+        logger.info('[TX] Transaction log créée (failed) dans la gateway:', tx._id);
       } catch (e) {
-        console.error('[GATEWAY] ERREUR à la création du log Transaction (erreur):', e);
+        logger.error('[GATEWAY] ERREUR à la création du log Transaction (erreur provider):', e);
       }
 
       return res.status(status).json({ error });
@@ -410,6 +416,5 @@ router.post(
     }
   }
 );
-
 
 module.exports = router;
