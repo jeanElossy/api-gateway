@@ -2,7 +2,7 @@
 
 const express = require('express');
 const router = express.Router();
-const validatePayment = require('../middlewares/validatePayment');
+const validatePayment = require('../src/middlewares/validatePayment');
 const amlMiddleware = require('../src/middlewares/aml');
 const { handlePayment } = require('../controllers/paymentController');
 

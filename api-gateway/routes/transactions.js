@@ -2,7 +2,7 @@
 
 const express = require('express');
 const amlMiddleware = require('../src/middlewares/aml');
-const validateTransaction = require('../middlewares/validateTransaction');
+const validateTransaction = require('../src/middlewares/validateTransaction');
 const controller = require('../controllers/transactionsController');
 
 const router = express.Router();
