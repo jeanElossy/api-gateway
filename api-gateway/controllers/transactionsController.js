@@ -27,6 +27,8 @@ function cleanSensitiveMeta(meta) {
 exports.listTransactions = async (req, res) => {
   const provider = req.query.provider || 'paynoval';
   const targetService = PROVIDER_TO_SERVICE[provider];
+  console.log(PROVIDER_TO_SERVICE)
+  console.log(targetService)
   if (!targetService) {
     return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
   }
