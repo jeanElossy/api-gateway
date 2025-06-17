@@ -1,12 +1,9 @@
-// controllers/transactionsController.js
-
 const axios = require('axios');
 const config = require('../src/config');
 const logger = require('../src/logger');
 const Transaction = require('../src/models/Transaction');
 const AMLLog = require('../src/models/AMLLog');
 
-// Mapping centralisé destination (provider de réception) → microservice cible
 const PROVIDER_TO_SERVICE = {
   paynoval:     config.microservices.paynoval,
   stripe:       config.microservices.stripe,
@@ -17,7 +14,6 @@ const PROVIDER_TO_SERVICE = {
   cashin:       config.microservices.cashin,
   cashout:      config.microservices.cashout,
   stripe2momo:  config.microservices.stripe2momo,
-  // Ajoute ici tout nouveau provider
 };
 
 function cleanSensitiveMeta(meta) {
@@ -52,7 +48,6 @@ exports.listTransactions = async (req, res) => {
 };
 
 exports.initiateTransaction = async (req, res) => {
-  // Nouvelle logique : utilise destination/routedProvider comme provider cible microservice
   const targetProvider = req.routedProvider || req.body.destination || req.body.provider;
   const targetUrl = PROVIDER_TO_SERVICE[targetProvider] && PROVIDER_TO_SERVICE[targetProvider] + '/transactions/initiate';
   if (!targetUrl) {
@@ -142,6 +137,8 @@ exports.initiateTransaction = async (req, res) => {
     return res.status(status).json({ error });
   }
 };
+
+
 
 exports.confirmTransaction = async (req, res) => {
   // Utilise toujours la destination comme microservice cible

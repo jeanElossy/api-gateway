@@ -1,10 +1,7 @@
-// controllers/paymentController.js
-
 const axios = require('axios');
 const config = require('../src/config');
 const logger = require('../src/logger');
 
-// Masque les champs sensibles pour les logs
 function cleanSensitiveMeta(meta) {
   const clone = { ...meta };
   if (clone.cardNumber) clone.cardNumber = '****' + clone.cardNumber.slice(-4);
@@ -13,19 +10,15 @@ function cleanSensitiveMeta(meta) {
   return clone;
 }
 
-// Mapping provider → endpoint cible
 const PROVIDER_TO_ENDPOINT = {
   paynoval:    `${config.microservices.paynoval}/pay`,
   stripe:      `${config.microservices.stripe}/pay`,
   bank:        `${config.microservices.bank}/pay`,
   mobilemoney: `${config.microservices.mobilemoney}/pay`,
-  visa_direct: config.microservices.visa_direct ? `${config.microservices.visa_direct}/pay` : undefined, // <-- clé fixée pour cohérence
+  visa_direct: config.microservices.visa_direct ? `${config.microservices.visa_direct}/pay` : undefined,
   stripe2momo: config.microservices.orchestrator ? `${config.microservices.orchestrator}/stripe2momo` : undefined,
 };
 
-/**
- * Résout la clé provider à utiliser, selon la logique front (provider ou destination)
- */
 function resolveProviderKey(body) {
   if (body.provider && PROVIDER_TO_ENDPOINT[body.provider]) return body.provider;
   if (body.destination && PROVIDER_TO_ENDPOINT[body.destination]) return body.destination;
