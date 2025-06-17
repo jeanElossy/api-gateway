@@ -1,10 +1,7 @@
-// src/config/index.js
-
 const Joi = require('joi');
 const path = require('path');
 
 const schema = Joi.object({
-  // Serveur
   NODE_ENV:       Joi.string().valid('development', 'production', 'test').default('development'),
   PORT:           Joi.number().integer().min(1).default(4000),
 
@@ -17,6 +14,10 @@ const schema = Joi.object({
   SERVICE_BANK_URL:         Joi.string().uri().required(),
   SERVICE_MOBILEMONEY_URL:  Joi.string().uri().required(),
   SERVICE_STRIPE_URL:       Joi.string().uri().required(),
+  SERVICE_VISA_DIRECT_URL:  Joi.string().uri().required(),
+  SERVICE_STRIPE2MOMO_URL:  Joi.string().uri().required(),
+  SERVICE_CASHIN_URL:       Joi.string().uri().required(),
+  SERVICE_CASHOUT_URL:      Joi.string().uri().required(),
 
   // CORS
   CORS_ORIGINS:  Joi.string().default('*'),
@@ -64,6 +65,10 @@ module.exports = {
     bank:        env.SERVICE_BANK_URL,
     mobilemoney: env.SERVICE_MOBILEMONEY_URL,
     stripe:      env.SERVICE_STRIPE_URL,
+    visa_direct: env.SERVICE_VISA_DIRECT_URL,
+    stripe2momo: env.SERVICE_STRIPE2MOMO_URL,
+    cashin:      env.SERVICE_CASHIN_URL,
+    cashout:     env.SERVICE_CASHOUT_URL,
   },
 
   cors: {
