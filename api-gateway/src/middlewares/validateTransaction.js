@@ -1,7 +1,7 @@
 // middlewares/validateTransaction.js
 
 const Joi = require('joi');
-const logger = require('../src/logger');
+const logger = require('../logger');
 
 // Schéma de base utilisé dans tous les providers
 const baseSchema = {
