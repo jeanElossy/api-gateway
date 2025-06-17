@@ -2,7 +2,7 @@
 
 const axios = require('axios');
 const config = require('../src/config');
-const logger = require('../src/logger');
+const logger = require('../logger');
 
 // Masque les champs sensibles pour les logs
 function cleanSensitiveMeta(meta) {
