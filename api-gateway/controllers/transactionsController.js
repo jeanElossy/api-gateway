@@ -1,6 +1,6 @@
 const axios = require('axios');
 const config = require('../src/config');
-const logger = require('../logger');
+const logger = require('../src/logger');
 const Transaction = require('../src/models/Transaction');
 const AMLLog = require('../src/models/AMLLog');
 
