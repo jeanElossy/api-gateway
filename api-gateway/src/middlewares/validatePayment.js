@@ -1,7 +1,7 @@
 // middlewares/validatePayment.js
 
 const Joi = require('joi');
-const logger = require('../src/logger');
+const logger = require('../logger');
 
 // Schémas par provider
 const paynovalPaymentSchema = Joi.object({
