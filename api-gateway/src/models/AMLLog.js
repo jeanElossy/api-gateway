@@ -1,3 +1,4 @@
+// src/models/AMLLog.js
 const mongoose = require('mongoose');
 
 const AMLLogSchema = new mongoose.Schema({
@@ -6,12 +7,12 @@ const AMLLogSchema = new mongoose.Schema({
   provider:      { type: String, required: true },
   amount:        { type: Number, required: true },
   toEmail:       { type: String },
-  details:       { type: Object }, // snapshot de la req, jamais de données bancaires sensibles
+  details:       { type: Object },
   flagged:       { type: Boolean, default: false },
   flagReason:    { type: String, default: '' },
   reviewed:      { type: Boolean, default: false },
-  reviewedBy:    { type: String },    // email/adminId de l'analyste
-  reviewComment: { type: String },    // note manuelle compliance
+  reviewedBy:    { type: String },
+  reviewComment: { type: String },
   createdAt:     { type: Date, default: Date.now }
 });
 
