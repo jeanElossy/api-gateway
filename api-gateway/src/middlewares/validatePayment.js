@@ -91,18 +91,31 @@ const SCHEMAS = {
   stripe2momo: stripe2momoSchema,
 };
 
+/**
+ * Retourne le provider à valider :
+ * - Si `provider` existe dans le body, le prend (API classique)
+ * - Sinon si `destination` existe et correspond à un provider, utilise destination (API Gateway nouvelle logique)
+ */
+function getProviderKey(body) {
+  if (body.provider && SCHEMAS[body.provider]) return body.provider;
+  if (body.destination && SCHEMAS[body.destination]) return body.destination;
+  return null;
+}
+
 function validatePayment(req, res, next) {
-  const schema = SCHEMAS[req.body.provider];
-  if (!schema) {
+  const providerKey = getProviderKey(req.body);
+  if (!providerKey) {
     logger.warn('[validatePayment] Provider non supporté', {
       provider: req.body.provider,
+      destination: req.body.destination,
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
     });
     return res.status(400).json({ error: 'Provider non supporté.' });
   }
+  const schema = SCHEMAS[providerKey];
   const { error } = schema.validate(req.body, { abortEarly: false, stripUnknown: true });
   if (error) {
-    logger.warn(`[validatePayment][${req.body.provider}] Validation failed`, {
+    logger.warn(`[validatePayment][${providerKey}] Validation failed`, {
       details: error.details.map(d => d.message),
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
       email: req.body.toEmail || null,
@@ -113,6 +126,8 @@ function validatePayment(req, res, next) {
       details: error.details.map(d => d.message)
     });
   }
+  // Pour usage ultérieur dans les controllers (routing cible dynamique)
+  req.routedProvider = providerKey;
   next();
 }
 

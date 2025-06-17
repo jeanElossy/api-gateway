@@ -1,26 +1,28 @@
+// controllers/transactionsController.js
+
 const axios = require('axios');
 const config = require('../src/config');
 const logger = require('../src/logger');
 const Transaction = require('../src/models/Transaction');
 const AMLLog = require('../src/models/AMLLog');
 
-// — Ajoute ici tous tes providers : clé logique = nom provider, valeur = URL microservice
+// Mapping centralisé destination (provider de réception) → microservice cible
 const PROVIDER_TO_SERVICE = {
   paynoval:     config.microservices.paynoval,
   stripe:       config.microservices.stripe,
   bank:         config.microservices.bank,
   mobilemoney:  config.microservices.mobilemoney,
+  visa_direct:  config.microservices.visa_direct,
   visadirect:   config.microservices.visadirect,
-  visa_direct:  config.microservices.visa_direct,      // <- ajouté ici
   cashin:       config.microservices.cashin,
   cashout:      config.microservices.cashout,
-  stripe2momo:  config.microservices.stripe2momo,      // <- ajouté ici
-  // ...etc (ajoute autant que tu veux !)
+  stripe2momo:  config.microservices.stripe2momo,
+  // Ajoute ici tout nouveau provider
 };
 
 function cleanSensitiveMeta(meta) {
   const clone = { ...meta };
-  if (clone.cardNumber) clone.cardNumber = '****' + clone.cardNumber.slice(-4);
+  if (clone.cardNumber) clone.cardNumber = '****' + String(clone.cardNumber).slice(-4);
   if (clone.cvc) delete clone.cvc;
   if (clone.securityCode) delete clone.securityCode;
   return clone;
@@ -50,15 +52,18 @@ exports.listTransactions = async (req, res) => {
 };
 
 exports.initiateTransaction = async (req, res) => {
-  const { provider } = req.body;
-  const targetUrl = PROVIDER_TO_SERVICE[provider] && PROVIDER_TO_SERVICE[provider] + '/transactions/initiate';
+  // Nouvelle logique : utilise destination/routedProvider comme provider cible microservice
+  const targetProvider = req.routedProvider || req.body.destination || req.body.provider;
+  const targetUrl = PROVIDER_TO_SERVICE[targetProvider] && PROVIDER_TO_SERVICE[targetProvider] + '/transactions/initiate';
   if (!targetUrl) {
-    return res.status(400).json({ error: 'Provider inconnu.' });
+    return res.status(400).json({ error: 'Provider (destination) inconnu.' });
   }
+
   const userId = req.user?._id || null;
   const now = new Date();
   let reference = null;
   let statusResult = 'pending';
+
   try {
     const response = await axios.post(targetUrl, req.body, {
       headers: {
@@ -74,7 +79,7 @@ exports.initiateTransaction = async (req, res) => {
     await AMLLog.create({
       userId,
       type: 'initiate',
-      provider,
+      provider: targetProvider,
       amount: req.body.amount,
       toEmail: req.body.toEmail || '',
       details: cleanSensitiveMeta(req.body),
@@ -85,7 +90,7 @@ exports.initiateTransaction = async (req, res) => {
 
     await Transaction.create({
       userId,
-      provider,
+      provider: targetProvider,
       amount: req.body.amount,
       status: statusResult,
       toEmail: req.body.toEmail || undefined,
@@ -108,7 +113,7 @@ exports.initiateTransaction = async (req, res) => {
     await AMLLog.create({
       userId,
       type: 'initiate',
-      provider,
+      provider: targetProvider,
       amount: req.body.amount,
       toEmail: req.body.toEmail || '',
       details: cleanSensitiveMeta({ ...req.body, error }),
@@ -119,7 +124,7 @@ exports.initiateTransaction = async (req, res) => {
 
     await Transaction.create({
       userId,
-      provider,
+      provider: targetProvider,
       amount: req.body.amount,
       status: 'failed',
       toEmail: req.body.toEmail || undefined,
@@ -139,10 +144,12 @@ exports.initiateTransaction = async (req, res) => {
 };
 
 exports.confirmTransaction = async (req, res) => {
-  const { provider, transactionId } = req.body;
+  // Utilise toujours la destination comme microservice cible
+  const provider = req.routedProvider || req.body.destination || req.body.provider;
+  const { transactionId } = req.body;
   const targetUrl = PROVIDER_TO_SERVICE[provider] && PROVIDER_TO_SERVICE[provider] + '/transactions/confirm';
   if (!targetUrl) {
-    return res.status(400).json({ error: 'Provider inconnu.' });
+    return res.status(400).json({ error: 'Provider (destination) inconnu.' });
   }
   const userId = req.user?._id || null;
   const now = new Date();
@@ -213,10 +220,11 @@ exports.confirmTransaction = async (req, res) => {
 };
 
 exports.cancelTransaction = async (req, res) => {
-  const { provider, transactionId } = req.body;
+  const provider = req.routedProvider || req.body.destination || req.body.provider;
+  const { transactionId } = req.body;
   const targetUrl = PROVIDER_TO_SERVICE[provider] && PROVIDER_TO_SERVICE[provider] + '/transactions/cancel';
   if (!targetUrl) {
-    return res.status(400).json({ error: 'Provider inconnu.' });
+    return res.status(400).json({ error: 'Provider (destination) inconnu.' });
   }
   const userId = req.user?._id || null;
   const now = new Date();

@@ -2,32 +2,27 @@
 
 const Joi = require('joi');
 const logger = require('../logger');
+const allowedFlows = require('../tools/allowedFlows'); // <== DOIT EXISTER (voir explications après)
 
-// Schéma de base utilisé dans tous les providers
 const baseSchema = {
-  provider: Joi.string().valid(
-    'paynoval',
-    'stripe',
-    'bank',
-    'mobilemoney',
-    'visa_direct',
-    'stripe2momo',
-    'cashin',
-    'cashout'
+  funds: Joi.string().valid(
+    'paynoval', 'stripe', 'bank', 'mobilemoney', 'visa_direct', 'stripe2momo'
+  ).required(),
+  destination: Joi.string().valid(
+    'paynoval', 'stripe', 'bank', 'mobilemoney', 'visa_direct', 'stripe2momo'
   ).required(),
   amount: Joi.number().min(1).max(1000000).required(),
+  provider: Joi.string().optional(), // ce champ n’est plus utilisé pour router, mais reste accepté
+  action: Joi.string().valid('send', 'deposit', 'withdraw').optional()
 };
 
-// Définition des schémas pour chaque provider/action
+// --- Schémas d’initiation transaction selon destination ---
 const initiateSchemas = {
   paynoval: Joi.object({
     ...baseSchema,
     toEmail: Joi.string().email().required(),
     message: Joi.string().max(256).optional(),
     question: Joi.string().max(128).optional(),
-    funds: Joi.string().max(64).optional(),
-    country: Joi.string().max(64).optional(),
-    destination: Joi.string().max(128).optional(),
     recipientInfo: Joi.object().unknown(true).optional(),
     exchangeRate: Joi.number().min(0).optional(),
     transactionFees: Joi.number().min(0).optional(),
@@ -62,7 +57,6 @@ const initiateSchemas = {
     country: Joi.string().max(32).required(),
     swift: Joi.string().pattern(/^[A-Z0-9]{8,11}$/).optional(),
   }),
-  // ---- NOUVEAUX PROVIDERS ----
   visa_direct: Joi.object({
     ...baseSchema,
     cardNumber: Joi.string().creditCard().required(),
@@ -81,24 +75,12 @@ const initiateSchemas = {
     country: Joi.string().max(32).required(),
     stripeRef: Joi.string().max(128).optional(),
   }),
-  cashin: Joi.object({
-    ...baseSchema,
-    source: Joi.string().max(64).required(),
-    method: Joi.string().valid('momo', 'bank', 'stripe', 'visa').required(),
-    ref: Joi.string().max(128).optional(),
-  }),
-  cashout: Joi.object({
-    ...baseSchema,
-    destination: Joi.string().max(128).required(),
-    method: Joi.string().valid('momo', 'bank', 'stripe', 'visa').required(),
-    ref: Joi.string().max(128).optional(),
-  }),
+  // Ajoute cashin/cashout si besoin
 };
 
 const confirmSchema = Joi.object({
   provider: Joi.string().valid(
-    'paynoval', 'stripe', 'bank', 'mobilemoney',
-    'visa_direct', 'stripe2momo', 'cashin', 'cashout'
+    'paynoval', 'stripe', 'bank', 'mobilemoney', 'visa_direct', 'stripe2momo'
   ).required(),
   transactionId: Joi.string().required(),
   code: Joi.string().optional(),
@@ -106,34 +88,37 @@ const confirmSchema = Joi.object({
 
 const cancelSchema = Joi.object({
   provider: Joi.string().valid(
-    'paynoval', 'stripe', 'bank', 'mobilemoney',
-    'visa_direct', 'stripe2momo', 'cashin', 'cashout'
+    'paynoval', 'stripe', 'bank', 'mobilemoney', 'visa_direct', 'stripe2momo'
   ).required(),
   transactionId: Joi.string().required(),
 });
 
-// Middleware principal de validation
+function getDestinationProvider(body) {
+  // Détermine la destination réelle à partir de body.destination
+  // (Pour l’instant, c’est une correspondance 1:1)
+  return body.destination;
+}
+
 function validateTransaction(action) {
   return function (req, res, next) {
-    let schema;
-    if (action === 'initiate') {
-      schema = initiateSchemas[req.body.provider];
-    } else if (action === 'confirm') {
-      schema = confirmSchema;
-    } else if (action === 'cancel') {
-      schema = cancelSchema;
-    }
+    let dest = getDestinationProvider(req.body);
+    let schema = initiateSchemas[dest];
+
+    if (action === 'confirm') schema = confirmSchema;
+    if (action === 'cancel') schema = cancelSchema;
+
     if (!schema) {
-      logger.warn('[validateTransaction] Provider ou action non supporté', {
-        provider: req.body.provider,
+      logger.warn('[validateTransaction] Destination/action non supporté', {
+        destination: dest,
         action,
         ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
       });
       return res.status(400).json({ error: 'Provider ou action non supporté.' });
     }
+
     const { error } = schema.validate(req.body, { abortEarly: false, stripUnknown: true, convert: true });
     if (error) {
-      logger.warn(`[validateTransaction][${req.body.provider}] Validation failed (${action})`, {
+      logger.warn(`[validateTransaction][${dest}] Validation failed (${action})`, {
         details: error.details.map(d => d.message),
         ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
         email: req.body.toEmail || null,
@@ -144,6 +129,26 @@ function validateTransaction(action) {
         details: error.details.map(d => d.message)
       });
     }
+
+    // Vérification des flux autorisés (funds/destination)
+    if (action === 'initiate') {
+      const match = allowedFlows.find(f =>
+        f.funds === req.body.funds &&
+        f.destination === req.body.destination &&
+        (!f.action || f.action === (req.body.action || 'send'))
+      );
+      if (!match) {
+        logger.warn(`[validateTransaction] Flux funds/destination non autorisé`, {
+          funds: req.body.funds,
+          destination: req.body.destination,
+          action: req.body.action,
+          ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+        });
+        return res.status(400).json({ error: "Ce flux funds/destination n'est pas autorisé." });
+      }
+      req.routedProvider = req.body.destination; // Tu peux aussi utiliser match.provider si tu veux une autre correspondance
+    }
+
     next();
   };
 }

@@ -7,10 +7,10 @@ const controller = require('../controllers/transactionsController');
 
 const router = express.Router();
 
-// Liste des transactions pour un provider (par défaut paynoval)
+// Récupère toutes les transactions pour un provider (ex: ?provider=paynoval)
 router.get('/', controller.listTransactions);
 
-// INITIATE : Validation + AML + Controller
+// INITIATE : Validation des données + AML + Contrôleur
 router.post(
   '/initiate',
   validateTransaction('initiate'),
@@ -18,14 +18,14 @@ router.post(
   controller.initiateTransaction
 );
 
-// CONFIRM : Validation + Controller
+// CONFIRM : Validation des données + Contrôleur
 router.post(
   '/confirm',
   validateTransaction('confirm'),
   controller.confirmTransaction
 );
 
-// CANCEL : Validation + Controller
+// CANCEL : Validation des données + Contrôleur
 router.post(
   '/cancel',
   validateTransaction('cancel'),

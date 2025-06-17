@@ -19,17 +19,27 @@ const PROVIDER_TO_ENDPOINT = {
   stripe:      `${config.microservices.stripe}/pay`,
   bank:        `${config.microservices.bank}/pay`,
   mobilemoney: `${config.microservices.mobilemoney}/pay`,
-  visa_direct: config.microservices.visaDirect ? `${config.microservices.visaDirect}/pay` : undefined,
+  visa_direct: config.microservices.visa_direct ? `${config.microservices.visa_direct}/pay` : undefined, // <-- clé fixée pour cohérence
   stripe2momo: config.microservices.orchestrator ? `${config.microservices.orchestrator}/stripe2momo` : undefined,
 };
 
+/**
+ * Résout la clé provider à utiliser, selon la logique front (provider ou destination)
+ */
+function resolveProviderKey(body) {
+  if (body.provider && PROVIDER_TO_ENDPOINT[body.provider]) return body.provider;
+  if (body.destination && PROVIDER_TO_ENDPOINT[body.destination]) return body.destination;
+  return null;
+}
+
 exports.handlePayment = async (req, res) => {
-  const { provider } = req.body;
-  const targetUrl = PROVIDER_TO_ENDPOINT[provider];
+  const providerKey = resolveProviderKey(req.body);
+  const targetUrl = providerKey ? PROVIDER_TO_ENDPOINT[providerKey] : null;
 
   if (!targetUrl) {
     logger.error(`[PAYMENT] Provider non supporté demandé`, {
-      provider,
+      provider: req.body.provider,
+      destination: req.body.destination,
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
     });
     return res.status(400).json({ error: 'Provider non supporté.' });
@@ -47,8 +57,8 @@ exports.handlePayment = async (req, res) => {
         timeout: 15000,
       }
     );
-    logger.info(`[PAYMENT→${provider}] Paiement réussi`, {
-      provider,
+    logger.info(`[PAYMENT→${providerKey}] Paiement réussi`, {
+      provider: providerKey,
       amount: req.body.amount,
       to: req.body.toEmail || req.body.phoneNumber || req.body.iban || req.body.cardNumber,
       status: response.status,
@@ -60,21 +70,21 @@ exports.handlePayment = async (req, res) => {
 
   } catch (err) {
     if (err.response) {
-      logger.error(`[PAYMENT→${provider}] Échec API`, {
-        provider,
+      logger.error(`[PAYMENT→${providerKey}] Échec API`, {
+        provider: providerKey,
         status: err.response.status,
         data: err.response.data,
         ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
       });
       return res.status(err.response.status).json({
-        error: err.response.data?.error || `Erreur interne ${provider}`
+        error: err.response.data?.error || `Erreur interne ${providerKey}`
       });
     } else {
-      logger.error(`[PAYMENT→${provider}] Axios error: ${err.message}`, {
-        provider,
+      logger.error(`[PAYMENT→${providerKey}] Axios error: ${err.message}`, {
+        provider: providerKey,
         ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
       });
-      return res.status(502).json({ error: `Service ${provider} temporairement indisponible.` });
+      return res.status(502).json({ error: `Service ${providerKey} temporairement indisponible.` });
     }
   }
 };
