@@ -9,7 +9,6 @@ const {
 const blacklist = require('../aml/blacklist.json');
 const { sendFraudAlert } = require('../utils/alert'); 
 
-
 // Plafonds AML dynamiques par provider & devise
 const AML_LIMITS = {
   paynoval: {
@@ -42,12 +41,9 @@ const AML_LIMITS = {
   }
 };
 
-
-// Pays à risque et devises autorisées Stripe
 const RISKY_COUNTRIES = ['IR', 'KP', 'SD', 'SY', 'CU', 'RU', 'AF', 'SO', 'YE', 'VE', 'LY'];
 const ALLOWED_STRIPE_CURRENCIES = ['EUR', 'USD'];
 
-// Utilitaires devise (à placer où tu veux ou importe-les)
 const getCurrencyCodeByCountry = (country) => {
   const normalized = (country || "")
     .replace(/^[^\w]+/, "")
@@ -55,7 +51,6 @@ const getCurrencyCodeByCountry = (country) => {
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .trim();
-
   switch (normalized) {
     case "cote d'ivoire":
     case "burkina faso":
@@ -140,7 +135,6 @@ module.exports = async function amlMiddleware(req, res, next) {
         return res.status(403).json({ error: "KYB incomplet, transaction refusée." });
       }
     } else {
-      // Particulier : KYC niveau 2 minimum
       if (!user.kycLevel || user.kycLevel < 2) {
         logger.warn('[AML] KYC insuffisant', { provider, user: user.email });
         await logTransaction({
@@ -158,7 +152,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       }
     }
 
-    // 3️⃣ Check PEP/sanction (OFAC, etc)
+    // 3️⃣ Check PEP/sanction
     const pepStatus = await getPEPOrSanctionedStatus(user, { toEmail, iban, phoneNumber });
     if (pepStatus && pepStatus.sanctioned) {
       logger.error('[AML] PEP/Sanction detected', { user: user.email, reason: pepStatus.reason });
@@ -219,23 +213,43 @@ module.exports = async function amlMiddleware(req, res, next) {
     const currencyUsed = currency || getCurrencyCodeByCountry(country);
     const limit = providerLimits[currencyUsed] || 10000; // fallback global
 
-    if (typeof amount === 'number' && amount > limit) {
-      logger.warn('[AML] Montant élevé détecté', { provider, user: user.email, amount, currency: currencyUsed, limit });
-      await logTransaction({
-        userId: user._id,
-        type: 'initiate',
-        provider,
-        amount,
-        toEmail,
-        details: maskSensitive(req.body),
-        flagged: true,
-        flagReason: 'Montant élevé'
-      });
-      await sendFraudAlert({ user, type: 'montant_eleve', provider, amount, currency: currencyUsed });
-      return res.status(403).json({
-        error: "Montant trop élevé pour cette devise/provider. Vérification manuelle requise.",
-        details: { max: limit, currency: currencyUsed, provider }
-      });
+    // == 💡 AML SECURITY CHALLENGE (QUESTION DE SÉCURITÉ) ==
+    if (typeof amount === 'number' && amount >= limit * 0.9) {
+      const userQuestions = user.securityQuestions || [];
+      if (userQuestions.length) {
+        // 1. Si la requête n’a pas encore de réponse -> retourner la question à challenger
+        if (!req.body.securityQuestion || !req.body.securityAnswer) {
+          return res.status(403).json({
+            error: 'AML_SECURITY_CHALLENGE',
+            securityQuestion: userQuestions[Math.floor(Math.random() * userQuestions.length)].question,
+          });
+        } else {
+          // 2. Vérification de la réponse
+          const idx = userQuestions.findIndex(q => q.question === req.body.securityQuestion);
+          if (idx === -1) {
+            return res.status(403).json({ error: 'Question AML inconnue.' });
+          }
+          if (
+            userQuestions[idx].answer.trim().toLowerCase() !==
+            req.body.securityAnswer.trim().toLowerCase()
+          ) {
+            logger.warn('[AML] Réponse AML incorrecte', { user: user.email });
+            await logTransaction({
+              userId: user._id,
+              type: 'initiate',
+              provider,
+              amount,
+              toEmail,
+              details: maskSensitive(req.body),
+              flagged: true,
+              flagReason: 'AML Sécurité question échouée'
+            });
+            await sendFraudAlert({ user, type: 'aml_security_failed', provider });
+            return res.status(403).json({ error: "Réponse à la question de sécurité incorrecte." });
+          }
+          // Si OK, on continue le flow normal
+        }
+      }
     }
 
     // 7️⃣ Analyse de fréquence/structuring
