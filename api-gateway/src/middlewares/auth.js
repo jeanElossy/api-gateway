@@ -1,7 +1,9 @@
 const jwt = require('jsonwebtoken');
 const config = require('../config');
+const { getUsersConnection } = require('../db');           // Permet de récupérer la connexion secondaire "users"
+const getUserModel = require('../models/userModel');       // Factory qui prend la connexion et retourne le modèle User
 
-// 👉 À toi d’implémenter la blacklist des tokens révoqués, ou de brancher sur ta DB/Redis si besoin
+// 👉 Ici, branche la blacklist de tokens si tu utilises Redis/MongoDB pour les tokens révoqués
 const isTokenBlacklisted = async (token) => {
   // Ex: requête vers Redis ou une collection MongoDB
   return false;
@@ -11,17 +13,18 @@ const isTokenBlacklisted = async (token) => {
  * Middleware d’authentification général
  * - Vérifie le JWT dans le header Authorization: Bearer xxx
  * - OU le token interne pour les communications microservices
+ * - Charge l’utilisateur MongoDB complet en base "users"
  */
 const authMiddleware = async (req, res, next) => {
   try {
-    // 1️⃣ Vérification du token interne (entre services, pour forwarding)
+    // 1️⃣ Vérification du token interne (pour communications inter-microservices)
     const internalToken = req.headers['x-internal-token'];
     if (internalToken && internalToken === config.internalToken) {
       req.user = { system: true, role: 'internal-service' };
       return next();
     }
 
-    // 2️⃣ Vérification du JWT utilisateur classique
+    // 2️⃣ Vérification du JWT utilisateur classique dans le header
     const authHeader = req.headers.authorization || req.headers.Authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({ success: false, error: 'Authentification requise' });
@@ -33,17 +36,26 @@ const authMiddleware = async (req, res, next) => {
       return res.status(401).json({ success: false, error: 'Token révoqué. Merci de vous reconnecter.' });
     }
 
-    // 4️⃣ Vérification et décodage du JWT
+    // 4️⃣ Vérification et décodage du JWT (HS256/HS512)
     const payload = jwt.verify(token, config.jwtSecret, {
-      algorithms: ['HS256', 'HS512'], // Adapte si tu changes d’algorithme
+      algorithms: ['HS256', 'HS512'],
     });
 
-    // 5️⃣ Contrôle du contenu du token (ex: exp, role, permissions, etc.)
+    // 5️⃣ Contrôle que le token a bien un champ id
     if (!payload || !payload.id) {
       return res.status(401).json({ success: false, error: 'Token invalide' });
     }
 
-    req.user = payload; // Place l'utilisateur dans req.user pour les routes suivantes
+    // 6️⃣ Récupération du user complet en base MongoDB "users"
+    const usersConn = getUsersConnection();           // Récupère la connexion secondaire
+    const User = getUserModel(usersConn);             // Initialise le modèle User avec cette connexion
+    const user = await User.findById(payload.id);     // Charge l'utilisateur complet
+
+    if (!user) {
+      return res.status(401).json({ success: false, error: "Utilisateur introuvable" });
+    }
+
+    req.user = user; // Place l'objet User Mongoose complet dans req.user pour les middlewares/contrôleurs suivants
     next();
 
   } catch (err) {
