@@ -1,3 +1,5 @@
+// File: middlewares/aml.js
+
 const logger = require('../logger');
 const {
   logTransaction,
@@ -9,8 +11,7 @@ const {
 const blacklist = require('../aml/blacklist.json');
 const { sendFraudAlert } = require('../utils/alert');
 
-
-// Plafonds AML dynamiques par provider & devise
+// Plafonds AML par provider & devise (devise de l’expéditeur !)
 const AML_LIMITS = {
   paynoval: {
     XOF: 5_000_000,
@@ -34,18 +35,21 @@ const AML_LIMITS = {
     CAD: 2_000,
   },
   bank: {
-    EUR: 20_000,
-    USD: 20_000,
-    XOF: 10_000_000,
-    XAF: 10_000_000,
-    CAD: 20_000,
+    EUR: 100_000,
+    USD: 100_000,
+    XOF: 50_000_000,
+    XAF: 50_000_000,
+    CAD: 100_000,
   }
 };
 
-
+// Liste des pays à risque AML
 const RISKY_COUNTRIES = ['IR', 'KP', 'SD', 'SY', 'CU', 'RU', 'AF', 'SO', 'YE', 'VE', 'LY'];
 const ALLOWED_STRIPE_CURRENCIES = ['EUR', 'USD'];
 
+/**
+ * Extrait la devise du pays (fallback si aucune devise envoyée)
+ */
 const getCurrencyCodeByCountry = (country) => {
   const normalized = (country || "")
     .replace(/^[^\w]+/, "")
@@ -63,6 +67,9 @@ const getCurrencyCodeByCountry = (country) => {
   }
 };
 
+/**
+ * Masque les champs sensibles pour les logs
+ */
 function maskSensitive(obj) {
   const SENSITIVE_FIELDS = [
     'password', 'cardNumber', 'iban', 'cvc', 'securityCode', 'otp', 'code'
@@ -81,20 +88,26 @@ function maskSensitive(obj) {
   return out;
 }
 
+/**
+ * Middleware AML principal (sécurise chaque transaction avant exécution)
+ */
 module.exports = async function amlMiddleware(req, res, next) {
   const provider = req.routedProvider || req.body.destination || req.body.provider;
-  const { amount, toEmail, iban, phoneNumber, country, currency } = req.body;
+  const { amount, toEmail, iban, phoneNumber, country } = req.body;
+  // 👉 On récupère la devise de l’expéditeur en priorité
+  const currencySender = req.body.senderCurrencySymbol || req.body.currencySender;
+  const currency = currencySender || req.body.currency || getCurrencyCodeByCountry(country);
   const user = req.user;
 
   try {
-    // 1. Vérif user connecté
+    // 1. Authentification
     if (!user || !user._id) {
       logger.warn('[AML] User manquant', { provider });
       await logTransaction({ userId: null, type: 'initiate', provider: provider || 'inconnu', amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'User manquant' });
       return res.status(401).json({ error: "Authentification requise." });
     }
 
-    // 2. KYC/KYB minimum
+    // 2. Vérification KYC/KYB
     if (user.type === 'business' || user.isBusiness) {
       let kybStatus = user.kybStatus;
       if (typeof getBusinessKYBStatus === 'function') {
@@ -115,7 +128,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       }
     }
 
-    // 3. PEP/sanction
+    // 3. Liste PEP / sanctions
     const pepStatus = await getPEPOrSanctionedStatus(user, { toEmail, iban, phoneNumber });
     if (pepStatus && pepStatus.sanctioned) {
       logger.error('[AML] PEP/Sanction detected', { user: user.email, reason: pepStatus.reason });
@@ -124,7 +137,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       return res.status(403).json({ error: "Transaction vers personne sanctionnée interdite." });
     }
 
-    // 4. Blacklist
+    // 4. Blacklist interne
     if ((toEmail && blacklist.emails.includes(toEmail)) ||
         (iban && blacklist.ibans.includes(iban)) ||
         (phoneNumber && blacklist.phones.includes(phoneNumber))) {
@@ -134,7 +147,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       return res.status(403).json({ error: "Destinataire interdit (blacklist AML)." });
     }
 
-    // 5. Pays à risque
+    // 5. Pays à risque/sanctionné
     if (country && RISKY_COUNTRIES.includes(country)) {
       logger.warn('[AML] Pays à risque/sanctionné détecté', { provider, user: user.email, country });
       await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'Pays à risque' });
@@ -142,15 +155,13 @@ module.exports = async function amlMiddleware(req, res, next) {
       return res.status(403).json({ error: "Pays de destination interdit (AML)." });
     }
 
-    // 6. Plafond dynamique + Question Sécurité AML si besoin
+    // 6. Vérification des plafonds (sur la devise de l’expéditeur uniquement !)
     const providerLimits = AML_LIMITS[provider] || {};
-    const currencyUsed = currency || getCurrencyCodeByCountry(country);
-    const limit = providerLimits[currencyUsed] || 10000; // fallback
+    const limit = providerLimits[currency] || 10_000; // Fallback : limite par défaut si inconnue
 
-    // AML SECURITY QUESTION: montant proche du plafond ou sensibilité détectée
+    // 7. Question sécurité AML si montant proche du plafond
     const userQuestions = user.securityQuestions || [];
     const needAmlChallenge = typeof amount === 'number' && amount >= limit * 0.9 && userQuestions.length > 0;
-
     if (needAmlChallenge) {
       if (!req.body.securityQuestion || !req.body.securityAnswer) {
         // Demande la question (random)
@@ -161,7 +172,7 @@ module.exports = async function amlMiddleware(req, res, next) {
           security_question: userQuestions[qIdx].question,
         });
       } else {
-        // Vérifie la réponse
+        // Vérifie la réponse utilisateur
         const idx = userQuestions.findIndex(q => q.question === req.body.securityQuestion);
         if (idx === -1) {
           return res.status(403).json({ error: 'Question AML inconnue.' });
@@ -178,11 +189,11 @@ module.exports = async function amlMiddleware(req, res, next) {
           await sendFraudAlert({ user, type: 'aml_security_failed', provider });
           return res.status(403).json({ error: "Réponse à la question de sécurité incorrecte." });
         }
-        // Sinon passe à la suite!
+        // Sinon : passe à la suite !
       }
     }
 
-    // 7. Structuring & autres
+    // 8. Structuring, daily cap, volume
     const stats = await getUserTransactionsStats(user._id, provider);
     if (stats && stats.lastHour > 10) {
       logger.warn('[AML] Volume suspect sur 1h', { provider, user: user.email, lastHour: stats.lastHour });
@@ -203,15 +214,15 @@ module.exports = async function amlMiddleware(req, res, next) {
       return res.status(403).json({ error: "Pattern transactionnel suspect, vérification requise." });
     }
 
-    // 8. Stripe devise
-    if (provider === 'stripe' && currencyUsed && !ALLOWED_STRIPE_CURRENCIES.includes(currencyUsed)) {
-      logger.warn('[AML] Devise non autorisée pour Stripe', { user: user.email, currency: currencyUsed });
+    // 9. Stripe: Devise autorisée
+    if (provider === 'stripe' && currency && !ALLOWED_STRIPE_CURRENCIES.includes(currency)) {
+      logger.warn('[AML] Devise non autorisée pour Stripe', { user: user.email, currency });
       await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'Devise interdite Stripe' });
-      await sendFraudAlert({ user, type: 'devise_interdite', provider, currency: currencyUsed });
+      await sendFraudAlert({ user, type: 'devise_interdite', provider, currency });
       return res.status(403).json({ error: "Devise non autorisée." });
     }
 
-    // 9. ML scoring (optionnel)
+    // 10. ML scoring (optionnel, anti-fraude avancé)
     if (typeof getMLScore === 'function') {
       const score = await getMLScore(req.body, user);
       if (score && score >= 0.9) {
@@ -222,10 +233,11 @@ module.exports = async function amlMiddleware(req, res, next) {
       }
     }
 
-    // 🔟 Log OK (trace)
+    // 11. Log AML OK (trace)
     await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: false, flagReason: '' });
     logger.info('[AML] AML OK', { provider, user: user.email, amount, toEmail, iban, phoneNumber, country, stats });
 
+    // ✅ Tout est validé, next() pour continuer la transaction !
     next();
   } catch (e) {
     logger.error('[AML] Exception', { err: e, user: user?.email });
