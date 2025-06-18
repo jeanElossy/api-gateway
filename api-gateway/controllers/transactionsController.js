@@ -24,6 +24,41 @@ function cleanSensitiveMeta(meta) {
   return clone;
 }
 
+
+
+// GET /transactions/:id → proxy vers le microservice provider concerné
+exports.getTransaction = async (req, res) => {
+  const { id } = req.params;
+  const provider = req.query.provider || 'paynoval'; // ou détecte dynamiquement selon l’ID si besoin
+  const targetService = PROVIDER_TO_SERVICE[provider];
+
+  if (!targetService) {
+    return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
+  }
+
+  try {
+    // proxy GET vers le microservice
+    const response = await axios.get(`${targetService}/transactions/${id}`, {
+      headers: {
+        'Authorization': req.headers.authorization,
+        'x-internal-token': config.internalToken,
+      },
+      timeout: 10000,
+    });
+    // Passe la réponse brute du microservice
+    return res.status(response.status).json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 502;
+    const error = err.response?.data?.error || 'Erreur lors du proxy GET transaction';
+    logger.error('[Gateway][TX] Erreur GET transaction:', { status, error });
+    return res.status(status).json({ success: false, error });
+  }
+};
+
+
+
+
+
 exports.listTransactions = async (req, res) => {
   const provider = req.query.provider || 'paynoval';
   const targetService = PROVIDER_TO_SERVICE[provider];

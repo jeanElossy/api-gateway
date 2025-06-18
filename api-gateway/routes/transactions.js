@@ -7,8 +7,15 @@ const controller = require('../controllers/transactionsController');
 
 const router = express.Router();
 
+
+
+// Ajoute AVANT router.get('/')
+router.get('/:id', controller.getTransaction);
+
+
 // Récupère toutes les transactions pour un provider (ex: ?provider=paynoval)
 router.get('/', controller.listTransactions);
+
 
 // INITIATE : Validation des données + AML + Contrôleur
 router.post(
