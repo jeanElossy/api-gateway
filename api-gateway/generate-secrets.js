@@ -36,3 +36,4 @@ if (fs.existsSync(ENV_PATH)) {
 }
 
 console.log('\n--- Copie/colle dans Render ou ta prod si besoin ---');
+
