@@ -10,66 +10,54 @@ const {
 } = require('../services/aml');
 const blacklist = require('../aml/blacklist.json');
 const { sendFraudAlert } = require('../utils/alert');
+const {
+  getCurrencySymbolByCode,
+  getCurrencyCodeByCountry,
+} = require('../tools/currency'); // adapte le chemin si besoin
 
 // === Plafonds AML par provider & symbole monétaire ===
 const AML_LIMITS = {
   paynoval: {
-    'F CFA': 5_000_000,
-    '€': 10_000,
-    '$USD': 10_000,
-    '$CAD': 10_000,
+    "F CFA": 5_000_000,
+    "€": 10_000,
+    "$": 10_000,
+    "$USD": 10_000,
+    "$CAD": 10_000,
+    "₦": 2_500_000,
+    "₵": 50_000,
+    "₹": 700_000,
+    "¥": 80_000,
+    "£": 8_000,
+    "R$": 40_000,
+    "R": 200_000,
+    // ...ajoute ici si besoin
   },
   stripe: {
-    '€': 10_000,
-    '$USD': 10_000,
-    'F CFA': 3_000_000,
-    '$CAD': 10_000,
+    "€": 10_000,
+    "$": 10_000,
+    "F CFA": 3_000_000,
+    "$USD": 10_000,
+    "$CAD": 10_000,
   },
   mobilemoney: {
-    'F CFA': 2_000_000,
-    '€': 2_000,
-    '$USD': 2_000,
-    '$CAD': 2_000,
+    "F CFA": 2_000_000,
+    "€": 2_000,
+    "$": 2_000,
+    "$USD": 2_000,
+    "$CAD": 2_000,
   },
   bank: {
-    '€': 100_000,
-    '$USD': 100_000,
-    'F CFA': 50_000_000,
-    '$CAD': 100_000,
+    "€": 100_000,
+    "$": 100_000,
+    "F CFA": 50_000_000,
+    "$CAD": 100_000,
   }
 };
 
-const RISKY_COUNTRIES = ['IR', 'KP', 'SD', 'SY', 'CU', 'RU', 'AF', 'SO', 'YE', 'VE', 'LY'];
-const ALLOWED_STRIPE_CURRENCIES = ['€', '$USD'];
-
-// Utilise ton mapping symbole selon le pays (peut être importé)
-const getCurrencySymbolByCountry = (country) => {
-  const normalized = (country || "")
-    .replace(/^[^\w]+/, "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim();
-  switch (normalized) {
-    case "cote d'ivoire":
-    case "burkina faso":
-    case "mali":
-    case "senegal":
-    case "cameroun":
-      return "F CFA";
-    case "france":
-    case "belgique":
-    case "allemagne":
-      return "€";
-    case "usa":
-    case "etats-unis":
-      return "$USD";
-    case "canada":
-      return "$CAD";
-    default:
-      return "F CFA"; // fallback
-  }
-};
+const RISKY_COUNTRIES = [
+  'IR', 'KP', 'SD', 'SY', 'CU', 'RU', 'AF', 'SO', 'YE', 'VE', 'LY'
+];
+const ALLOWED_STRIPE_CURRENCIES = ["€", "$", "$USD"];
 
 // Masque les champs sensibles pour les logs
 function maskSensitive(obj) {
@@ -91,18 +79,25 @@ function maskSensitive(obj) {
 }
 
 /**
- * Middleware AML principal (symbole monnaie, plafond simple, message UX friendly)
+ * Middleware AML principal (mapping devise universel, fallback auto)
  */
 module.exports = async function amlMiddleware(req, res, next) {
   const provider = req.routedProvider || req.body.destination || req.body.provider;
   let { amount, toEmail, iban, phoneNumber, country } = req.body;
 
-  // Détermination du symbole
-  const currencySender = req.body.senderCurrencySymbol || req.body.currencySender;
-  const currencySymbol = currencySender || req.body.currency || getCurrencySymbolByCountry(country);
+  // Récupère code devise robuste
+  let currencyCode =
+    req.body.currencyCode ||
+    req.body.senderCurrencyCode ||
+    req.body.currencySender ||
+    (country ? getCurrencyCodeByCountry(country) : "USD");
+  if (!currencyCode) currencyCode = "USD";
+
+  // Puis symbole
+  const currencySymbol = getCurrencySymbolByCode(currencyCode);
+
   const user = req.user;
 
-  // Vérif amount (number) et conversion sécurisée
   if (typeof amount === "string") {
     amount = parseFloat(amount.replace(/\s/g, '').replace(',', '.'));
   }
@@ -116,24 +111,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       return res.status(401).json({ error: "Authentification requise." });
     }
 
-    // Prépare les infos pour OFAC/SDN
-    const recipient = req.body.recipientInfo || {};
-    const senderCheck = {
-      name: user.fullName,
-      iban: user.iban,
-      email: user.email,
-      phone: user.phone,
-      country: user.selectedCountry,
-    };
-    const recipientCheck = {
-      name: recipient.name || recipient.accountHolderName || '',
-      iban: recipient.iban || '',
-      email: recipient.email || '',
-      phone: recipient.phone || '',
-      country: recipient.country || recipient.selectedCountry || '',
-    };
-
-    // 2. Vérification KYC/KYB
+    // 2. KYC/KYB
     if (user.type === 'business' || user.isBusiness) {
       let kybStatus = user.kybStatus;
       if (typeof getBusinessKYBStatus === 'function') {
@@ -154,7 +132,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       }
     }
 
-    // 3. PEP/sanction interne
+    // 3. PEP/Sanction interne
     const pepStatus = await getPEPOrSanctionedStatus(user, { toEmail, iban, phoneNumber });
     if (pepStatus && pepStatus.sanctioned) {
       logger.error('[AML] PEP/Sanction detected', { user: user.email, reason: pepStatus.reason });
@@ -165,8 +143,8 @@ module.exports = async function amlMiddleware(req, res, next) {
 
     // 4. Blacklist (emails, IBAN, phones)
     if ((toEmail && blacklist.emails.includes(toEmail)) ||
-        (iban && blacklist.ibans.includes(iban)) ||
-        (phoneNumber && blacklist.phones.includes(phoneNumber))) {
+      (iban && blacklist.ibans.includes(iban)) ||
+      (phoneNumber && blacklist.phones.includes(phoneNumber))) {
       logger.warn('[AML] Transaction vers cible blacklistée', { provider, toEmail, iban, phoneNumber });
       await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'Blacklist' });
       await sendFraudAlert({ user, type: 'blacklist', provider, toEmail, iban, phoneNumber });
@@ -181,15 +159,11 @@ module.exports = async function amlMiddleware(req, res, next) {
       return res.status(403).json({ error: "Pays de destination interdit (AML)." });
     }
 
-    // 6. Plafond AML par transaction (sur le symbole)
+    // 6. Plafond AML par transaction (symbole OU code devise)
     const providerLimits = AML_LIMITS[provider] || {};
-    let limit = providerLimits[currencySymbol];
-    if (!limit) {
-      logger.warn(`[AML] Limite non définie pour provider=${provider} currencySymbol=${currencySymbol}, fallback sur 10_000`);
-      limit = 10_000; // Fallback si non renseigné
-    }
+    let limit = providerLimits[currencySymbol] || providerLimits[currencyCode] || providerLimits["$"] || 10_000;
 
-    // 7. Challenge AML (question sécurité) si montant proche du plafond
+    // 7. Challenge AML (si montant proche du plafond)
     const userQuestions = user.securityQuestions || [];
     const needAmlChallenge = typeof amount === 'number' && amount >= limit * 0.9 && userQuestions.length > 0;
     if (needAmlChallenge) {
@@ -220,9 +194,9 @@ module.exports = async function amlMiddleware(req, res, next) {
       }
     }
 
-    // 8. Plafond journalier (pas de *3)
+    // 8. Plafond journalier
     const stats = await getUserTransactionsStats(user._id, provider);
-    const dailyCap = limit; // un seul plafond journalier
+    const dailyCap = limit;
     const futureTotal = (stats && stats.dailyTotal ? stats.dailyTotal : 0) + (amount || 0);
 
     if (futureTotal > dailyCap) {
@@ -234,7 +208,6 @@ module.exports = async function amlMiddleware(req, res, next) {
         details: maskSensitive(req.body), flagged: true,
         flagReason: `Plafond journalier dépassé (${stats.dailyTotal} + ${amount} > ${dailyCap} ${currencySymbol})`
       });
-      // MESSAGE TRÈS CLAIR POUR L'UTILISATEUR :
       return res.status(403).json({
         error: `Le plafond journalier autorisé est atteint pour la devise ${currencySymbol}. Vous ne pouvez plus effectuer de nouvelles transactions aujourd'hui avec ce moyen de paiement. Réessayez demain ou changez de mode de paiement.`,
         details: { max: dailyCap, currency: currencySymbol, provider }
@@ -255,7 +228,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       return res.status(403).json({ error: "Pattern transactionnel suspect, vérification requise." });
     }
 
-    // 9. Stripe : devise autorisée (symbole)
+    // 9. Stripe : devise autorisée (par code OU symbole)
     if (provider === 'stripe' && currencySymbol && !ALLOWED_STRIPE_CURRENCIES.includes(currencySymbol)) {
       logger.warn('[AML] Devise non autorisée pour Stripe', { user: user.email, currencySymbol });
       await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'Devise interdite Stripe' });
@@ -270,7 +243,9 @@ module.exports = async function amlMiddleware(req, res, next) {
         logger.warn('[AML] ML scoring élevé', { user: user.email, score });
         await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'Scoring ML élevé' });
         await sendFraudAlert({ user, type: 'ml_suspect', provider, score });
-        return res.status(403).json({ error: "Transaction suspecte (analyse IA), contrôle manuel." });
+        return res.status(403).json({
+          error: "Votre transaction est temporairement bloquée pour vérification supplémentaire (sécurité renforcée). Notre équipe analyse automatiquement les transactions suspectes. Merci de réessayer plus tard ou contactez le support si besoin."
+        });
       }
     }
 
