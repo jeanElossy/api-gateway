@@ -3,6 +3,53 @@
 const AMLLog = require('../models/AMLLog');
 const Transaction = require('../models/Transaction');
 
+// === Plafonds AML par provider & symbole monétaire (mêmes que middleware) ===
+const AML_LIMITS = {
+  paynoval: {
+    "F CFA": 5_000_000,
+    "€": 10_000,
+    "$": 10_000,
+    "$USD": 10_000,
+    "$CAD": 10_000,
+    "₦": 2_500_000,
+    "₵": 50_000,
+    "₹": 700_000,
+    "¥": 80_000,
+    "£": 8_000,
+    "R$": 40_000,
+    "R": 200_000,
+    // ...ajoute ici si besoin
+  },
+  stripe: {
+    "€": 10_000,
+    "$": 10_000,
+    "F CFA": 3_000_000,
+    "$USD": 10_000,
+    "$CAD": 10_000,
+  },
+  mobilemoney: {
+    "F CFA": 2_000_000,
+    "€": 2_000,
+    "$": 2_000,
+    "$USD": 2_000,
+    "$CAD": 2_000,
+  },
+  bank: {
+    "€": 100_000,
+    "$": 100_000,
+    "F CFA": 50_000_000,
+    "$CAD": 100_000,
+  }
+};
+
+/**
+ * Cherche le plafond pour le provider + devise (fallback safe)
+ */
+function getAmlLimit(provider, currency) {
+  const limits = AML_LIMITS[provider] || {};
+  return limits[currency] || 10_000; // fallback
+}
+
 /**
  * Enregistre un log AML, protège contre data incohérente.
  * Ajoute reviewed: false par défaut pour le suivi admin.
@@ -105,12 +152,21 @@ async function getPEPOrSanctionedStatus(user, { toEmail, iban, phoneNumber }) {
 }
 
 /**
- * (Optionnel) Scoring IA : plug ta logique ML ici.
- * Ex : anti-fraude IA, modèles TensorFlow/Python etc.
+ * ML scoring : high risk si montant dépasse le plafond AML pour ce provider/devise
  */
 async function getMLScore(payload, user) {
-  // Démo : au-delà de 7000 = high risk.
-  if (payload.amount > 7000) return 0.92;
+  // Récupération provider/devise utilisateur
+  const provider = payload.provider || payload.destination || "paynoval";
+  // Attention à bien passer la clé exacte utilisée côté middleware
+  const currency =
+    payload.senderCurrencySymbol ||
+    payload.currencySender ||
+    payload.currency ||
+    "F CFA";
+  const limit = getAmlLimit(provider, currency);
+
+  // ML scoring : Si montant dépasse le plafond AML → high risk
+  if (payload.amount > limit) return 0.92;
   return Math.random() * 0.4;
 }
 
