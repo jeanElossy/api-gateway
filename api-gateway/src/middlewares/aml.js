@@ -9,14 +9,6 @@ const {
 const blacklist = require('../aml/blacklist.json');
 const { sendFraudAlert } = require('../utils/alert');
 
-// const AML_LIMITS = {
-//   paynoval: { XOF: 5_000_000, XAF: 5_000_000, EUR: 10_000, USD: 10_000, CAD: 10_000 },
-//   stripe:   { EUR: 10_000, USD: 10_000, XOF: 3_000_000, XAF: 3_000_000, CAD: 10_000 },
-//   mobilemoney: { XOF: 2_000_000, XAF: 2_000_000, EUR: 2_000, USD: 2_000, CAD: 2_000 },
-//   bank:    { EUR: 20_000, USD: 20_000, XOF: 10_000_000, XAF: 10_000_000, CAD: 20_000 },
-// };
-
-
 
 // Plafonds AML dynamiques par provider & devise
 const AML_LIMITS = {
