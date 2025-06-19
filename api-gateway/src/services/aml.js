@@ -2,58 +2,13 @@
 
 const AMLLog = require('../models/AMLLog');
 const Transaction = require('../models/Transaction');
+const {
+  AML_SINGLE_TX_LIMITS,
+  AML_DAILY_LIMITS,
+  getSingleTxLimit,
+  getDailyLimit,
+} = require('../tools/amlLimits');
 
-// === Plafonds AML par provider & symbole monétaire (mêmes que middleware) ===
-const AML_LIMITS = {
-  paynoval: {
-    "F CFA": 5_000_000,
-    "€": 10_000,
-    "$": 10_000,
-    "$USD": 10_000,
-    "$CAD": 10_000,
-    "₦": 2_500_000,
-    "₵": 50_000,
-    "₹": 700_000,
-    "¥": 80_000,
-    "£": 8_000,
-    "R$": 40_000,
-    "R": 200_000,
-    // ...ajoute ici si besoin
-  },
-  stripe: {
-    "€": 10_000,
-    "$": 10_000,
-    "F CFA": 3_000_000,
-    "$USD": 10_000,
-    "$CAD": 10_000,
-  },
-  mobilemoney: {
-    "F CFA": 2_000_000,
-    "€": 2_000,
-    "$": 2_000,
-    "$USD": 2_000,
-    "$CAD": 2_000,
-  },
-  bank: {
-    "€": 100_000,
-    "$": 100_000,
-    "F CFA": 50_000_000,
-    "$CAD": 100_000,
-  }
-};
-
-/**
- * Cherche le plafond pour le provider + devise (fallback safe)
- */
-function getAmlLimit(provider, currency) {
-  const limits = AML_LIMITS[provider] || {};
-  return limits[currency] || 10_000; // fallback
-}
-
-/**
- * Enregistre un log AML, protège contre data incohérente.
- * Ajoute reviewed: false par défaut pour le suivi admin.
- */
 async function logTransaction({
   userId,
   type,
@@ -63,11 +18,10 @@ async function logTransaction({
   details,
   flagged = false,
   flagReason = '',
-  transactionId = null, // Optionnel : pour lier au doc transaction
-  ip = null,            // Optionnel : enrichissement trace
+  transactionId = null,
+  ip = null,
 }) {
   if (!userId || !provider) {
-    // Évite log DB incohérent (empêche crash Mongoose)
     console.error('[AML-LOG] userId ou provider manquant pour AMLLog:', { userId, provider, type, amount, toEmail });
     return;
   }
@@ -91,10 +45,6 @@ async function logTransaction({
   }
 }
 
-/**
- * Statistiques AML avancées sur les transactions utilisateur.
- * Gère lastHour, dailyTotal (par devise) et structuring (pattern).
- */
 async function getUserTransactionsStats(userId, provider, currency = null) {
   // Transactions sur la dernière heure (volume)
   const lastHour = await Transaction.countDocuments({
@@ -117,7 +67,7 @@ async function getUserTransactionsStats(userId, provider, currency = null) {
   ]);
   const dailyTotal = dailyTotalAgg.length ? dailyTotalAgg[0].total : 0;
 
-  // Structuring : nb vers même destinataire sur 10min
+  // Structuring : nb vers même destinataire sur 10min
   const cutoff = new Date(Date.now() - 10 * 60 * 1000);
   const recentTx = await Transaction.find({
     userId,
@@ -135,47 +85,32 @@ async function getUserTransactionsStats(userId, provider, currency = null) {
   return { lastHour, dailyTotal, sameDestShortTime };
 }
 
-/**
- * Vérifie si l’utilisateur ou le destinataire est PEP/sanctionné.
- * Peut être relié à DowJones, World-Check, OFAC etc.
- */
 async function getPEPOrSanctionedStatus(user, { toEmail, iban, phoneNumber }) {
-  // Simulé : email gouvernemental = PEP (pour test)
   if (
     user.email === 'ministere@etat.gov' ||
     (toEmail && toEmail.endsWith('@etat.gov'))
   ) {
     return { sanctioned: true, reason: 'Utilisateur/personne politiquement exposée (PEP)' };
   }
-  // Pour la prod, plug ici une API AML externe si dispo.
   return { sanctioned: false };
 }
 
-/**
- * ML scoring : high risk si montant dépasse le plafond AML pour ce provider/devise
- */
 async function getMLScore(payload, user) {
-  // Récupération provider/devise utilisateur
   const provider = payload.provider || payload.destination || "paynoval";
-  // Attention à bien passer la clé exacte utilisée côté middleware
   const currency =
     payload.senderCurrencySymbol ||
     payload.currencySender ||
     payload.currency ||
     "F CFA";
-  const limit = getAmlLimit(provider, currency);
+  // **Ici on utilise le plafond single transaction**
+  const singleLimit = getSingleTxLimit(provider, currency);
 
-  // ML scoring : Si montant dépasse le plafond AML → high risk
-  if (payload.amount > limit) return 0.92;
+  if (payload.amount > singleLimit) return 0.92;
   return Math.random() * 0.4;
 }
 
-/**
- * Statut KYB business (dummy version, à brancher sur ta vraie DB si besoin)
- */
 async function getBusinessKYBStatus(businessId) {
-  // Branche sur ta vraie base/logic si tu as plusieurs statuts.
-  return "validé"; // ou "en_attente", "refusé", etc.
+  return "validé";
 }
 
 module.exports = {
@@ -184,4 +119,6 @@ module.exports = {
   getPEPOrSanctionedStatus,
   getMLScore,
   getBusinessKYBStatus,
+  getSingleTxLimit,
+  getDailyLimit,
 };
