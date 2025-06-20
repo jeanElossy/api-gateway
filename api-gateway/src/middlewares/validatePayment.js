@@ -3,7 +3,7 @@
 const Joi = require('joi');
 const logger = require('../logger');
 
-// Schémas par provider
+// Schémas de validation par provider
 const paynovalPaymentSchema = Joi.object({
   provider: Joi.string().valid('paynoval').required(),
   toEmail: Joi.string().email().required(),
@@ -53,7 +53,6 @@ const bankPaymentSchema = Joi.object({
   swift: Joi.string().pattern(/^[A-Z0-9]{8,11}$/).optional(),
 });
 
-// Visa Direct
 const visaDirectSchema = Joi.object({
   provider: Joi.string().valid('visa_direct').required(),
   amount: Joi.number().min(1).required(),
@@ -66,17 +65,16 @@ const visaDirectSchema = Joi.object({
   country: Joi.string().max(32).optional(),
 });
 
-// Orchestration exemple Stripe → MoMo
 const stripe2momoSchema = Joi.object({
   provider: Joi.string().valid('stripe2momo').required(),
   amount: Joi.number().min(1).required(),
-  // Stripe side
+  // Stripe part
   cardNumber: Joi.string().creditCard().required(),
   expMonth: Joi.number().min(1).max(12).required(),
   expYear: Joi.number().min(new Date().getFullYear()).max(new Date().getFullYear() + 20).required(),
   cvc: Joi.string().pattern(/^\d{3,4}$/).required(),
   cardHolder: Joi.string().max(64).required(),
-  // MoMo side
+  // MoMo part
   phoneNumber: Joi.string().pattern(/^[0-9+]{8,16}$/).required(),
   operator: Joi.string().valid('orange', 'mtn', 'moov', 'wave').required(),
   country: Joi.string().max(32).required(),
@@ -91,11 +89,7 @@ const SCHEMAS = {
   stripe2momo: stripe2momoSchema,
 };
 
-/**
- * Retourne le provider à valider :
- * - Si `provider` existe dans le body, le prend (API classique)
- * - Sinon si `destination` existe et correspond à un provider, utilise destination (API Gateway nouvelle logique)
- */
+// Détection du bon schéma selon body.provider ou body.destination
 function getProviderKey(body) {
   if (body.provider && SCHEMAS[body.provider]) return body.provider;
   if (body.destination && SCHEMAS[body.destination]) return body.destination;
@@ -110,7 +104,11 @@ function validatePayment(req, res, next) {
       destination: req.body.destination,
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
     });
-    return res.status(400).json({ error: 'Provider non supporté.' });
+    return res.status(400).json({
+      success: false,
+      error: 'Provider non supporté.',
+      details: [req.body.provider || req.body.destination || 'aucun'],
+    });
   }
   const schema = SCHEMAS[providerKey];
   const { error } = schema.validate(req.body, { abortEarly: false, stripUnknown: true });
@@ -123,7 +121,7 @@ function validatePayment(req, res, next) {
     return res.status(400).json({
       success: false,
       error: 'Données invalides',
-      details: error.details.map(d => d.message)
+      details: error.details.map(d => d.message),
     });
   }
   // Pour usage ultérieur dans les controllers (routing cible dynamique)

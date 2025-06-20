@@ -124,6 +124,7 @@ module.exports = async function amlMiddleware(req, res, next) {
         details: maskSensitive(req.body), flagged: true,
         flagReason: `Plafond par transaction dépassé (${amount} > ${singleTxLimit} ${currencySymbol})`
       });
+      // PATCH details ici !
       return res.status(403).json({
         error: `Le plafond autorisé par transaction est de ${singleTxLimit} ${currencySymbol} pour ce moyen de paiement. Merci de réduire le montant ou de contacter le support.`,
         details: { max: singleTxLimit, currency: currencySymbol, provider }
@@ -143,6 +144,7 @@ module.exports = async function amlMiddleware(req, res, next) {
         details: maskSensitive(req.body), flagged: true,
         flagReason: `Plafond journalier dépassé (${stats.dailyTotal} + ${amount} > ${dailyLimit} ${currencySymbol})`
       });
+      // PATCH details ici !
       return res.status(403).json({
         error: `Le plafond journalier autorisé est atteint ${currencySymbol}. Vous ne pouvez plus effectuer de nouvelles transactions aujourd'hui avec ce moyen de paiement. Réessayez demain ou contactez le support.`,
         details: { max: dailyLimit, currency: currencySymbol, provider }
@@ -185,13 +187,19 @@ module.exports = async function amlMiddleware(req, res, next) {
       logger.warn('[AML] Volume suspect sur 1h', { provider, user: user.email, lastHour: stats.lastHour });
       await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'Volume élevé 1h' });
       await sendFraudAlert({ user, type: 'volume_1h', provider, count: stats.lastHour });
-      return res.status(403).json({ error: "Trop de transactions sur 1h, vérification requise." });
+      return res.status(403).json({
+        error: "Trop de transactions sur 1h, vérification requise.",
+        details: { count: stats.lastHour }
+      });
     }
     if (stats && stats.sameDestShortTime > 3) {
       logger.warn('[AML] Pattern structuring suspect', { provider, user: user.email, sameDestShortTime: stats.sameDestShortTime });
       await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'Pattern structuring' });
       await sendFraudAlert({ user, type: 'structuring', provider, count: stats.sameDestShortTime });
-      return res.status(403).json({ error: "Activité inhabituelle détectée. Une vérification supplémentaire est requise.." });
+      return res.status(403).json({
+        error: "Activité inhabituelle détectée. Une vérification supplémentaire est requise.",
+        details: { count: stats.sameDestShortTime }
+      });
     }
 
     // Stripe : devise autorisée
@@ -199,7 +207,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       logger.warn('[AML] Devise non autorisée pour Stripe', { user: user.email, currencySymbol });
       await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'Devise interdite Stripe' });
       await sendFraudAlert({ user, type: 'devise_interdite', provider, currencySymbol });
-      return res.status(403).json({ error: "Devise non autorisée." });
+      return res.status(403).json({ error: "Devise non autorisée.", details: { currency: currencySymbol } });
     }
 
     // ML scoring (optionnel)
@@ -210,7 +218,8 @@ module.exports = async function amlMiddleware(req, res, next) {
         await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'Scoring ML élevé' });
         await sendFraudAlert({ user, type: 'ml_suspect', provider, score });
         return res.status(403).json({
-          error: "Votre transaction est temporairement bloquée pour vérification supplémentaire (sécurité renforcée). Notre équipe analyse automatiquement les transactions suspectes. Merci de réessayer plus tard ou contactez le support si besoin."
+          error: "Votre transaction est temporairement bloquée pour vérification supplémentaire (sécurité renforcée). Notre équipe analyse automatiquement les transactions suspectes. Merci de réessayer plus tard ou contactez le support si besoin.",
+          details: { score }
         });
       }
     }
