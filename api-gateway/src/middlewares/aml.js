@@ -61,7 +61,7 @@ module.exports = async function amlMiddleware(req, res, next) {
     if (!user || !user._id) {
       logger.warn('[AML] User manquant', { provider });
       await logTransaction({ userId: null, type: 'initiate', provider: provider || 'inconnu', amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'User manquant' });
-      return res.status(401).json({ error: "Authentification requise." });
+      return res.status(401).json({ error: "Merci de vous connecter pour poursuivre." });
     }
 
     // KYC/KYB checks
@@ -74,14 +74,14 @@ module.exports = async function amlMiddleware(req, res, next) {
         logger.warn('[AML] KYB insuffisant', { provider, user: user.email });
         await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'KYB insuffisant' });
         await sendFraudAlert({ user, type: 'kyb_insuffisant', provider });
-        return res.status(403).json({ error: "KYB incomplet, transaction refusée." });
+        return res.status(403).json({ error: "L’accès aux transactions est temporairement restreint. Merci de compléter la vérification d’entreprise en soumettant vos documents. Vous recevrez une notification dès l’activation de votre compte entreprise." });
       }
     } else {
       if (!user.kycLevel || user.kycLevel < 2) {
         logger.warn('[AML] KYC insuffisant', { provider, user: user.email });
         await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'KYC insuffisant' });
         await sendFraudAlert({ user, type: 'kyc_insuffisant', provider });
-        return res.status(403).json({ error: "KYC incomplet, transaction refusée." });
+        return res.status(403).json({ error: "Votre vérification d’identité (KYC) n’est pas finalisée. Merci de compléter votre profil pour accéder aux transactions." });
       }
     }
 
@@ -91,7 +91,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       logger.error('[AML] PEP/Sanction detected', { user: user.email, reason: pepStatus.reason });
       await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: pepStatus.reason });
       await sendFraudAlert({ user, type: 'pep_sanction', provider, reason: pepStatus.reason });
-      return res.status(403).json({ error: "Transaction vers personne sanctionnée interdite." });
+      return res.status(403).json({ error: "Impossible d’effectuer la transaction : le bénéficiaire est sur liste de surveillance." });
     }
 
     // Blacklist
@@ -101,7 +101,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       logger.warn('[AML] Transaction vers cible blacklistée', { provider, toEmail, iban, phoneNumber });
       await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'Blacklist' });
       await sendFraudAlert({ user, type: 'blacklist', provider, toEmail, iban, phoneNumber });
-      return res.status(403).json({ error: "Destinataire interdit (blacklist AML)." });
+      return res.status(403).json({ error: "Transaction interdite : destinataire soumis à une restriction de conformité (AML)." });
     }
 
     // Pays à risque
@@ -109,14 +109,14 @@ module.exports = async function amlMiddleware(req, res, next) {
       logger.warn('[AML] Pays à risque/sanctionné détecté', { provider, user: user.email, country });
       await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'Pays à risque' });
       await sendFraudAlert({ user, type: 'pays_risque', provider, country });
-      return res.status(403).json({ error: "Pays de destination interdit (AML)." });
+      return res.status(403).json({ error: "Transaction bloquée: Pays de destination non autorisé." });
     }
 
     // --- LIMITES PAR ENVOI ET PAR JOUR ---
     // 1. Limite "par envoi unique"
     const singleTxLimit = getSingleTxLimit(provider, currencySymbol) || getSingleTxLimit(provider, currencyCode);
     if (amount > singleTxLimit) {
-      logger.warn('[AML] Plafond par transaction dépassé', {
+      logger.warn('Le montant de cette transaction dépasse la limite autorisée.', {
         provider, user: user.email, tryAmount: amount, max: singleTxLimit, currencySymbol
       });
       await logTransaction({
@@ -144,7 +144,7 @@ module.exports = async function amlMiddleware(req, res, next) {
         flagReason: `Plafond journalier dépassé (${stats.dailyTotal} + ${amount} > ${dailyLimit} ${currencySymbol})`
       });
       return res.status(403).json({
-        error: `Le plafond journalier autorisé est atteint pour la devise ${currencySymbol}. Vous ne pouvez plus effectuer de nouvelles transactions aujourd'hui avec ce moyen de paiement. Réessayez demain ou contactez le support.`,
+        error: `Le plafond journalier autorisé est atteint ${currencySymbol}. Vous ne pouvez plus effectuer de nouvelles transactions aujourd'hui avec ce moyen de paiement. Réessayez demain ou contactez le support.`,
         details: { max: dailyLimit, currency: currencySymbol, provider }
       });
     }
@@ -191,7 +191,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       logger.warn('[AML] Pattern structuring suspect', { provider, user: user.email, sameDestShortTime: stats.sameDestShortTime });
       await logTransaction({ userId: user._id, type: 'initiate', provider, amount, toEmail, details: maskSensitive(req.body), flagged: true, flagReason: 'Pattern structuring' });
       await sendFraudAlert({ user, type: 'structuring', provider, count: stats.sameDestShortTime });
-      return res.status(403).json({ error: "Pattern transactionnel suspect, vérification requise." });
+      return res.status(403).json({ error: "Activité inhabituelle détectée. Une vérification supplémentaire est requise.." });
     }
 
     // Stripe : devise autorisée
