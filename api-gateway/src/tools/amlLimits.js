@@ -1,5 +1,8 @@
 // File: tools/amlLimits.js
 
+// On importe le mapping symbole
+const { getCurrencySymbolByCode } = require('./currency');
+
 /**
  * Plafonds AML _journaliers_ (cumul 24h)
  * Par provider et devise.
@@ -44,7 +47,6 @@ const AML_DAILY_LIMITS = {
 
 /**
  * Plafonds AML _par envoi_ (single transaction)
- * (Tu peux adapter selon politique risque / business, cf. exemples ci-dessous)
  */
 const AML_SINGLE_TX_LIMITS = {
   paynoval: {
@@ -89,11 +91,15 @@ const AML_SINGLE_TX_LIMITS = {
  */
 function getSingleTxLimit(provider, currency) {
   const limits = AML_SINGLE_TX_LIMITS[provider] || {};
-  return limits[currency] || limits["$"] || 1_000_000;
+  // 💡 Correction: normalisation symbole (ex: XOF → "F CFA", USD → "$")
+  const symbol = getCurrencySymbolByCode(currency);
+  return limits[symbol] || limits["$"] || 1_000_000;
 }
+
 function getDailyLimit(provider, currency) {
   const limits = AML_DAILY_LIMITS[provider] || {};
-  return limits[currency] || limits["$"] || 5_000_000;
+  const symbol = getCurrencySymbolByCode(currency);
+  return limits[symbol] || limits["$"] || 5_000_000;
 }
 
 module.exports = {
