@@ -18,7 +18,6 @@ const AML_DAILY_LIMITS = {
     "£": 8_000,
     "R$": 40_000,
     "R": 200_000,
-    // ...ajoute ici si besoin
   },
   stripe: {
     "F CFA": 3_000_000,
@@ -50,10 +49,10 @@ const AML_DAILY_LIMITS = {
 const AML_SINGLE_TX_LIMITS = {
   paynoval: {
     "F CFA": 2_000_000,
-    "€": 4_000,
-    "$": 4_000,
-    "$USD": 4_000,
-    "$CAD": 4_000,
+    "€": 5_000,
+    "$": 5_000,
+    "$USD": 5_000,
+    "$CAD": 5_000,
     "₦": 1_000_000,
     "₵": 20_000,
     "₹": 300_000,
@@ -61,7 +60,6 @@ const AML_SINGLE_TX_LIMITS = {
     "£": 3_000,
     "R$": 10_000,
     "R": 80_000,
-    // ...ajuste ici selon ta politique
   },
   stripe: {
     "F CFA": 1_500_000,

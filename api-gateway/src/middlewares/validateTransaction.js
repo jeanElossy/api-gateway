@@ -1,8 +1,10 @@
-// middlewares/validateTransaction.js
+// File: middlewares/validateTransaction.js
 
 const Joi = require('joi');
 const logger = require('../logger');
-const allowedFlows = require('../tools/allowedFlows'); // <== DOIT EXISTER (voir explications après)
+const allowedFlows = require('../tools/allowedFlows');
+const { getSingleTxLimit, getDailyLimit } = require('../tools/amlLimits');
+const { getUserTransactionsStats } = require('../services/aml'); // Doit exister
 
 const baseSchema = {
   funds: Joi.string().valid(
@@ -11,12 +13,11 @@ const baseSchema = {
   destination: Joi.string().valid(
     'paynoval', 'stripe', 'bank', 'mobilemoney', 'visa_direct', 'stripe2momo'
   ).required(),
-  amount: Joi.number().min(1).max(1000000).required(),
-  provider: Joi.string().optional(), // ce champ n’est plus utilisé pour router, mais reste accepté
+  amount: Joi.number().min(1).required(),
+  provider: Joi.string().optional(),
   action: Joi.string().valid('send', 'deposit', 'withdraw').optional()
 };
 
-// --- Schémas d’initiation transaction selon destination ---
 const initiateSchemas = {
   paynoval: Joi.object({
     ...baseSchema,
@@ -75,7 +76,6 @@ const initiateSchemas = {
     country: Joi.string().max(32).required(),
     stripeRef: Joi.string().max(128).optional(),
   }),
-  // Ajoute cashin/cashout si besoin
 };
 
 const confirmSchema = Joi.object({
@@ -94,18 +94,38 @@ const cancelSchema = Joi.object({
 });
 
 function getDestinationProvider(body) {
-  // Détermine la destination réelle à partir de body.destination
-  // (Pour l’instant, c’est une correspondance 1:1)
   return body.destination;
 }
 
 function validateTransaction(action) {
   return function (req, res, next) {
     let dest = getDestinationProvider(req.body);
-    let schema = initiateSchemas[dest];
 
-    if (action === 'confirm') schema = confirmSchema;
-    if (action === 'cancel') schema = cancelSchema;
+    // Plafond single transaction dynamique
+    let maxLimit = 10000000;
+    if (action === 'initiate') {
+      try {
+        const provider = req.body.destination || req.body.provider || dest;
+        const currency =
+          req.body.selectedCurrency ||
+          req.body.currencySender ||
+          req.body.currency ||
+          'F CFA';
+        maxLimit = getSingleTxLimit(provider, currency);
+      } catch (e) {}
+    }
+
+    // Préparation du schéma dynamique
+    let schema;
+    if (action === 'initiate' && initiateSchemas[dest]) {
+      schema = initiateSchemas[dest].keys({
+        amount: Joi.number().min(1).max(maxLimit).required()
+      });
+    } else if (action === 'confirm') {
+      schema = confirmSchema;
+    } else if (action === 'cancel') {
+      schema = cancelSchema;
+    }
 
     if (!schema) {
       logger.warn('[validateTransaction] Destination/action non supporté', {
@@ -146,7 +166,46 @@ function validateTransaction(action) {
         });
         return res.status(400).json({ error: "Ce flux funds/destination n'est pas autorisé." });
       }
-      req.routedProvider = req.body.destination; // Tu peux aussi utiliser match.provider si tu veux une autre correspondance
+      req.routedProvider = req.body.destination;
+
+      // ----- Daily limit UX-friendly check -----
+      (async () => {
+        try {
+          const userId = req.user && req.user._id;
+          if (userId) {
+            const provider = req.body.destination || req.body.provider || dest;
+            const currency =
+              req.body.selectedCurrency ||
+              req.body.currencySender ||
+              req.body.currency ||
+              'F CFA';
+            const dailyLimit = getDailyLimit(provider, currency);
+            const stats = await getUserTransactionsStats(userId, provider, currency);
+            const dailyTotal = (stats && stats.dailyTotal ? stats.dailyTotal : 0) + (req.body.amount || 0);
+
+            if (dailyTotal > dailyLimit) {
+              logger.warn('[validateTransaction] Plafond journalier dépassé', {
+                userId, provider, currency, try: req.body.amount, already: stats?.dailyTotal, max: dailyLimit
+              });
+              return res.status(403).json({
+                error: 'Dépasse le plafond journalier autorisé',
+                details: {
+                  max: dailyLimit,
+                  currency,
+                  provider,
+                  already: stats?.dailyTotal,
+                  try: req.body.amount
+                }
+              });
+            }
+          }
+          next();
+        } catch (e) {
+          logger.error('[validateTransaction] Erreur vérification daily limit', { err: e });
+          next();
+        }
+      })();
+      return;
     }
 
     next();
