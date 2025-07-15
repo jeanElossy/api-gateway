@@ -80,6 +80,21 @@ const stripe2momoSchema = Joi.object({
   country: Joi.string().max(32).required(),
 });
 
+// --- FLUTTERWAVE SCHEMA ---
+const flutterwavePaymentSchema = Joi.object({
+  provider: Joi.string().valid('flutterwave').required(),
+  amount: Joi.number().min(1).required(),
+  currency: Joi.string().length(3).uppercase().required(),
+  // Ces champs peuvent être adaptés selon ton flux Flutterwave
+  phoneNumber: Joi.string().pattern(/^[0-9+]{8,16}$/).required(),
+  operator: Joi.string().max(64).optional(),
+  recipientName: Joi.string().max(128).optional(),
+  country: Joi.string().max(32).required(),
+  bankCode: Joi.string().max(32).optional(),
+  accountNumber: Joi.string().max(32).optional(),
+  // Ajoute ici d'autres champs spécifiques si tu veux
+});
+
 const SCHEMAS = {
   paynoval: paynovalPaymentSchema,
   stripe: stripePaymentSchema,
@@ -87,6 +102,7 @@ const SCHEMAS = {
   mobilemoney: mobileMoneyPaymentSchema,
   visa_direct: visaDirectSchema,
   stripe2momo: stripe2momoSchema,
+  flutterwave: flutterwavePaymentSchema,
 };
 
 // Détection du bon schéma selon body.provider ou body.destination

@@ -1,0 +1,11 @@
+{
+  "paynoval":     { "enabled": true, "url": "https://api-paynoval.onrender.com/api/v1", "health": "/health" },
+  "stripe":       { "enabled": true, "url": "https://api-stripe.onrender.com/api/v1", "health": "/health" },
+  "bank":         { "enabled": true, "url": "https://api-bank.onrender.com/api/v1", "health": "/health" },
+  "mobilemoney":  { "enabled": true, "url": "https://api-momo.onrender.com/api/v1", "health": "/health" },
+  "visa_direct":  { "enabled": true, "url": "https://api-visadirect.onrender.com/api/v1", "health": "/health" },
+  "stripe2momo":  { "enabled": true, "url": "https://api-stripe2momo.onrender.com/api/v1", "health": "/health" },
+  "cashin":       { "enabled": true, "url": "https://api-cashin.onrender.com/api/v1", "health": "/health" },
+  "cashout":      { "enabled": true, "url": "https://api-cashout.onrender.com/api/v1", "health": "/health" },
+  "flutterwave":  { "enabled": true, "url": "https://api-flutterwave.onrender.com/api/v1", "health": "/health" }
+}

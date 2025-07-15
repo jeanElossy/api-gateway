@@ -1,3 +1,5 @@
+// controllers/paymentController.js
+
 const axios = require('axios');
 const config = require('../src/config');
 const logger = require('../src/logger');
@@ -16,8 +18,19 @@ const PROVIDER_TO_ENDPOINT = {
   bank:        `${config.microservices.bank}/pay`,
   mobilemoney: `${config.microservices.mobilemoney}/pay`,
   visa_direct: config.microservices.visa_direct ? `${config.microservices.visa_direct}/pay` : undefined,
-  stripe2momo: config.microservices.orchestrator ? `${config.microservices.orchestrator}/stripe2momo` : undefined,
+  stripe2momo: config.microservices.stripe2momo ? `${config.microservices.stripe2momo}/pay` : undefined,
+  flutterwave: config.microservices.flutterwave ? `${config.microservices.flutterwave}/pay` : undefined,
 };
+
+function auditHeaders(req) {
+  return {
+    'Authorization': req.headers.authorization,
+    'x-internal-token': config.internalToken,
+    'x-request-id': req.headers['x-request-id'] || require('crypto').randomUUID(),
+    'x-user-id': req.user?._id || req.headers['x-user-id'] || '',
+    'x-session-id': req.headers['x-session-id'] || '',
+  };
+}
 
 function resolveProviderKey(body) {
   if (body.provider && PROVIDER_TO_ENDPOINT[body.provider]) return body.provider;
@@ -43,10 +56,7 @@ exports.handlePayment = async (req, res) => {
       targetUrl,
       cleanSensitiveMeta(req.body),
       {
-        headers: {
-          'Authorization': req.headers.authorization,
-          'x-internal-token': config.internalToken,
-        },
+        headers: auditHeaders(req),
         timeout: 15000,
       }
     );

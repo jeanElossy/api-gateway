@@ -4,8 +4,6 @@ const path = require('path');
 const schema = Joi.object({
   NODE_ENV:       Joi.string().valid('development', 'production', 'test').default('development'),
   PORT:           Joi.number().integer().min(1).default(4000),
-
-  // Auth
   JWT_SECRET:     Joi.string().min(16).required(),
   INTERNAL_TOKEN: Joi.string().min(16).required(),
 
@@ -18,6 +16,7 @@ const schema = Joi.object({
   SERVICE_STRIPE2MOMO_URL:  Joi.string().uri().required(),
   SERVICE_CASHIN_URL:       Joi.string().uri().required(),
   SERVICE_CASHOUT_URL:      Joi.string().uri().required(),
+  SERVICE_FLUTTERWAVE_URL:  Joi.string().uri().required(), // <-- Ajouté
 
   // CORS
   CORS_ORIGINS:  Joi.string().default('*'),
@@ -69,6 +68,7 @@ module.exports = {
     stripe2momo: env.SERVICE_STRIPE2MOMO_URL,
     cashin:      env.SERVICE_CASHIN_URL,
     cashout:     env.SERVICE_CASHOUT_URL,
+    flutterwave: env.SERVICE_FLUTTERWAVE_URL, // <-- Ajouté
   },
 
   cors: {

@@ -1,20 +1,35 @@
+// controllers/transactionsController.js
+
 const axios = require('axios');
 const config = require('../src/config');
 const logger = require('../src/logger');
 const Transaction = require('../src/models/Transaction');
 const AMLLog = require('../src/models/AMLLog');
 
+// Mapping centralisé avec Flutterwave ajouté
 const PROVIDER_TO_SERVICE = {
   paynoval:     config.microservices.paynoval,
   stripe:       config.microservices.stripe,
   bank:         config.microservices.bank,
   mobilemoney:  config.microservices.mobilemoney,
   visa_direct:  config.microservices.visa_direct,
-  visadirect:   config.microservices.visadirect,
+  visadirect:   config.microservices.visa_direct, // alias
   cashin:       config.microservices.cashin,
   cashout:      config.microservices.cashout,
   stripe2momo:  config.microservices.stripe2momo,
+  flutterwave:  config.microservices.flutterwave, // NEW
 };
+
+function auditHeaders(req) {
+  // Ajoute ou propage des headers d’audit pour toutes les requêtes proxy
+  return {
+    'Authorization': req.headers.authorization,
+    'x-internal-token': config.internalToken,
+    'x-request-id': req.headers['x-request-id'] || require('crypto').randomUUID(),
+    'x-user-id': req.user?._id || req.headers['x-user-id'] || '',
+    'x-session-id': req.headers['x-session-id'] || '',
+  };
+}
 
 function cleanSensitiveMeta(meta) {
   const clone = { ...meta };
@@ -24,12 +39,10 @@ function cleanSensitiveMeta(meta) {
   return clone;
 }
 
-
-
-// GET /transactions/:id → proxy vers le microservice provider concerné
+// GET /transactions/:id → proxy vers microservice provider
 exports.getTransaction = async (req, res) => {
   const { id } = req.params;
-  const provider = req.query.provider || 'paynoval'; // ou détecte dynamiquement selon l’ID si besoin
+  const provider = req.query.provider || 'paynoval';
   const targetService = PROVIDER_TO_SERVICE[provider];
 
   if (!targetService) {
@@ -37,50 +50,37 @@ exports.getTransaction = async (req, res) => {
   }
 
   try {
-    // proxy GET vers le microservice
     const response = await axios.get(`${targetService}/transactions/${id}`, {
-      headers: {
-        'Authorization': req.headers.authorization,
-        'x-internal-token': config.internalToken,
-      },
+      headers: auditHeaders(req),
       timeout: 10000,
     });
-    // Passe la réponse brute du microservice
     return res.status(response.status).json(response.data);
   } catch (err) {
     const status = err.response?.status || 502;
     const error = err.response?.data?.error || 'Erreur lors du proxy GET transaction';
-    logger.error('[Gateway][TX] Erreur GET transaction:', { status, error });
+    logger.error('[Gateway][TX] Erreur GET transaction:', { status, error, provider });
     return res.status(status).json({ success: false, error });
   }
 };
 
-
-
-
-
+// GET /transactions → proxy vers provider
 exports.listTransactions = async (req, res) => {
   const provider = req.query.provider || 'paynoval';
   const targetService = PROVIDER_TO_SERVICE[provider];
-  console.log('Proxy GET →', `${targetService}/transactions`);
-  console.log('Authorization:', req.headers.authorization);
-  console.log('x-internal-token:', config.internalToken);
+
   if (!targetService) {
     return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
   }
   try {
     const response = await axios.get(`${targetService}/transactions`, {
-      headers: {
-        'Authorization': req.headers.authorization,
-        'x-internal-token': config.internalToken,
-      },
+      headers: auditHeaders(req),
       timeout: 15000,
     });
     return res.status(response.status).json(response.data);
   } catch (err) {
     const status = err.response?.status || 502;
     const error = err.response?.data?.error || 'Erreur lors du proxy GET transactions';
-    logger.error('[Gateway][TX] Erreur GET transactions:', { status, error });
+    logger.error('[Gateway][TX] Erreur GET transactions:', { status, error, provider });
     return res.status(status).json({ success: false, error });
   }
 };
@@ -99,10 +99,7 @@ exports.initiateTransaction = async (req, res) => {
 
   try {
     const response = await axios.post(targetUrl, req.body, {
-      headers: {
-        'Authorization': req.headers.authorization,
-        'x-internal-token': config.internalToken,
-      },
+      headers: auditHeaders(req),
       timeout: 15000,
     });
     const result = response.data;
@@ -176,10 +173,7 @@ exports.initiateTransaction = async (req, res) => {
   }
 };
 
-
-
 exports.confirmTransaction = async (req, res) => {
-  // Utilise toujours la destination comme microservice cible
   const provider = req.routedProvider || req.body.destination || req.body.provider;
   const { transactionId } = req.body;
   const targetUrl = PROVIDER_TO_SERVICE[provider] && PROVIDER_TO_SERVICE[provider] + '/transactions/confirm';
@@ -190,10 +184,7 @@ exports.confirmTransaction = async (req, res) => {
   const now = new Date();
   try {
     const response = await axios.post(targetUrl, req.body, {
-      headers: {
-        'Authorization': req.headers.authorization,
-        'x-internal-token': config.internalToken,
-      },
+      headers: auditHeaders(req),
       timeout: 15000,
     });
     const result = response.data;
@@ -265,10 +256,7 @@ exports.cancelTransaction = async (req, res) => {
   const now = new Date();
   try {
     const response = await axios.post(targetUrl, req.body, {
-      headers: {
-        'Authorization': req.headers.authorization,
-        'x-internal-token': config.internalToken,
-      },
+      headers: auditHeaders(req),
       timeout: 15000,
     });
     const result = response.data;
@@ -328,3 +316,115 @@ exports.cancelTransaction = async (req, res) => {
     return res.status(status).json({ error });
   }
 };
+
+
+// controllers/transactionsController.js (fin du fichier)
+
+exports.refundTransaction = async (req, res) => {
+  const provider = req.body.provider || req.body.destination || 'paynoval';
+  const targetService = PROVIDER_TO_SERVICE[provider];
+  if (!targetService) {
+    return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
+  }
+  try {
+    const response = await axios.post(`${targetService}/transactions/refund`, req.body, {
+      headers: auditHeaders(req),
+      timeout: 15000,
+    });
+    return res.status(response.status).json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 502;
+    const error = err.response?.data?.error || 'Erreur proxy refund';
+    logger.error('[Gateway][TX] Erreur refund:', { status, error, provider });
+    return res.status(status).json({ success: false, error });
+  }
+};
+
+exports.reassignTransaction = async (req, res) => {
+  const provider = req.body.provider || req.body.destination || 'paynoval';
+  const targetService = PROVIDER_TO_SERVICE[provider];
+  if (!targetService) {
+    return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
+  }
+  try {
+    const response = await axios.post(`${targetService}/transactions/reassign`, req.body, {
+      headers: auditHeaders(req),
+      timeout: 15000,
+    });
+    return res.status(response.status).json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 502;
+    const error = err.response?.data?.error || 'Erreur proxy reassign';
+    logger.error('[Gateway][TX] Erreur reassign:', { status, error, provider });
+    return res.status(status).json({ success: false, error });
+  }
+};
+
+
+// Proxy vers le microservice PayNoval pour /validate
+exports.validateTransaction = async (req, res) => {
+  const provider = req.body.provider || 'paynoval'; // ou destination, à adapter selon ton usage
+  const targetService = PROVIDER_TO_SERVICE[provider];
+
+  if (!targetService) {
+    return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
+  }
+
+  try {
+    const response = await axios.post(`${targetService}/transactions/validate`, req.body, {
+      headers: auditHeaders(req),
+      timeout: 15000,
+    });
+    return res.status(response.status).json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 502;
+    const error = err.response?.data?.error || 'Erreur proxy /validate';
+    logger.error('[Gateway][TX] Erreur VALIDATE:', { status, error, provider });
+    return res.status(status).json({ success: false, error });
+  }
+};
+
+
+// ARCHIVER une transaction
+exports.archiveTransaction = async (req, res) => {
+  const provider = req.body.provider || req.body.destination || 'paynoval';
+  const targetService = PROVIDER_TO_SERVICE[provider];
+  if (!targetService) {
+    return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
+  }
+  try {
+    const response = await axios.post(`${targetService}/transactions/archive`, req.body, {
+      headers: auditHeaders(req),
+      timeout: 15000,
+    });
+    return res.status(response.status).json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 502;
+    const error = err.response?.data?.error || 'Erreur proxy archive';
+    logger.error('[Gateway][TX] Erreur archive:', { status, error, provider });
+    return res.status(status).json({ success: false, error });
+  }
+};
+
+// RELANCER une transaction
+exports.relaunchTransaction = async (req, res) => {
+  const provider = req.body.provider || req.body.destination || 'paynoval';
+  const targetService = PROVIDER_TO_SERVICE[provider];
+  if (!targetService) {
+    return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
+  }
+  try {
+    const response = await axios.post(`${targetService}/transactions/relaunch`, req.body, {
+      headers: auditHeaders(req),
+      timeout: 15000,
+    });
+    return res.status(response.status).json(response.data);
+  } catch (err) {
+    const status = err.response?.status || 502;
+    const error = err.response?.data?.error || 'Erreur proxy relaunch';
+    logger.error('[Gateway][TX] Erreur relaunch:', { status, error, provider });
+    return res.status(status).json({ success: false, error });
+  }
+};
+
+

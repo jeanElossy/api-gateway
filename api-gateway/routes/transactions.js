@@ -1,23 +1,18 @@
-// routes/transactions.js
-
 const express = require('express');
 const amlMiddleware = require('../src/middlewares/aml');
 const validateTransaction = require('../src/middlewares/validateTransaction');
 const controller = require('../controllers/transactionsController');
+const { requireRole } = require('../src/middlewares/authz');
 
 const router = express.Router();
 
-
-
-// Ajoute AVANT router.get('/')
+// GET une transaction
 router.get('/:id', controller.getTransaction);
 
-
-// Récupère toutes les transactions pour un provider (ex: ?provider=paynoval)
+// LIST toutes les transactions
 router.get('/', controller.listTransactions);
 
-
-// INITIATE : Validation des données + AML + Contrôleur
+// INITIATE : Validation + AML + proxy
 router.post(
   '/initiate',
   validateTransaction('initiate'),
@@ -25,18 +20,59 @@ router.post(
   controller.initiateTransaction
 );
 
-// CONFIRM : Validation des données + Contrôleur
+// CONFIRM
 router.post(
   '/confirm',
   validateTransaction('confirm'),
   controller.confirmTransaction
 );
 
-// CANCEL : Validation des données + Contrôleur
+// CANCEL
 router.post(
   '/cancel',
   validateTransaction('cancel'),
   controller.cancelTransaction
 );
+
+// REFUND : réservé admin/superadmin (rôle passé via req.user.role)
+router.post(
+  '/refund',
+  requireRole(['admin', 'superadmin']),
+  validateTransaction('refund'),
+  controller.refundTransaction
+);
+
+// REASSIGN : réservé admin/superadmin (rôle passé via req.user.role)
+router.post(
+  '/reassign',
+  requireRole(['admin', 'superadmin']),
+  validateTransaction('reassign'),
+  controller.reassignTransaction
+);
+
+
+
+router.post(
+  '/validate',
+  requireRole(['admin', 'superadmin']),
+  validateTransaction('validate'),
+  controller.validateTransaction // (à ajouter dans ton controller Gateway)
+);
+
+
+router.post(
+  '/archive',
+  requireRole(['admin', 'superadmin']),
+  validateTransaction('archive'), // à adapter, voir plus bas
+  controller.archiveTransaction
+);
+
+router.post(
+  '/relaunch',
+  requireRole(['admin', 'superadmin']),
+  validateTransaction('relaunch'), // à adapter, voir plus bas
+  controller.relaunchTransaction
+);
+
 
 module.exports = router;
