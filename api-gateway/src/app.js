@@ -1,3 +1,5 @@
+// src/app.js
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -5,7 +7,10 @@ const config = require('./config');
 const morgan = require('morgan');
 const paymentRoutes = require('../routes/payment');
 const amlRoutes = require('../routes/aml');
-const transactionRoutes = require('../routes/transactions');
+const transactionRoutes = require('../routes/admin/transactions.admin.routes');
+const feesRoutes = require('../routes/fees'); 
+const exchangeRateRoutes = require('../routes/admin/exchangeRates.routes'); 
+const commissionsRoutes = require('../routes/commissionsRoutes');
 const { authMiddleware } = require('./middlewares/auth');
 const { rateLimiter } = require('./middlewares/rateLimit');
 const { loggerMiddleware } = require('./middlewares/logger');
@@ -41,10 +46,18 @@ app.use(loggerMiddleware);
 app.use(rateLimiter);
 
 // ─────────── AUTH GLOBAL GATEWAY ───────────
-// Auth avant tout ! (Sauf /healthz et /status qui restent publiques pour l'infra/monitoring)
+// Ajoute tous les endpoints publics ici :
+const openEndpoints = [
+  '/healthz',
+  '/status',
+  '/api/v1/fees/simulate',          // simulateur frais (public)
+  '/api/v1/commissions/simulate',   // simulateur commission cagnotte (public)
+  '/api/v1/exchange-rates/rate'     // taux de change public (mobile)
+];
 app.use((req, res, next) => {
-  const openEndpoints = ['/healthz', '/status'];
-  if (openEndpoints.includes(req.path)) return next();
+  // Pour supporter aussi les variantes avec querystring (?...)
+  const isOpen = openEndpoints.some((ep) => req.path.startsWith(ep));
+  if (isOpen) return next();
   authMiddleware(req, res, next);
 });
 app.use(auditHeaders); // Ajoute les headers d’audit à chaque requête
@@ -62,12 +75,13 @@ app.use((req, res, next) => {
 app.use('/api/v1/pay', paymentRoutes);
 app.use('/api/v1/transactions', transactionRoutes);
 app.use('/api/v1/aml', amlRoutes);
+app.use('/api/v1/fees', feesRoutes); // <-- ROUTE FEES AJOUTÉE
+app.use('/api/v1/exchange-rates', exchangeRateRoutes);
+app.use('/api/v1/commissions', commissionsRoutes);
 
 // ─────────── ROUTES DE MONITORING ───────────
-// Probe ultra-rapide pour k8s/load-balancer/uptime robot
 app.get('/healthz', (req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
 
-// Status distribué : ping chaque microservice du providers.json
 app.get('/status', async (req, res) => {
   const statuses = {};
   await Promise.all(getAllProviders().map(async (name) => {
