@@ -1,6 +1,6 @@
 const axios = require('axios');
 const config = require('../src/config'); // adapte si besoin
-const logger = require('../logger');
+const logger = require('../src/logger');
 
 // --- Centralise tous tes services micro frontaux
 const PROVIDER_TO_SERVICE = {
