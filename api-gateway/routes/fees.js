@@ -2,7 +2,7 @@
 
 const express = require('express');
 const router = express.Router();
-const requireAdmin = require('../middleware/requireAdmin');
+const requireAdmin = require('../src/middlewares/requireAdmin');
 const feesCtrl = require('../controllers/feesController');
 
 // 👉 Endpoint public UNIQUE pour toute simulation de frais
