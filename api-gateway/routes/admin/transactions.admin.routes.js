@@ -1,11 +1,9 @@
 const express = require('express');
-const { requireRole } = require('../../src/middlewares/authz');      
+const { requireRole } = require('../../src/middlewares/authz');
 const adminTxCtrl = require('../../controllers/adminTransactionsController');
 const { protect } = require('../../src/middlewares/auth');
-router.use(protect);
 
-
-const router = express.Router();
+const router = express.Router(); // D'ABORD !
 
 // Toutes les routes requièrent un admin/superadmin authentifié
 router.use(protect, requireRole(['admin', 'superadmin']));
