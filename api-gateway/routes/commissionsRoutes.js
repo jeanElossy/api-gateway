@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const requireAdmin = require('../middleware/requireAdmin');
+const requireAdmin = require('../src/middlewares/requireAdmin');
 const ctrl = require('../controllers/commissionsController');
 
 // ENDPOINT PUBLIC pour simuler la commission (AVANT requireAdmin)
