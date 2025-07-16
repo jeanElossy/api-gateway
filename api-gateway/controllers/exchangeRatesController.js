@@ -1,5 +1,5 @@
 // src/controllers/exchangeRatesController.js
-const ExchangeRate = require('../models/ExchangeRate');
+const ExchangeRate = require('../src/models/ExchangeRate');
 
 
 /**
