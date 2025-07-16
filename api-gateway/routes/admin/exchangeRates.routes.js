@@ -1,8 +1,8 @@
 const express = require("express");
 const router = express.Router();
-const ExchangeRate = require("../models/ExchangeRate");
-const requireAdmin = require("../middleware/requireAdmin");
-const ctrl = require("../controllers/exchangeRatesController");
+const ExchangeRate = require("../../src/models/ExchangeRate");
+const requireAdmin = require("../../src/middlewares/requireAdmin");
+const ctrl = require("../../controllers/exchangeRatesController");
 
 // Endpoint public SANS auth, pour le mobile
 router.get('/rate', ctrl.getRatePublic);
