@@ -1,7 +1,7 @@
 const express = require('express');
-const { requireRole } = require('../../middlewares/authz');      
+const { requireRole } = require('../../src/middlewares/authz');      
 const adminTxCtrl = require('../../controllers/adminTransactionsController');
-const { protect } = require('../middlewares/auth');
+const { protect } = require('../../src/middlewares/auth');
 router.use(protect);
 
 
