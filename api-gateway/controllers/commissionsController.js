@@ -1,6 +1,6 @@
-const Commission = require('../models/Commission'); // Modèle mongoose
-const ExchangeRate = require('../models/ExchangeRate');
-const logger = require('../utils/logger');
+const Commission = require('../src/models/Commission'); // Modèle mongoose
+const ExchangeRate = require('../src/models/ExchangeRate');
+const logger = require('../src/utils/logger');
 
 
 /**
