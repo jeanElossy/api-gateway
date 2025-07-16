@@ -120,3 +120,7 @@ exports.simulate = async (req, res) => {
     res.status(500).json({ success: false, error: "Erreur serveur." });
   }
 };
+
+
+
+exports.simulateCagnottePublic = exports.simulate;
