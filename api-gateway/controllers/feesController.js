@@ -1,6 +1,6 @@
 // src/controllers/feesController.js
-const Fee = require('../models/Fee');
-const ExchangeRate = require('../models/ExchangeRate');
+const Fee = require('../src/models/Fee');
+const ExchangeRate = require('../src/models/ExchangeRate');
 const axios = require('axios');
 
 // ========== GET (CRUD) ==========
