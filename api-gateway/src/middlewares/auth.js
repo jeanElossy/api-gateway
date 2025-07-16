@@ -76,4 +76,7 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
-module.exports = { authMiddleware };
+// ALIAS pour compatibilité (protect == authMiddleware)
+const protect = authMiddleware;
+
+module.exports = { authMiddleware, protect };

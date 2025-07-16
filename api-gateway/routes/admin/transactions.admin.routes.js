@@ -1,7 +1,9 @@
 const express = require('express');
-const { protect } = require('../../middlewares/authMiddleware'); // adapte le chemin si besoin
-const { requireRole } = require('../../middlewares/authz');      // adapte le chemin si besoin
+const { requireRole } = require('../../middlewares/authz');      
 const adminTxCtrl = require('../../controllers/adminTransactionsController');
+const { protect } = require('../middlewares/auth');
+router.use(protect);
+
 
 const router = express.Router();
 
