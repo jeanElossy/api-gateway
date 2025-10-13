@@ -20,47 +20,55 @@ const { getAllProviders, getProvider } = require('./providers');
 const axios = require('axios');
 const auditHeaders = require('./middlewares/auditHeaders');
 
+// ✅ Swagger (docs Gateway)
+const swaggerUi = require('swagger-ui-express');
+const YAML = require('yamljs');
+const path = require('path');
+const openapiSpec = YAML.load(path.join(__dirname, '../docs/openapi.yaml'));
+
 const app = express();
 
 // ─────────── SÉCURITÉ & LOG ───────────
-app.use(helmet({
-  crossOriginResourcePolicy: false,
-}));
-
+app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(cors({
   origin: (origin, callback) => {
     if (config.cors.origins.includes('*')) return callback(null, true);
-    if (!origin) return callback(null, false);
+    if (!origin) return callback(null, true); // ← autorise clients sans Origin (CLI/Postman)
     if (config.cors.origins.includes(origin)) return callback(null, true);
     return callback(new Error('CORS: origine non autorisée'));
   },
   credentials: true
 }));
-
 if (config.nodeEnv !== 'test') {
   app.use(morgan(config.logging.level === 'debug' ? 'dev' : 'combined'));
 }
-
 app.use(express.json({ limit: '2mb' }));
 app.use(loggerMiddleware);
 app.use(rateLimiter);
 
+// ─────────── DOCS PUBLIQUES (avant auth) ───────────
+app.get('/openapi.json', (_req, res) => res.json(openapiSpec));
+app.use('/docs', swaggerUi.serve, swaggerUi.setup(openapiSpec, {
+  explorer: true,
+  customSiteTitle: 'PayNoval Gateway API',
+}));
+
 // ─────────── AUTH GLOBAL GATEWAY ───────────
-// Ajoute tous les endpoints publics ici :
 const openEndpoints = [
   '/healthz',
   '/status',
-  '/api/v1/fees/simulate',          // simulateur frais (public)
-  '/api/v1/commissions/simulate',   // simulateur commission cagnotte (public)
-  '/api/v1/exchange-rates/rate'     // taux de change public (mobile)
+  '/docs',                    // ← doc publique
+  '/openapi.json',            // ← spec publique
+  '/api/v1/fees/simulate',
+  '/api/v1/commissions/simulate',
+  '/api/v1/exchange-rates/rate'
 ];
 app.use((req, res, next) => {
-  // Pour supporter aussi les variantes avec querystring (?...)
   const isOpen = openEndpoints.some((ep) => req.path.startsWith(ep));
   if (isOpen) return next();
   authMiddleware(req, res, next);
 });
-app.use(auditHeaders); // Ajoute les headers d’audit à chaque requête
+app.use(auditHeaders);
 
 // ─────────── DB READY STATE ───────────
 app.use((req, res, next) => {
@@ -75,13 +83,12 @@ app.use((req, res, next) => {
 app.use('/api/v1/pay', paymentRoutes);
 app.use('/api/v1/transactions', transactionRoutes);
 app.use('/api/v1/aml', amlRoutes);
-app.use('/api/v1/fees', feesRoutes); // <-- ROUTE FEES AJOUTÉE
+app.use('/api/v1/fees', feesRoutes);
 app.use('/api/v1/exchange-rates', exchangeRateRoutes);
 app.use('/api/v1/commissions', commissionsRoutes);
 
-// ─────────── ROUTES DE MONITORING ───────────
+// ─────────── MONITORING ───────────
 app.get('/healthz', (req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
-
 app.get('/status', async (req, res) => {
   const statuses = {};
   await Promise.all(getAllProviders().map(async (name) => {
@@ -97,14 +104,9 @@ app.get('/status', async (req, res) => {
   res.json({ gateway: 'ok', microservices: statuses });
 });
 
-// ─────────── 404 HANDLER ───────────
-app.use((req, res, next) => {
-  res.status(404).json({ success: false, error: 'Ressource non trouvée' });
-});
-
-// ─────────── ERROR HANDLER GLOBAL ───────────
+// ─────────── 404 & ERROR HANDLERS ───────────
+app.use((req, res) => res.status(404).json({ success: false, error: 'Ressource non trouvée' }));
 app.use((err, req, res, next) => {
-  // Ne JAMAIS envoyer la stack côté client en prod !
   logger.error('[API ERROR]', {
     message: err.message,
     stack: err.stack,
@@ -118,8 +120,7 @@ app.use((err, req, res, next) => {
   });
   res.status(err.status || 500).json({
     success: false,
-    error: (err.isJoi && err.details) ? err.details.map(d => d.message).join('; ')
-          : err.message || 'Erreur serveur',
+    error: (err.isJoi && err.details) ? err.details.map(d => d.message).join('; ') : (err.message || 'Erreur serveur'),
   });
 });
 

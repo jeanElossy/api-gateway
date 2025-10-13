@@ -1,0 +1,568 @@
+openapi: 3.1.0
+info:
+  title: PayNoval Gateway API
+  version: 1.0.0
+  description: |
+    Passerelle d’orchestration vers plusieurs microservices (providers).
+    - Auth globale: Bearer
+    - **Idempotency-Key** requis pour les opérations de création
+    - **X-Request-Id** pour la traçabilité (corrélation logs)
+    - Headers d’audit propagés vers les providers: x-internal-token, x-user-id, x-session-id
+    - Certains endpoints publics (simulateurs & monitoring) ne nécessitent pas d’auth.
+
+servers:
+  - url: https://api.paynoval.com
+    description: Production
+  - url: https://sandbox.api.paynoval.com
+    description: Sandbox
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Transactions
+    description: Proxy transactions vers les microservices providers
+  - name: Fees
+    description: Simulation des frais via le Gateway
+  - name: Commissions
+    description: Simulation des commissions (cagnotte)
+  - name: ExchangeRates
+    description: Taux de change publics
+  - name: Monitoring
+    description: Santé du Gateway et des microservices
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID pour rendre l’opération idempotente (créations/refunds…)
+      schema: { type: string, format: uuid }
+    XRequestId:
+      name: X-Request-Id
+      in: header
+      required: true
+      description: UUID (corrélation et audit)
+      schema: { type: string, format: uuid }
+    ProviderQuery:
+      name: provider
+      in: query
+      required: false
+      description: Provider cible pour router la requête
+      schema:
+        type: string
+        enum: [paynoval, stripe, bank, mobilemoney, visa_direct, visadirect, cashin, cashout, stripe2momo, flutterwave]
+
+  schemas:
+    ApiError:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        error: { type: string, example: "Erreur interne provider" }
+        code: { type: string, example: "invalid_request" }
+        details:
+          type: object
+      additionalProperties: false
+
+    Transaction:
+      type: object
+      description: Objet transaction retourné par les providers (forme générique)
+      properties:
+        id: { type: string, example: "tx_65f1..." }
+        reference: { type: string, example: "GW-2025-000123" }
+        provider: { type: string, example: "mobilemoney" }
+        amount: { type: number, example: 50000 }
+        currency: { type: string, example: "XOF" }
+        status: { type: string, example: "pending" }
+        createdAt: { type: string, format: date-time }
+        meta:
+          type: object
+          description: Métadonnées spécifiques au provider
+      additionalProperties: true
+
+    TransactionList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Transaction' }
+        total: { type: integer, example: 42 }
+      additionalProperties: false
+
+    InitiateRequest:
+      type: object
+      description: |
+        Corps générique transmis au provider pour initier une transaction.
+        Le Gateway **propage** les champs au microservice cible.
+      properties:
+        provider:
+          type: string
+          description: Provider cible (ou utiliser `destination`)
+          enum: [paynoval, stripe, bank, mobilemoney, visa_direct, visadirect, cashin, cashout, stripe2momo, flutterwave]
+          example: mobilemoney
+        destination:
+          type: string
+          description: Alias du provider (si utilisé à la place de `provider`)
+          enum: [paynoval, stripe, bank, mobilemoney, visa_direct, visadirect, cashin, cashout, stripe2momo, flutterwave]
+        amount: { type: number, example: 50000 }
+        currency: { type: string, example: "XOF" }
+        toEmail: { type: string, format: email, example: "destinataire@client.com" }
+        phoneNumber: { type: string, example: "2250700000000" }
+        iban: { type: string, example: "CI05CI1234567890" }
+        operator: { type: string, example: "wave" }
+        country: { type: string, example: "CI" }
+        description: { type: string, example: "Commande #9213" }
+        # Champs sensibles éventuellement transmis au provider (nettoyés en logs/DB côté GW)
+        cardNumber: { type: string, example: "4242424242424242" }
+        cvc: { type: string, example: "123" }
+        securityCode: { type: string, example: "ABCD12" }
+      required: [amount]
+      additionalProperties: true
+
+    ConfirmRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [paynoval, stripe, bank, mobilemoney, visa_direct, visadirect, cashin, cashout, stripe2momo, flutterwave]
+          example: mobilemoney
+        transactionId: { type: string, example: "pay_01JABCDXYZ" }
+        otp: { type: string, example: "123456" }
+      required: [transactionId]
+      additionalProperties: true
+
+    CancelRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [paynoval, stripe, bank, mobilemoney, visa_direct, visadirect, cashin, cashout, stripe2momo, flutterwave]
+        transactionId: { type: string }
+        reason: { type: string, example: "client_cancelled" }
+      required: [transactionId]
+      additionalProperties: false
+
+    RefundRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [paynoval, stripe, bank, mobilemoney, visa_direct, visadirect, cashin, cashout, stripe2momo, flutterwave]
+        transactionId: { type: string, example: "pay_01JABCDXYZ" }
+        amount: { type: number, example: 10000 }
+        reason: { type: string, example: "duplicate" }
+      required: [transactionId]
+      additionalProperties: false
+
+    ReassignRequest:
+      type: object
+      description: Réassigner une transaction à un autre bénéficiaire
+      properties:
+        provider:
+          type: string
+          enum: [paynoval, stripe, bank, mobilemoney, visa_direct, visadirect, cashin, cashout, stripe2momo, flutterwave]
+        transactionId: { type: string }
+        newReceiverEmail: { type: string, format: email }
+        newReceiverPhone: { type: string }
+      required: [transactionId]
+      additionalProperties: false
+
+    ValidateRequest:
+      type: object
+      description: Validation manuelle (admin) côté provider
+      properties:
+        provider:
+          type: string
+          enum: [paynoval, stripe, bank, mobilemoney, visa_direct, visadirect, cashin, cashout, stripe2momo, flutterwave]
+        transactionId: { type: string }
+        action:
+          type: string
+          enum: [confirmed, rejected]
+          example: confirmed
+        reason: { type: string }
+      required: [transactionId, action]
+      additionalProperties: false
+
+    ArchiveRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [paynoval, stripe, bank, mobilemoney, visa_direct, visadirect, cashin, cashout, stripe2momo, flutterwave]
+        transactionId: { type: string }
+      required: [transactionId]
+      additionalProperties: false
+
+    RelaunchRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [paynoval, stripe, bank, mobilemoney, visa_direct, visadirect, cashin, cashout, stripe2momo, flutterwave]
+        transactionId: { type: string }
+      required: [transactionId]
+      additionalProperties: false
+
+    # ===== Simulateurs / publics =====
+    FeesSimulateRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [paynoval, stripe, bank, mobilemoney, visa_direct, visadirect, cashin, cashout, stripe2momo, flutterwave]
+        amount: { type: number, example: 100.0 }
+        currency: { type: string, example: "CAD" }
+        country: { type: string, example: "CI" }
+        destination: { type: string, example: "paynoval" }
+      required: [amount]
+      additionalProperties: true
+
+    FeesSimulateResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        provider: { type: string, example: "mobilemoney" }
+        adminFee: { type: number, example: 0.45 }
+        totalFee: { type: number, example: 1.25 }
+        effectiveRate: { type: number, example: 590.0 }
+        currency: { type: string, example: "CAD" }
+      additionalProperties: true
+
+    CommissionsSimulateRequest:
+      type: object
+      properties:
+        amount: { type: number, example: 100.0 }
+        currency: { type: string, example: "CAD" }
+      required: [amount]
+      additionalProperties: false
+
+    CommissionsSimulateResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        commission: { type: number, example: 0.5 }
+        currency: { type: string, example: "CAD" }
+
+    ExchangeRateResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        from: { type: string, example: "CAD" }
+        to: { type: string, example: "XOF" }
+        rate: { type: number, example: 590.12 }
+        updatedAt: { type: string, format: date-time }
+
+paths:
+  # ================== TRANSACTIONS (proxy) ==================
+  /api/v1/transactions:
+    get:
+      tags: [Transactions]
+      summary: Lister les transactions (proxy vers provider)
+      description: |
+        Route le GET vers `GET {provider}/transactions`.
+        **Auth requise.**
+      parameters:
+        - $ref: '#/components/parameters/ProviderQuery'
+        - $ref: '#/components/parameters/XRequestId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionList' }
+        '4XX':
+          description: Erreur côté client
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+        '5XX':
+          description: Erreur provider/serveur
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+
+  /api/v1/transactions/{id}:
+    get:
+      tags: [Transactions]
+      summary: Récupérer une transaction par ID (proxy)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/ProviderQuery'
+        - $ref: '#/components/parameters/XRequestId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaction' }
+        '404':
+          description: Introuvable
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+        '5XX':
+          description: Erreur provider/serveur
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+
+  /api/v1/transactions/initiate:
+    post:
+      tags: [Transactions]
+      summary: Initier une transaction (proxy)
+      description: |
+        Route vers `POST {provider}/transactions/initiate`.
+        **Auth requise** + **Idempotency-Key** + **X-Request-Id**.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InitiateRequest' }
+            examples:
+              mobilemoney:
+                value:
+                  provider: mobilemoney
+                  amount: 50000
+                  currency: XOF
+                  phoneNumber: "2250700000000"
+                  operator: wave
+                  country: CI
+                  description: "Commande #9213"
+      responses:
+        '201':
+          description: Créé
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaction' }
+        '4XX':
+          description: Erreur côté client
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+        '5XX':
+          description: Erreur provider/serveur
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+
+  /api/v1/transactions/confirm:
+    post:
+      tags: [Transactions]
+      summary: Confirmer une transaction (OTP/USSD ou interne)
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfirmRequest' }
+      responses:
+        '200':
+          description: Confirmé
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaction' }
+        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+
+  /api/v1/transactions/cancel:
+    post:
+      tags: [Transactions]
+      summary: Annuler une transaction
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CancelRequest' }
+      responses:
+        '200':
+          description: Annulée
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaction' }
+        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+
+  /api/v1/transactions/refund:
+    post:
+      tags: [Transactions]
+      summary: Rembourser une transaction
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefundRequest' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Transaction' } } } }
+        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+
+  /api/v1/transactions/reassign:
+    post:
+      tags: [Transactions]
+      summary: Réassigner une transaction à un autre bénéficiaire
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReassignRequest' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Transaction' } } } }
+        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+
+  /api/v1/transactions/validate:
+    post:
+      tags: [Transactions]
+      summary: Validation manuelle (admin) côté provider
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ValidateRequest' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Transaction' } } } }
+        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+
+  /api/v1/transactions/archive:
+    post:
+      tags: [Transactions]
+      summary: Archiver une transaction
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ArchiveRequest' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Transaction' } } } }
+        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+
+  /api/v1/transactions/relaunch:
+    post:
+      tags: [Transactions]
+      summary: Relancer une transaction (pending/cancelled)
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RelaunchRequest' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Transaction' } } } }
+        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+
+  # ================== SIMULATEURS (PUBLICS) ==================
+  /api/v1/fees/simulate:
+    post:
+      tags: [Fees]
+      security: []   # public
+      summary: Simuler les frais
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FeesSimulateRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FeesSimulateResponse' }
+
+  /api/v1/commissions/simulate:
+    post:
+      tags: [Commissions]
+      security: []   # public
+      summary: Simuler la commission cagnotte
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CommissionsSimulateRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommissionsSimulateResponse' }
+
+  /api/v1/exchange-rates/rate:
+    get:
+      tags: [ExchangeRates]
+      security: []   # public
+      summary: Obtenir un taux de change
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, example: "CAD" }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, example: "XOF" }
+        - name: amount
+          in: query
+          required: false
+          schema: { type: number, example: 100 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExchangeRateResponse' }
+
+  # ================== MONITORING (PUBLICS) ==================
+  /healthz:
+    get:
+      tags: [Monitoring]
+      security: []   # public
+      summary: Santé du Gateway
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "ok" }
+                  ts: { type: string, format: date-time }
+
+  /status:
+    get:
+      tags: [Monitoring]
+      security: []   # public
+      summary: État du Gateway + microservices
+      responses:
+        '200':
+          description: Détail des statuts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  gateway: { type: string, example: "ok" }
+                  microservices:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        up: { type: boolean, example: true }
+                        status: { type: string, example: "ok" }
+                        error: { type: string, nullable: true }
