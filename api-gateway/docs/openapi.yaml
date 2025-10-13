@@ -9,6 +9,9 @@ info:
     - **X-Request-Id** pour la traçabilité (corrélation logs)
     - Headers d’audit propagés vers les providers: x-internal-token, x-user-id, x-session-id
     - Certains endpoints publics (simulateurs & monitoring) ne nécessitent pas d’auth.
+  x-logo:
+    url: https://raw.githubusercontent.com/jeanElossy/paynoval-docs/main/public/assets/defaultAvatar.png
+    altText: PayNoval
 
 servers:
   - url: https://api.paynoval.com
@@ -119,7 +122,6 @@ components:
         operator: { type: string, example: "wave" }
         country: { type: string, example: "CI" }
         description: { type: string, example: "Commande #9213" }
-        # Champs sensibles éventuellement transmis au provider (nettoyés en logs/DB côté GW)
         cardNumber: { type: string, example: "4242424242424242" }
         cvc: { type: string, example: "123" }
         securityCode: { type: string, example: "ABCD12" }
@@ -210,7 +212,6 @@ components:
       required: [transactionId]
       additionalProperties: false
 
-    # ===== Simulateurs / publics =====
     FeesSimulateRequest:
       type: object
       properties:
@@ -260,7 +261,6 @@ components:
         updatedAt: { type: string, format: date-time }
 
 paths:
-  # ================== TRANSACTIONS (proxy) ==================
   /api/v1/transactions:
     get:
       tags: [Transactions]
@@ -277,12 +277,16 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TransactionList' }
-        '4XX':
+        '400':
           description: Erreur côté client
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
-        '5XX':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '500':
           description: Erreur provider/serveur
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /api/v1/transactions/{id}:
     get:
@@ -303,10 +307,14 @@ paths:
               schema: { $ref: '#/components/schemas/Transaction' }
         '404':
           description: Introuvable
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
-        '5XX':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '500':
           description: Erreur provider/serveur
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /api/v1/transactions/initiate:
     post:
@@ -328,10 +336,10 @@ paths:
                 value:
                   provider: mobilemoney
                   amount: 50000
-                  currency: XOF
+                  currency: "XOF"
                   phoneNumber: "2250700000000"
-                  operator: wave
-                  country: CI
+                  operator: "wave"
+                  country: "CI"
                   description: "Commande #9213"
       responses:
         '201':
@@ -339,12 +347,16 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Transaction' }
-        '4XX':
+        '400':
           description: Erreur côté client
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
-        '5XX':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '500':
           description: Erreur provider/serveur
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /api/v1/transactions/confirm:
     post:
@@ -363,8 +375,16 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Transaction' }
-        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
-        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '400':
+          description: Erreur côté client
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '500':
+          description: Erreur provider/serveur
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /api/v1/transactions/cancel:
     post:
@@ -383,8 +403,16 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Transaction' }
-        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
-        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '400':
+          description: Erreur côté client
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '500':
+          description: Erreur provider/serveur
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /api/v1/transactions/refund:
     post:
@@ -399,9 +427,21 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/RefundRequest' }
       responses:
-        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Transaction' } } } }
-        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
-        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaction' }
+        '400':
+          description: Erreur côté client
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '500':
+          description: Erreur provider/serveur
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /api/v1/transactions/reassign:
     post:
@@ -415,9 +455,21 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/ReassignRequest' }
       responses:
-        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Transaction' } } } }
-        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
-        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaction' }
+        '400':
+          description: Erreur côté client
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '500':
+          description: Erreur provider/serveur
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /api/v1/transactions/validate:
     post:
@@ -431,9 +483,21 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/ValidateRequest' }
       responses:
-        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Transaction' } } } }
-        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
-        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaction' }
+        '400':
+          description: Erreur côté client
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '500':
+          description: Erreur provider/serveur
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /api/v1/transactions/archive:
     post:
@@ -447,9 +511,21 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/ArchiveRequest' }
       responses:
-        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Transaction' } } } }
-        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
-        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaction' }
+        '400':
+          description: Erreur côté client
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '500':
+          description: Erreur provider/serveur
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /api/v1/transactions/relaunch:
     post:
@@ -463,11 +539,22 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/RelaunchRequest' }
       responses:
-        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Transaction' } } } }
-        '4XX': { description: Erreur côté client, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
-        '5XX': { description: Erreur provider/serveur, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaction' }
+        '400':
+          description: Erreur côté client
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '500':
+          description: Erreur provider/serveur
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
-  # ================== SIMULATEURS (PUBLICS) ==================
   /api/v1/fees/simulate:
     post:
       tags: [Fees]
@@ -527,7 +614,6 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ExchangeRateResponse' }
 
-  # ================== MONITORING (PUBLICS) ==================
   /healthz:
     get:
       tags: [Monitoring]
