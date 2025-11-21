@@ -88,6 +88,8 @@ exports.listTransactions = async (req, res) => {
 exports.initiateTransaction = async (req, res) => {
   const targetProvider = req.routedProvider || req.body.destination || req.body.provider;
   const targetUrl = PROVIDER_TO_SERVICE[targetProvider] && PROVIDER_TO_SERVICE[targetProvider] + '/transactions/initiate';
+  console.log('[DEBUG] targetUrl:', targetUrl);
+
   if (!targetUrl) {
     return res.status(400).json({ error: 'Provider (destination) inconnu.' });
   }
