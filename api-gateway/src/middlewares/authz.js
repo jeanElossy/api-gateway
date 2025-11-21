@@ -1,15 +1,30 @@
 /**
- * Middleware pour exiger un rôle utilisateur précis (ex: 'admin', 'superadmin')
- * Utilisation : requireRole(['admin', 'superadmin'])
+ * Middleware pour exiger un rôle utilisateur précis
+ * Si l'utilisateur est "user", on ne fait pas de vérification et on laisse passer
  */
 const requireRole = (roles = []) => (req, res, next) => {
-  if (!req.user || !roles.includes(req.user.role)) {
+  const userRole = req.user?.role;
+
+  console.log('User role:', userRole);
+
+  if (!userRole) {
+    return res.status(403).json({ success: false, error: "Accès interdit (non authentifié)" });
+  }
+
+  // Si l'utilisateur est un "user", on laisse passer
+  if (userRole.toLowerCase() === 'user') {
+    return next();
+  }
+
+  // Sinon, on vérifie si son rôle est dans la liste
+  if (!roles.includes(userRole)) {
     return res.status(403).json({ success: false, error: "Accès interdit (rôle insuffisant)" });
   }
+
   next();
 };
 
-// Alias classiques utilisés partout
+// Alias classiques
 const requireAdmin = requireRole(['admin', 'superadmin']);
 const requireSuperadmin = requireRole(['superadmin']);
 
