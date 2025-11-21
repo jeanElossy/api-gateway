@@ -19,6 +19,7 @@ const mongoose = require('mongoose');
 const { getAllProviders, getProvider } = require('./providers');
 const axios = require('axios');
 const auditHeaders = require('./middlewares/auditHeaders');
+const userTransactionRoutes = require('../routes/transactions');
 
 // ✅ Swagger (docs Gateway)
 const swaggerUi = require('swagger-ui-express');
@@ -81,7 +82,12 @@ app.use((req, res, next) => {
 
 // ─────────── ROUTES PRINCIPALES ───────────
 app.use('/api/v1/pay', paymentRoutes);
-app.use('/api/v1/transactions', transactionRoutes);
+// Pour les utilisateurs normaux
+app.use('/api/v1/transactions', userTransactionRoutes);
+
+// Pour les admins
+app.use('/api/v1/admin/transactions', transactionRoutes);
+
 app.use('/api/v1/aml', amlRoutes);
 app.use('/api/v1/fees', feesRoutes);
 app.use('/api/v1/exchange-rates', exchangeRateRoutes);
