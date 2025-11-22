@@ -5,8 +5,12 @@ const config = require('../src/config');
 const logger = require('../src/logger');
 const Transaction = require('../src/models/Transaction');
 const AMLLog = require('../src/models/AMLLog');
+const crypto = require('crypto');
 
-// Mapping centralisé avec Flutterwave ajouté
+/**
+ * Mapping centralisé des providers -> service URL (doit contenir protocole + host, ex: https://paynoval-svc.internal)
+ * Ajoute ici toute nouvelle intégration (flutterwave, stripe, etc.)
+ */
 const PROVIDER_TO_SERVICE = {
   paynoval:     config.microservices.paynoval,
   stripe:       config.microservices.stripe,
@@ -20,17 +24,22 @@ const PROVIDER_TO_SERVICE = {
   flutterwave:  config.microservices.flutterwave, // NEW
 };
 
-function auditHeaders(req) {
-  // Ajoute ou propage des headers d’audit pour toutes les requêtes proxy
-  return {
-    'Authorization': req.headers.authorization,
-    'x-internal-token': config.internalToken,
-    'x-request-id': req.headers['x-request-id'] || require('crypto').randomUUID(),
-    'x-user-id': req.user?._id || req.headers['x-user-id'] || '',
-    'x-session-id': req.headers['x-session-id'] || '',
-  };
+/* Safe UUID helper (Node < 14 fallback) */
+function safeUUID() {
+  if (crypto && typeof crypto.randomUUID === 'function') {
+    try { return crypto.randomUUID(); } catch (e) { /* fallback */ }
+  }
+  // fallback to pseudo-UUID (not cryptographic but ok for request id)
+  return (
+    Date.now().toString(16) +
+    '-' +
+    Math.floor(Math.random() * 0xffff).toString(16) +
+    '-' +
+    Math.floor(Math.random() * 0xffff).toString(16)
+  );
 }
 
+/* Clean sensitive fields before logging/storing */
 function cleanSensitiveMeta(meta) {
   const clone = { ...meta };
   if (clone.cardNumber) clone.cardNumber = '****' + String(clone.cardNumber).slice(-4);
@@ -39,7 +48,69 @@ function cleanSensitiveMeta(meta) {
   return clone;
 }
 
-// GET /transactions/:id → proxy vers microservice provider
+/**
+ * Build headers to forward to microservices.
+ * - Forward Authorization only when it is present and truthy (avoid "Bearer null")
+ * - Always include internal token for inter-service authentication
+ * - Add x-request-id (generated when missing)
+ * - Include x-user-id/x-session-id when available
+ */
+function auditHeaders(req) {
+  const incomingAuth = req.headers.authorization || req.headers.Authorization || null;
+  const hasAuth = !!incomingAuth && String(incomingAuth).toLowerCase() !== 'bearer null' && String(incomingAuth).trim() !== 'null';
+
+  const reqId = req.headers['x-request-id'] || req.id || safeUUID();
+  const userId = req.user?._id || req.headers['x-user-id'] || '';
+
+  const headers = {
+    Accept: 'application/json',
+    'x-internal-token': config.internalToken || '',
+    'x-request-id': reqId,
+    'x-user-id': userId,
+    'x-session-id': req.headers['x-session-id'] || '',
+    // preserve device id if present (useful for auditing)
+    ...(req.headers['x-device-id'] ? { 'x-device-id': req.headers['x-device-id'] } : {}),
+  };
+
+  if (hasAuth) {
+    headers.Authorization = incomingAuth;
+  }
+
+  // Debug log: mask the Authorization but show a prefix to help trace
+  try {
+    const authPreview = headers.Authorization ? String(headers.Authorization).slice(0, 12) : null;
+    logger.debug('[Gateway][AUDIT HEADERS] forwarding', {
+      authPreview,
+      requestId: reqId,
+      userId,
+      dest: req.path,
+    });
+  } catch (e) { /* noop logging failure should not block */ }
+
+  return headers;
+}
+
+/* Small helper: safe axios request wrapper that logs richer info on errors */
+async function safeAxiosRequest(opts) {
+  try {
+    const resp = await axios(opts);
+    return resp;
+  } catch (err) {
+    // Normalize error object for callers
+    const status = err.response?.status || 502;
+    const data = err.response?.data || null;
+    const message = err.message || 'Unknown axios error';
+    logger.error('[Gateway][Axios] request failed', { url: opts.url, method: opts.method, status, data, message });
+    // rethrow with same shape used elsewhere
+    const e = new Error(message);
+    e.response = err.response;
+    throw e;
+  }
+}
+
+/* ---------- Controller actions ---------- */
+
+// GET /transactions/:id -> proxy vers microservice provider
 exports.getTransaction = async (req, res) => {
   const { id } = req.params;
   const provider = req.query.provider || 'paynoval';
@@ -49,21 +120,28 @@ exports.getTransaction = async (req, res) => {
     return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
   }
 
+  // normalize url (remove trailing slash)
+  const base = String(targetService).replace(/\/+$/, '');
+  const url = `${base}/transactions/${encodeURIComponent(id)}`;
+
   try {
-    const response = await axios.get(`${targetService}/transactions/${id}`, {
+    const response = await safeAxiosRequest({
+      method: 'get',
+      url,
       headers: auditHeaders(req),
+      params: req.query,
       timeout: 10000,
     });
     return res.status(response.status).json(response.data);
   } catch (err) {
     const status = err.response?.status || 502;
-    const error = err.response?.data?.error || 'Erreur lors du proxy GET transaction';
-    logger.error('[Gateway][TX] Erreur GET transaction:', { status, error, provider });
+    const error = err.response?.data?.error || err.response?.data?.message || 'Erreur lors du proxy GET transaction';
+    logger.error('[Gateway][TX] Erreur GET transaction:', { status, error, provider, transactionId: id });
     return res.status(status).json({ success: false, error });
   }
 };
 
-// GET /transactions → proxy vers provider
+// GET /transactions -> proxy vers provider
 exports.listTransactions = async (req, res) => {
   const provider = req.query.provider || 'paynoval';
   const targetService = PROVIDER_TO_SERVICE[provider];
@@ -71,15 +149,22 @@ exports.listTransactions = async (req, res) => {
   if (!targetService) {
     return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
   }
+
+  const base = String(targetService).replace(/\/+$/, '');
+  const url = `${base}/transactions`;
+
   try {
-    const response = await axios.get(`${targetService}/transactions`, {
+    const response = await safeAxiosRequest({
+      method: 'get',
+      url,
       headers: auditHeaders(req),
+      params: req.query,
       timeout: 15000,
     });
     return res.status(response.status).json(response.data);
   } catch (err) {
     const status = err.response?.status || 502;
-    const error = err.response?.data?.error || 'Erreur lors du proxy GET transactions';
+    const error = err.response?.data?.error || err.response?.data?.message || 'Erreur lors du proxy GET transactions';
     logger.error('[Gateway][TX] Erreur GET transactions:', { status, error, provider });
     return res.status(status).json({ success: false, error });
   }
@@ -87,8 +172,9 @@ exports.listTransactions = async (req, res) => {
 
 exports.initiateTransaction = async (req, res) => {
   const targetProvider = req.routedProvider || req.body.destination || req.body.provider;
-  const targetUrl = PROVIDER_TO_SERVICE[targetProvider] && PROVIDER_TO_SERVICE[targetProvider] + '/transactions/initiate';
-  console.log('[DEBUG] targetUrl:', targetUrl);
+  const targetService = PROVIDER_TO_SERVICE[targetProvider];
+  const targetUrl = targetService ? String(targetService).replace(/\/+$/, '') + '/transactions/initiate' : null;
+  logger.debug('[Gateway][TX] initiateTransaction targetUrl', { targetProvider, targetUrl });
 
   if (!targetUrl) {
     return res.status(400).json({ error: 'Provider (destination) inconnu.' });
@@ -100,7 +186,10 @@ exports.initiateTransaction = async (req, res) => {
   let statusResult = 'pending';
 
   try {
-    const response = await axios.post(targetUrl, req.body, {
+    const response = await safeAxiosRequest({
+      method: 'post',
+      url: targetUrl,
+      data: req.body,
       headers: auditHeaders(req),
       timeout: 15000,
     });
@@ -139,7 +228,7 @@ exports.initiateTransaction = async (req, res) => {
 
     return res.status(response.status).json(result);
   } catch (err) {
-    const error = err.response?.data?.error || 'Erreur interne provider';
+    const error = err.response?.data?.error || err.response?.data?.message || err.message || 'Erreur interne provider';
     const status = err.response?.status || 502;
 
     await AMLLog.create({
@@ -171,6 +260,7 @@ exports.initiateTransaction = async (req, res) => {
       updatedAt: now,
     });
 
+    logger.error('[Gateway][TX] initiateTransaction failed', { provider: targetProvider, error, status });
     return res.status(status).json({ error });
   }
 };
@@ -178,14 +268,19 @@ exports.initiateTransaction = async (req, res) => {
 exports.confirmTransaction = async (req, res) => {
   const provider = req.routedProvider || req.body.destination || req.body.provider;
   const { transactionId } = req.body;
-  const targetUrl = PROVIDER_TO_SERVICE[provider] && PROVIDER_TO_SERVICE[provider] + '/transactions/confirm';
+  const targetService = PROVIDER_TO_SERVICE[provider];
+  const targetUrl = targetService ? String(targetService).replace(/\/+$/, '') + '/transactions/confirm' : null;
+
   if (!targetUrl) {
     return res.status(400).json({ error: 'Provider (destination) inconnu.' });
   }
   const userId = req.user?._id || null;
   const now = new Date();
   try {
-    const response = await axios.post(targetUrl, req.body, {
+    const response = await safeAxiosRequest({
+      method: 'post',
+      url: targetUrl,
+      data: req.body,
       headers: auditHeaders(req),
       timeout: 15000,
     });
@@ -217,7 +312,7 @@ exports.confirmTransaction = async (req, res) => {
 
     return res.status(response.status).json(result);
   } catch (err) {
-    const error = err.response?.data?.error || 'Erreur interne provider';
+    const error = err.response?.data?.error || err.response?.data?.message || err.message || 'Erreur interne provider';
     const status = err.response?.status || 502;
 
     await AMLLog.create({
@@ -243,6 +338,7 @@ exports.confirmTransaction = async (req, res) => {
       { $set: { status: 'failed', updatedAt: now } }
     );
 
+    logger.error('[Gateway][TX] confirmTransaction failed', { provider, error, status });
     return res.status(status).json({ error });
   }
 };
@@ -250,14 +346,19 @@ exports.confirmTransaction = async (req, res) => {
 exports.cancelTransaction = async (req, res) => {
   const provider = req.routedProvider || req.body.destination || req.body.provider;
   const { transactionId } = req.body;
-  const targetUrl = PROVIDER_TO_SERVICE[provider] && PROVIDER_TO_SERVICE[provider] + '/transactions/cancel';
+  const targetService = PROVIDER_TO_SERVICE[provider];
+  const targetUrl = targetService ? String(targetService).replace(/\/+$/, '') + '/transactions/cancel' : null;
+
   if (!targetUrl) {
     return res.status(400).json({ error: 'Provider (destination) inconnu.' });
   }
   const userId = req.user?._id || null;
   const now = new Date();
   try {
-    const response = await axios.post(targetUrl, req.body, {
+    const response = await safeAxiosRequest({
+      method: 'post',
+      url: targetUrl,
+      data: req.body,
       headers: auditHeaders(req),
       timeout: 15000,
     });
@@ -289,7 +390,7 @@ exports.cancelTransaction = async (req, res) => {
 
     return res.status(response.status).json(result);
   } catch (err) {
-    const error = err.response?.data?.error || 'Erreur interne provider';
+    const error = err.response?.data?.error || err.response?.data?.message || err.message || 'Erreur interne provider';
     const status = err.response?.status || 502;
 
     await AMLLog.create({
@@ -315,13 +416,12 @@ exports.cancelTransaction = async (req, res) => {
       { $set: { status: 'failed', updatedAt: now } }
     );
 
+    logger.error('[Gateway][TX] cancelTransaction failed', { provider, error, status });
     return res.status(status).json({ error });
   }
 };
 
-
-// controllers/transactionsController.js (fin du fichier)
-
+// Refund / Reassign / Validate / Archive / Relaunch share the same forwarding pattern -> keep concise
 exports.refundTransaction = async (req, res) => {
   const provider = req.body.provider || req.body.destination || 'paynoval';
   const targetService = PROVIDER_TO_SERVICE[provider];
@@ -329,14 +429,12 @@ exports.refundTransaction = async (req, res) => {
     return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
   }
   try {
-    const response = await axios.post(`${targetService}/transactions/refund`, req.body, {
-      headers: auditHeaders(req),
-      timeout: 15000,
-    });
+    const url = String(targetService).replace(/\/+$/, '') + '/transactions/refund';
+    const response = await safeAxiosRequest({ method: 'post', url, data: req.body, headers: auditHeaders(req), timeout: 15000 });
     return res.status(response.status).json(response.data);
   } catch (err) {
     const status = err.response?.status || 502;
-    const error = err.response?.data?.error || 'Erreur proxy refund';
+    const error = err.response?.data?.error || err.message || 'Erreur proxy refund';
     logger.error('[Gateway][TX] Erreur refund:', { status, error, provider });
     return res.status(status).json({ success: false, error });
   }
@@ -349,23 +447,20 @@ exports.reassignTransaction = async (req, res) => {
     return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
   }
   try {
-    const response = await axios.post(`${targetService}/transactions/reassign`, req.body, {
-      headers: auditHeaders(req),
-      timeout: 15000,
-    });
+    const url = String(targetService).replace(/\/+$/, '') + '/transactions/reassign';
+    const response = await safeAxiosRequest({ method: 'post', url, data: req.body, headers: auditHeaders(req), timeout: 15000 });
     return res.status(response.status).json(response.data);
   } catch (err) {
     const status = err.response?.status || 502;
-    const error = err.response?.data?.error || 'Erreur proxy reassign';
+    const error = err.response?.data?.error || err.message || 'Erreur proxy reassign';
     logger.error('[Gateway][TX] Erreur reassign:', { status, error, provider });
     return res.status(status).json({ success: false, error });
   }
 };
 
-
-// Proxy vers le microservice PayNoval pour /validate
+// Proxy /validate
 exports.validateTransaction = async (req, res) => {
-  const provider = req.body.provider || 'paynoval'; // ou destination, à adapter selon ton usage
+  const provider = req.body.provider || 'paynoval';
   const targetService = PROVIDER_TO_SERVICE[provider];
 
   if (!targetService) {
@@ -373,21 +468,18 @@ exports.validateTransaction = async (req, res) => {
   }
 
   try {
-    const response = await axios.post(`${targetService}/transactions/validate`, req.body, {
-      headers: auditHeaders(req),
-      timeout: 15000,
-    });
+    const url = String(targetService).replace(/\/+$/, '') + '/transactions/validate';
+    const response = await safeAxiosRequest({ method: 'post', url, data: req.body, headers: auditHeaders(req), timeout: 15000 });
     return res.status(response.status).json(response.data);
   } catch (err) {
     const status = err.response?.status || 502;
-    const error = err.response?.data?.error || 'Erreur proxy /validate';
+    const error = err.response?.data?.error || err.message || 'Erreur proxy /validate';
     logger.error('[Gateway][TX] Erreur VALIDATE:', { status, error, provider });
     return res.status(status).json({ success: false, error });
   }
 };
 
-
-// ARCHIVER une transaction
+// Archive
 exports.archiveTransaction = async (req, res) => {
   const provider = req.body.provider || req.body.destination || 'paynoval';
   const targetService = PROVIDER_TO_SERVICE[provider];
@@ -395,20 +487,18 @@ exports.archiveTransaction = async (req, res) => {
     return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
   }
   try {
-    const response = await axios.post(`${targetService}/transactions/archive`, req.body, {
-      headers: auditHeaders(req),
-      timeout: 15000,
-    });
+    const url = String(targetService).replace(/\/+$/, '') + '/transactions/archive';
+    const response = await safeAxiosRequest({ method: 'post', url, data: req.body, headers: auditHeaders(req), timeout: 15000 });
     return res.status(response.status).json(response.data);
   } catch (err) {
     const status = err.response?.status || 502;
-    const error = err.response?.data?.error || 'Erreur proxy archive';
+    const error = err.response?.data?.error || err.message || 'Erreur proxy archive';
     logger.error('[Gateway][TX] Erreur archive:', { status, error, provider });
     return res.status(status).json({ success: false, error });
   }
 };
 
-// RELANCER une transaction
+// Relaunch
 exports.relaunchTransaction = async (req, res) => {
   const provider = req.body.provider || req.body.destination || 'paynoval';
   const targetService = PROVIDER_TO_SERVICE[provider];
@@ -416,17 +506,13 @@ exports.relaunchTransaction = async (req, res) => {
     return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
   }
   try {
-    const response = await axios.post(`${targetService}/transactions/relaunch`, req.body, {
-      headers: auditHeaders(req),
-      timeout: 15000,
-    });
+    const url = String(targetService).replace(/\/+$/, '') + '/transactions/relaunch';
+    const response = await safeAxiosRequest({ method: 'post', url, data: req.body, headers: auditHeaders(req), timeout: 15000 });
     return res.status(response.status).json(response.data);
   } catch (err) {
     const status = err.response?.status || 502;
-    const error = err.response?.data?.error || 'Erreur proxy relaunch';
+    const error = err.response?.data?.error || err.message || 'Erreur proxy relaunch';
     logger.error('[Gateway][TX] Erreur relaunch:', { status, error, provider });
     return res.status(status).json({ success: false, error });
   }
 };
-
-
