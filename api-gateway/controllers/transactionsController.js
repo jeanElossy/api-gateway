@@ -1,4 +1,5 @@
-
+// File: api-gateway/controllers/transactionsController.js
+'use strict';
 
 const axios = require('axios');
 const config = require('../src/config');
@@ -18,6 +19,15 @@ const {
   processReferralBonusIfEligible,
 } = require('../src/utils/referralUtils');
 
+// 🌐 Backend principal (API Users / Wallet / Notifications)
+const PRINCIPAL_URL = (config.principalUrl || process.env.PRINCIPAL_URL || '').replace(
+  /\/+$/,
+  ''
+);
+
+// 🧑‍💼 ID MongoDB de l’admin (admin@paynoval.com) – à configurer en ENV
+// ex: ADMIN_USER_ID=6920a9528e93adc20e71d2cf
+const ADMIN_USER_ID = config.adminUserId || process.env.ADMIN_USER_ID || null;
 
 /**
  * Mapping centralisé des providers -> service URL
@@ -162,6 +172,68 @@ function hashSecurityCode(code) {
     .createHash('sha256')
     .update(String(code || '').trim())
     .digest('hex');
+}
+
+/**
+ * 💰 Créditer la commission sur le compte admin dans le backend principal
+ *
+ * - amount : montant des frais (dans la devise currency)
+ * - currency : devise des frais (CAD, XOF, etc.)
+ * - kind : "transaction" | "cancellation" (pour les logs)
+ * - provider : stripe, mobilemoney, visa_direct, ...
+ */
+async function creditAdminCommissionFromGateway({ provider, kind, amount, currency, req }) {
+  try {
+    if (!PRINCIPAL_URL || !ADMIN_USER_ID) {
+      logger.warn(
+        '[Gateway][Fees] PRINCIPAL_URL ou ADMIN_USER_ID manquant, commission admin non créditée.'
+      );
+      return;
+    }
+
+    const num = parseFloat(amount);
+    if (!num || Number.isNaN(num) || num <= 0) {
+      return;
+    }
+
+    const url = `${PRINCIPAL_URL}/users/${ADMIN_USER_ID}/credit`;
+
+    // On propage le JWT du user si présent, sinon on laisse vide
+    const authHeader = req.headers.authorization || req.headers.Authorization || null;
+    const headers = {};
+    if (authHeader && String(authHeader).startsWith('Bearer ')) {
+      headers.Authorization = authHeader;
+    }
+
+    const description = `Commission PayNoval (${kind}) - provider=${provider}`;
+
+    await axios.post(
+      url,
+      {
+        amount: num,
+        currency: currency || 'CAD',
+        description,
+      },
+      { headers }
+    );
+
+    logger.info('[Gateway][Fees] Crédit admin OK', {
+      provider,
+      kind,
+      amount: num,
+      currency: currency || 'CAD',
+      adminUserId: ADMIN_USER_ID,
+    });
+  } catch (err) {
+    logger.error('[Gateway][Fees] Échec crédit admin', {
+      provider,
+      kind,
+      amount,
+      currency,
+      message: err.message,
+    });
+    // ⚠️ très important : on ne casse PAS la transaction si le crédit admin échoue
+  }
 }
 
 /**
@@ -453,6 +525,46 @@ exports.initiateTransaction = async (req, res) => {
       reference,
     });
 
+    // 💰 Commission admin globale pour tous les providers ≠ paynoval
+    if (targetProvider !== 'paynoval') {
+      try {
+        // On essaie de récupérer les frais renvoyés par le microservice
+        const rawFee =
+          (result && (result.fees || result.fee || result.transactionFees)) || null;
+
+        if (rawFee) {
+          const feeAmount = parseFloat(rawFee);
+          if (!Number.isNaN(feeAmount) && feeAmount > 0) {
+            const feeCurrency =
+              result.feeCurrency ||
+              result.currency ||
+              req.body.currency ||
+              req.body.senderCurrencySymbol ||
+              req.body.localCurrencySymbol ||
+              'CAD';
+
+            await creditAdminCommissionFromGateway({
+              provider: targetProvider,
+              kind: 'transaction',
+              amount: feeAmount,
+              currency: feeCurrency,
+              req,
+            });
+          }
+        } else {
+          logger.debug(
+            '[Gateway][Fees] Aucun champ fees/fee/transactionFees dans la réponse provider, commission admin non calculée.',
+            { provider: targetProvider }
+          );
+        }
+      } catch (e) {
+        logger.error('[Gateway][Fees] Erreur crédit admin (initiate)', {
+          provider: targetProvider,
+          message: e.message,
+        });
+      }
+    }
+
     return res.status(response.status).json(result);
   } catch (err) {
     const error =
@@ -503,8 +615,6 @@ exports.initiateTransaction = async (req, res) => {
     return res.status(status).json({ success: false, error });
   }
 };
-
-
 
 // POST /transactions/confirm
 exports.confirmTransaction = async (req, res) => {
@@ -754,10 +864,6 @@ exports.confirmTransaction = async (req, res) => {
   }
 };
 
-
-
-
-
 // POST /transactions/cancel
 exports.cancelTransaction = async (req, res) => {
   const provider = resolveProvider(req, 'paynoval');
@@ -825,6 +931,47 @@ exports.cancelTransaction = async (req, res) => {
       result,
       reference: transactionId,
     });
+
+    // 💰 Commission admin sur frais d’annulation pour providers ≠ paynoval
+    if (provider !== 'paynoval') {
+      try {
+        const rawCancellationFee =
+          result.cancellationFeeInSenderCurrency ||
+          result.cancellationFee ||
+          result.fees ||
+          null;
+
+        if (rawCancellationFee) {
+          const feeAmount = parseFloat(rawCancellationFee);
+          if (!Number.isNaN(feeAmount) && feeAmount > 0) {
+            const feeCurrency =
+              result.adminCurrency ||
+              result.currency ||
+              req.body.currency ||
+              req.body.senderCurrencySymbol ||
+              'CAD';
+
+            await creditAdminCommissionFromGateway({
+              provider,
+              kind: 'cancellation',
+              amount: feeAmount,
+              currency: feeCurrency,
+              req,
+            });
+          }
+        } else {
+          logger.debug(
+            '[Gateway][Fees] Aucun champ cancellationFee*/fees dans la réponse provider, pas de commission admin.',
+            { provider }
+          );
+        }
+      } catch (e) {
+        logger.error('[Gateway][Fees] Erreur crédit admin (cancel)', {
+          provider,
+          message: e.message,
+        });
+      }
+    }
 
     return res.status(response.status).json(result);
   } catch (err) {
