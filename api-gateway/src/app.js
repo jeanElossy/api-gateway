@@ -1,4 +1,4 @@
-// src/app.js
+// File: api-gateway/src/app.js
 
 const express = require('express');
 const cors = require('cors');
@@ -21,8 +21,11 @@ const axios = require('axios');
 const auditHeaders = require('./middlewares/auditHeaders');
 const userTransactionRoutes = require('../routes/transactions');
 
-// 🔧 CORRECTION : chemin vers la route interne
+// 🔧 Route interne existante (si tu en as besoin pour autre chose)
 const internalTransactionsRouter = require('../routes/internalTransactions');
+
+// 🔧 Nouvelles routes internes versionnées
+const internalRoutes = require('../routes/internalRoutes');
 
 // ✅ Swagger (docs Gateway)
 const swaggerUi = require('swagger-ui-express');
@@ -74,13 +77,14 @@ app.use(
 const openEndpoints = [
   '/healthz',
   '/status',
-  '/docs',                    // ← doc publique
-  '/openapi.json',            // ← spec publique
+  '/docs', // ← doc publique
+  '/openapi.json', // ← spec publique
   '/api/v1/fees/simulate',
   '/api/v1/commissions/simulate',
   '/api/v1/exchange-rates/rate',
   // 🔓 On laisse passer les appels internes (protégés par x-internal-token)
   '/internal/transactions',
+  '/api/v1/internal',
   // tu pourras ajouter ici tes routes d'auth publiques (login/register) si besoin
   // '/api/v1/auth',
 ];
@@ -119,8 +123,11 @@ app.use((req, res, next) => {
 // ─────────── ROUTES PRINCIPALES ───────────
 app.use('/api/v1/pay', paymentRoutes);
 
-// 🔧 Route interne pour les notifs de transactions (API PayNoval → Gateway)
+// 🔧 Route interne “legacy” (si tu l’utilises déjà ailleurs)
 app.use('/internal/transactions', internalTransactionsRouter);
+
+// 🔧 Nouvelles routes internes versionnées (API PayNoval → Gateway)
+app.use('/api/v1/internal', internalRoutes);
 
 // Pour les utilisateurs normaux
 app.use('/api/v1/transactions', userTransactionRoutes);
@@ -145,10 +152,9 @@ app.get('/status', async (req, res) => {
       const p = getProvider(name);
       if (!p || !p.enabled) return;
       try {
-        const health = await axios.get(
-          p.url + (p.health || '/health'),
-          { timeout: 3000 }
-        );
+        const health = await axios.get(p.url + (p.health || '/health'), {
+          timeout: 3000,
+        });
         statuses[name] = {
           up: true,
           status: health.data.status || 'ok',
