@@ -1,9 +1,12 @@
-// src/routes/fees.routes.js
+// routes/fees.js
 
 const express = require('express');
 const router = express.Router();
 
-const requireAdmin = require('../middlewares/requireAdmin');
+// ✅ Chemin correct vers le middleware admin
+const requireAdmin = require('../src/middlewares/requireAdmin');
+
+// ✅ Contrôleur des frais (dans /controllers)
 const feesCtrl = require('../controllers/feesController');
 
 // 👉 Endpoint public UNIQUE pour toute simulation de frais
