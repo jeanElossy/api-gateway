@@ -4,7 +4,8 @@
 /**
  * Normalise une devise en code ISO (EUR, USD, CAD, XOF, XAF…)
  * - Accepte symboles (€,$)
- * - Gère les variantes "F CFA" / "FCFA" / "CFA" → XOF par défaut (Afrique de l'Ouest)
+ * - Gère les variantes "F CFA" / "FCFA" / "CFA" → XOF (Afrique de l'Ouest)
+ * - Gère les variantes comme "$CAD", "CAD$", "USD$" → CAD, USD, etc.
  *
  * @param {string} input
  * @returns {string} code ISO upper-case ou chaîne vide
@@ -12,20 +13,13 @@
 function normalizeCurrency(input) {
   if (!input) return '';
 
-  // Nettoyage
-  const raw = String(input).trim().toUpperCase();
-  const compact = raw.replace(/\s+/g, '');
+  const raw = String(input).trim().toUpperCase(); // ex: "$CAD", "F CFA"
+  const compact = raw.replace(/\s+/g, '');        // ex: "$CAD", "FCFA"
+  const lettersOnly = raw.replace(/[^A-Z]/g, ''); // ex: "CAD" pour "$CAD"
 
-  // 1️⃣ Cas "directs" déjà ISO
-  if (['EUR', 'USD', 'CAD', 'XOF', 'XAF', 'GBP'].includes(raw)) return raw;
+  const KNOWN_ISO = ['EUR', 'USD', 'CAD', 'XOF', 'XAF', 'GBP'];
 
-  // 2️⃣ Symboles simples
-  if (raw === '€') return 'EUR';
-
-  // Pour PayNoval, à adapter si tu veux que "$" = CAD
-  if (raw === '$') return 'USD'; // ou 'CAD' si c'est ta logique business
-
-  // 3️⃣ Variantes CFA → XOF (Afrique de l'Ouest : CI, SN, ML, BF, TG, BJ, NE, GW)
+  // 1️⃣ CFA → XOF (avant tout le reste)
   const cfaKeywords = [
     'F CFA',
     'FCFA',
@@ -34,14 +28,26 @@ function normalizeCurrency(input) {
     'FRANCS CFA',
     'CFA',
   ];
-
   if (cfaKeywords.includes(raw) || cfaKeywords.includes(compact)) {
-    // Par défaut, on mappe sur XOF
     return 'XOF';
   }
 
-  // 4️⃣ Dernier fallback : on renvoie la version compactée (peut déjà être ISO)
-  return compact;
+  // 2️⃣ Devise déjà propre
+  if (KNOWN_ISO.includes(raw)) {
+    return raw;
+  }
+
+  // 3️⃣ On essaie de récupérer seulement les lettres (cas "$CAD", "CAD$", "USD$")
+  if (lettersOnly.length === 3 && KNOWN_ISO.includes(lettersOnly)) {
+    return lettersOnly;
+  }
+
+  // 4️⃣ Symboles simples seuls
+  if (raw === '€') return 'EUR';
+  if (raw === '$') return 'USD'; // ou 'CAD' selon ta logique business
+
+  // 5️⃣ Fallback : on renvoie juste les lettres (ça peut déjà être un code)
+  return lettersOnly || compact;
 }
 
 module.exports = {
