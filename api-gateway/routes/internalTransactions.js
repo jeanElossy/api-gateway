@@ -1,11 +1,14 @@
-// File: api-gateway/src/routes/internalTransactions.js
+// File: api-gateway/routes/internalTransactions.js
 'use strict';
 
 const express = require('express');
 const router  = express.Router();
 
-const logger = require('../logger') || console;
-const { notifyTransactionEvent } = require('../services/transactionNotificationService');
+// 🔧 Chemins corrigés : on remonte à /src/...
+const logger = require('../src/logger') || console;
+const {
+  notifyTransactionEvent,
+} = require('../src/services/transactionNotificationService');
 
 /**
  * Middleware simple pour vérifier le token interne entre services.
@@ -33,7 +36,7 @@ function requireInternalToken(req, res, next) {
 }
 
 /**
- * POST /api/v1/internal/transactions/notify
+ * POST /internal/transactions/notify
  *
  * ➜ Appelé par api-paynoval (notifyGateway.js) pour envoyer :
  *  - type: "initiated" | "confirmed" | "cancelled"

@@ -21,10 +21,8 @@ const axios = require('axios');
 const auditHeaders = require('./middlewares/auditHeaders');
 const userTransactionRoutes = require('../routes/transactions');
 
-
-const internalTransactionsRouter = require('./routes/internalTransactions');
-
-// ...
+// 🔧 CORRECTION : chemin vers la route interne
+const internalTransactionsRouter = require('../routes/internalTransactions');
 
 // ✅ Swagger (docs Gateway)
 const swaggerUi = require('swagger-ui-express');
@@ -81,6 +79,8 @@ const openEndpoints = [
   '/api/v1/fees/simulate',
   '/api/v1/commissions/simulate',
   '/api/v1/exchange-rates/rate',
+  // 🔓 On laisse passer les appels internes (protégés par x-internal-token)
+  '/internal/transactions',
   // tu pourras ajouter ici tes routes d'auth publiques (login/register) si besoin
   // '/api/v1/auth',
 ];
@@ -91,7 +91,7 @@ app.use((req, res, next) => {
     return res.sendStatus(204);
   }
 
-  // 2) Endpoints publics (docs, health, simulate, etc.)
+  // 2) Endpoints publics (docs, health, simulate, internal, etc.)
   const isOpen = openEndpoints.some(
     (ep) => req.path === ep || req.path.startsWith(ep + '/')
   );
@@ -119,7 +119,7 @@ app.use((req, res, next) => {
 // ─────────── ROUTES PRINCIPALES ───────────
 app.use('/api/v1/pay', paymentRoutes);
 
-
+// 🔧 Route interne pour les notifs de transactions (API PayNoval → Gateway)
 app.use('/internal/transactions', internalTransactionsRouter);
 
 // Pour les utilisateurs normaux
