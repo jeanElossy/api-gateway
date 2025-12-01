@@ -1,7 +1,15 @@
+// controllers/commissionsController.js
+
 const Commission = require('../src/models/Commission'); // Modèle mongoose
 const ExchangeRate = require('../src/models/ExchangeRate');
-const logger = require('../src/utils/logger');
 
+// ✅ Logger central (src/logger.js) avec fallback console
+let logger;
+try {
+  logger = require('../src/logger');
+} catch (e) {
+  logger = console;
+}
 
 /**
  * Liste toutes les commissions (avec filtres optionnels)
@@ -10,17 +18,21 @@ const logger = require('../src/utils/logger');
 exports.list = async (req, res) => {
   try {
     const filter = {};
+
     if (req.query.type) filter.type = req.query.type;
-    if (req.query.active !== undefined) filter.active = req.query.active === 'true';
+    if (req.query.active !== undefined) {
+      filter.active = req.query.active === 'true';
+    }
     if (req.query.provider) filter.provider = req.query.provider;
+
     const commissions = await Commission.find(filter).sort({ updatedAt: -1 });
+
     res.json({ success: true, data: commissions });
   } catch (err) {
     logger.error('[ADMIN][listCommissions]', err);
-    res.status(500).json({ success: false, error: "Erreur serveur." });
+    res.status(500).json({ success: false, error: 'Erreur serveur.' });
   }
 };
-
 
 /**
  * Créer une commission
@@ -37,15 +49,24 @@ exports.create = async (req, res) => {
   }
 };
 
-
 /**
  * Modifier une commission
  * PUT /api/v1/commissions/:id
  */
 exports.update = async (req, res) => {
   try {
-    const commission = await Commission.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    if (!commission) return res.status(404).json({ success: false, error: "Commission introuvable." });
+    const commission = await Commission.findByIdAndUpdate(
+      req.params.id,
+      req.body,
+      { new: true, runValidators: true }
+    );
+
+    if (!commission) {
+      return res
+        .status(404)
+        .json({ success: false, error: 'Commission introuvable.' });
+    }
+
     logger.info(`[ADMIN][COMMISSION] éditée: ${req.params.id}`);
     res.json({ success: true, data: commission });
   } catch (err) {
@@ -54,7 +75,6 @@ exports.update = async (req, res) => {
   }
 };
 
-
 /**
  * Supprimer une commission
  * DELETE /api/v1/commissions/:id
@@ -62,12 +82,18 @@ exports.update = async (req, res) => {
 exports.remove = async (req, res) => {
   try {
     const commission = await Commission.findByIdAndDelete(req.params.id);
-    if (!commission) return res.status(404).json({ success: false, error: "Commission introuvable." });
+
+    if (!commission) {
+      return res
+        .status(404)
+        .json({ success: false, error: 'Commission introuvable.' });
+    }
+
     logger.warn(`[ADMIN][COMMISSION] supprimée: ${req.params.id}`);
     res.json({ success: true });
   } catch (err) {
     logger.error('[ADMIN][removeCommission]', err);
-    res.status(500).json({ success: false, error: "Erreur serveur." });
+    res.status(500).json({ success: false, error: 'Erreur serveur.' });
   }
 };
 
@@ -78,23 +104,55 @@ exports.remove = async (req, res) => {
 exports.simulate = async (req, res) => {
   try {
     const { amount, type, provider, fromCurrency, toCurrency } = req.query;
-    if (!amount || !type) return res.status(400).json({ success: false, error: "Montant et type obligatoires." });
+
+    if (!amount || !type) {
+      return res.status(400).json({
+        success: false,
+        error: 'Montant et type obligatoires.',
+      });
+    }
+
+    const amountNum = Number(amount);
+    if (Number.isNaN(amountNum) || amountNum <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Montant invalide.',
+      });
+    }
 
     // 1. Récupère la commission la plus pertinente
-    let filter = { type, active: true };
+    const filter = { type, active: true };
     if (provider) filter.provider = provider;
-    let commission = await Commission.findOne(filter).sort({ updatedAt: -1 });
-    if (!commission) return res.status(404).json({ success: false, error: "Aucune règle de commission trouvée." });
+
+    const commission = await Commission.findOne(filter).sort({ updatedAt: -1 });
+
+    if (!commission) {
+      return res.status(404).json({
+        success: false,
+        error: 'Aucune règle de commission trouvée.',
+      });
+    }
 
     let fee = Number(commission.amount);
-    let resultCurrency = commission.currency || "XOF";
+    let resultCurrency = (commission.currency || 'XOF').toUpperCase();
 
     // 2. Récupère taux si conversion nécessaire
     let usedRate = 1;
-    if ((fromCurrency || resultCurrency) && fromCurrency && resultCurrency && fromCurrency.toUpperCase() !== resultCurrency.toUpperCase()) {
-      const rateDoc = await ExchangeRate.findOne({ from: fromCurrency.toUpperCase(), to: resultCurrency.toUpperCase(), active: true });
-      if (rateDoc && rateDoc.rate) usedRate = rateDoc.rate;
-      else usedRate = 1; // fallback sécurité
+    const fromCur = (fromCurrency || resultCurrency).toUpperCase();
+    const toCur = (toCurrency || resultCurrency).toUpperCase();
+
+    if (fromCur !== toCur) {
+      const rateDoc = await ExchangeRate.findOne({
+        from: fromCur,
+        to: toCur,
+        active: true,
+      });
+
+      if (rateDoc && rateDoc.rate) {
+        usedRate = rateDoc.rate;
+      } else {
+        usedRate = 1; // fallback sécurité
+      }
     }
 
     // 3. Applique le taux
@@ -109,18 +167,16 @@ exports.simulate = async (req, res) => {
         usedRate,
         provider: commission.provider || null,
         currency: resultCurrency,
-        fromCurrency: fromCurrency || resultCurrency,
-        toCurrency: resultCurrency,
+        fromCurrency: fromCur,
+        toCurrency: toCur,
         type,
         details: commission,
-      }
+      },
     });
   } catch (err) {
     logger.error('[ADMIN][simulateCommission]', err);
-    res.status(500).json({ success: false, error: "Erreur serveur." });
+    res.status(500).json({ success: false, error: 'Erreur serveur.' });
   }
 };
-
-
 
 exports.simulateCagnottePublic = exports.simulate;
