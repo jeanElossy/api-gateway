@@ -1,8 +1,9 @@
-// controllers/feesController.js
+// File: controllers/feesController.js
+'use strict';
 
-const Fee = require('../src/models/Fee');
-const ExchangeRate = require('../src/models/ExchangeRate');
-const axios = require('axios');
+const Fee = require('../src/models/Fee'); // adapte le chemin si besoin
+const { getExchangeRate } = require('../src/services/exchangeRateService');
+const { normalizeCurrency } = require('../src/utils/currency');
 
 // Optionnel : logger central
 let logger = null;
@@ -11,11 +12,6 @@ try {
 } catch (e) {
   logger = console;
 }
-
-// Config FX (à mettre dans ton .env)
-const FX_API_BASE_URL =
-  process.env.FX_API_BASE_URL || 'https://v6.exchangerate-api.com/v6';
-const FX_API_KEY = process.env.FX_API_KEY || 'REPLACE_ME';
 
 // Petit helper pour calculer des frais à partir d’un barème Fee
 function computeFeeFromBareme(feeDoc, amountNum) {
@@ -164,9 +160,9 @@ exports.simulateFee = async (req, res) => {
       country = '',
     } = req.query;
 
-    // 1️⃣ Normalisation des devises
-    const fromCur = (fromCurrency || currency || '').toUpperCase();
-    const toCur = (toCurrency || fromCur).toUpperCase();
+    // 1️⃣ Normalisation des devises (gère aussi F CFA / FCFA / symboles)
+    const fromCur = normalizeCurrency(fromCurrency || currency || '');
+    const toCur = normalizeCurrency(toCurrency || fromCur || '');
 
     if (!amount || !fromCur) {
       return res.status(400).json({
@@ -194,7 +190,10 @@ exports.simulateFee = async (req, res) => {
         active: true,
         currency: fromCur,
         minAmount: { $lte: amountNum },
-        $or: [{ maxAmount: { $gte: amountNum } }, { maxAmount: { $exists: false } }],
+        $or: [
+          { maxAmount: { $gte: amountNum } },
+          { maxAmount: { $exists: false } },
+        ],
       };
 
       if (provider) feeQuery.provider = provider;
@@ -212,10 +211,10 @@ exports.simulateFee = async (req, res) => {
         match.lastUsedAt = new Date();
         await match.save();
       } else {
-        // Fallback : barème par devise
+        // Fallback : barème par devise (après normalisation)
         if (['USD', 'CAD', 'EUR'].includes(fromCur)) {
           feeValue = 2.99;
-        } else if (['XOF', 'XAF', 'F CFA'].includes(fromCur)) {
+        } else if (['XOF', 'XAF'].includes(fromCur)) {
           feeValue = 300;
         } else {
           feeValue = 2;
@@ -244,7 +243,10 @@ exports.simulateFee = async (req, res) => {
       active: true,
       currency: fromCur,
       minAmount: { $lte: amountNum },
-      $or: [{ maxAmount: { $gte: amountNum } }, { maxAmount: { $exists: false } }],
+      $or: [
+        { maxAmount: { $gte: amountNum } },
+        { maxAmount: { $exists: false } },
+      ],
     };
 
     if (provider) baseQuery.provider = provider;
@@ -280,45 +282,11 @@ exports.simulateFee = async (req, res) => {
 
     const netAfterFees = amountNum - fees;
 
-    // 4️⃣ Taux de change
+    // 4️⃣ Taux de change via service centralisé (déjà normalisé)
+    const rate = await getExchangeRate(fromCur, toCur);
 
-    let rate = 1;
-    let convertedAmount = amountNum;
-    let convertedNet = netAfterFees;
-
-    // Taux custom admin prioritaire
-    const customRate = await ExchangeRate.findOne({
-      from: fromCur,
-      to: toCur,
-      active: true,
-    });
-
-    if (customRate) {
-      rate = customRate.rate;
-    } else if (fromCur !== toCur) {
-      // Fallback API FX
-      if (FX_API_KEY === 'REPLACE_ME') {
-        return res.status(500).json({
-          success: false,
-          message:
-            "Configuration FX manquante (FX_API_KEY). Merci de configurer l'API de taux de change.",
-        });
-      }
-
-      const url = `${FX_API_BASE_URL}/${FX_API_KEY}/latest/${fromCur}`;
-      const { data } = await axios.get(url);
-
-      if (!data || !data.conversion_rates || !data.conversion_rates[toCur]) {
-        return res
-          .status(400)
-          .json({ success: false, message: 'Taux de change introuvable' });
-      }
-
-      rate = data.conversion_rates[toCur];
-    }
-
-    convertedAmount = parseFloat((amountNum * rate).toFixed(2));
-    convertedNet = parseFloat((netAfterFees * rate).toFixed(2));
+    const convertedAmount = parseFloat((amountNum * rate).toFixed(2));
+    const convertedNet = parseFloat((netAfterFees * rate).toFixed(2));
 
     return res.json({
       success: true,
