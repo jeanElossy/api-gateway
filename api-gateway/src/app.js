@@ -12,7 +12,7 @@ const feesRoutes = require('../routes/fees');
 const exchangeRateRoutes = require('../routes/admin/exchangeRates.routes');
 const commissionsRoutes = require('../routes/commissionsRoutes');
 const { authMiddleware } = require('./middlewares/auth');
-const { rateLimiter } = require('./middlewares/rateLimit');
+const { globalIpLimiter, userLimiter } = require('./middlewares/rateLimit');
 const { loggerMiddleware } = require('./middlewares/logger');
 const logger = require('./logger');
 const mongoose = require('mongoose');
@@ -34,6 +34,9 @@ const path = require('path');
 const openapiSpec = YAML.load(path.join(__dirname, '../docs/openapi.yaml'));
 
 const app = express();
+
+// 🔐 Très important pour que req.ip / X-Forwarded-For soient corrects derrière Render / Cloudflare
+app.set('trust proxy', 1);
 
 // ─────────── SÉCURITÉ & LOG ───────────
 app.use(
@@ -60,7 +63,9 @@ if (config.nodeEnv !== 'test') {
 
 app.use(express.json({ limit: '2mb' }));
 app.use(loggerMiddleware);
-app.use(rateLimiter);
+
+// 🛡️ Bouclier global IP (avant tout le reste)
+app.use(globalIpLimiter);
 
 // ─────────── DOCS PUBLIQUES (avant auth) ───────────
 app.get('/openapi.json', (_req, res) => res.json(openapiSpec));
@@ -75,10 +80,11 @@ app.use(
 
 // ─────────── AUTH GLOBAL GATEWAY ───────────
 const openEndpoints = [
+  '/',               // ✅ root pour health-check Render
   '/healthz',
   '/status',
-  '/docs', // ← doc publique
-  '/openapi.json', // ← spec publique
+  '/docs',           // ← doc publique
+  '/openapi.json',   // ← spec publique
   '/api/v1/fees/simulate',
   '/api/v1/commissions/simulate',
   '/api/v1/exchange-rates/rate',
@@ -108,6 +114,10 @@ app.use((req, res, next) => {
 
 // Ajout des headers d'audit après auth (req.user déjà renseigné si JWT ok)
 app.use(auditHeaders);
+
+// 👤 Rate limit par utilisateur pour les routes authentifiées
+//    (le middleware interne skip automatiquement si req.user est absent)
+app.use(userLimiter);
 
 // ─────────── DB READY STATE ───────────
 app.use((req, res, next) => {
@@ -140,7 +150,17 @@ app.use('/api/v1/fees', feesRoutes);
 app.use('/api/v1/exchange-rates', exchangeRateRoutes);
 app.use('/api/v1/commissions', commissionsRoutes);
 
-// ─────────── MONITORING ───────────
+// ─────────── MONITORING / HEALTH ───────────
+
+// ✅ Root simple pour Render / navigateur
+app.get('/', (req, res) =>
+  res.json({
+    status: 'ok',
+    service: 'api-gateway',
+    ts: new Date().toISOString(),
+  })
+);
+
 app.get('/healthz', (req, res) =>
   res.json({ status: 'ok', ts: new Date().toISOString() })
 );
