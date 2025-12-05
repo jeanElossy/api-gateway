@@ -963,6 +963,7 @@ exports.initiateTransaction = async (req, res) => {
 // };
 
 // POST /transactions/confirm
+// POST /transactions/confirm
 exports.confirmTransaction = async (req, res) => {
   const provider = resolveProvider(req, 'paynoval');
   const { transactionId, securityCode } = req.body;
@@ -984,7 +985,7 @@ exports.confirmTransaction = async (req, res) => {
   // 🔐 Sécurité côté Gateway pour tous les providers ≠ paynoval
   // (pour paynoval, la sécurité question/code est gérée dans api-paynoval)
   if (provider !== 'paynoval') {
-    // On retrouve la transaction Gateway via la référence
+    // On retrouve la transaction Gateway via la référence (ou éventuellement l'_id si tu veux adapter)
     const txRecord = await Transaction.findOne({
       provider,
       reference: transactionId,
@@ -1044,7 +1045,7 @@ exports.confirmTransaction = async (req, res) => {
           errorMsg =
             'Code de sécurité incorrect. Nombre d’essais dépassé, transaction annulée.';
 
-          // Tu peux aussi déclencher ici un email 'cancelled' si besoin
+          // Email "cancelled" possible ici
           await triggerGatewayTxEmail('cancelled', {
             provider,
             req,
@@ -1080,6 +1081,7 @@ exports.confirmTransaction = async (req, res) => {
   }
 
   try {
+    // 1️⃣ Confirmation dans le microservice cible (PayNoval interne, OM, etc.)
     const response = await safeAxiosRequest({
       method: 'post',
       url: targetUrl,
@@ -1087,29 +1089,39 @@ exports.confirmTransaction = async (req, res) => {
       headers: auditHeaders(req),
       timeout: 15000,
     });
-    const result = response.data;
-    const newStatus = result.status || 'confirmed';
 
+    const result = response.data;
+
+    // Normalisation du statut pour coller au schema Gateway
+    let newStatus = result.status || 'confirmed';
+    if (newStatus === 'cancelled') newStatus = 'canceled';
+
+    // Référence commune (clé de lien entre api-paynoval et api-gateway)
+    const refFromResult =
+      result.reference ||
+      result.transaction?.reference ||
+      req.body.reference ||
+      transactionId;
+
+    // 2️⃣ Log AML
     await AMLLog.create({
       userId,
       type: 'confirm',
       provider,
       amount: result.amount || 0,
-      toEmail: result.toEmail || '',
+      toEmail:
+        result.recipientEmail || result.toEmail || result.email || '',
       details: cleanSensitiveMeta(req.body),
       flagged: false,
       flagReason: '',
       createdAt: now,
     });
 
-    // Mise à jour de la transaction dans le Gateway
-    await Transaction.findOneAndUpdate(
+    // 3️⃣ Mise à jour de la transaction dans le Gateway
+    const gatewayTx = await Transaction.findOneAndUpdate(
       {
-        $or: [
-          { reference: transactionId },
-          { 'meta.reference': transactionId },
-          { 'meta.id': transactionId },
-        ],
+        provider,
+        reference: refFromResult,
       },
       {
         $set: {
@@ -1117,20 +1129,28 @@ exports.confirmTransaction = async (req, res) => {
           confirmedAt: newStatus === 'confirmed' ? now : undefined,
           updatedAt: now,
         },
-      }
+      },
+      { new: true }
     );
 
-    // 🔔 EMAILS "confirmed" pour TOUS les providers (sauf PayNoval interne qui envoie déjà via notifyGateway.js)
+    if (!gatewayTx) {
+      logger.warn(
+        '[Gateway][TX] confirmTransaction: aucune transaction Gateway trouvée à mettre à jour',
+        { provider, transactionId, refFromResult }
+      );
+    }
+
+    // 4️⃣ EMAILS "confirmed" pour TOUS les providers
+    // (PayNoval interne envoie déjà ses propres emails, mais on peut compléter ici côté Gateway)
     await triggerGatewayTxEmail('confirmed', {
       provider,
       req,
       result,
-      reference: transactionId,
+      reference: refFromResult,
     });
 
-    // 🎁 PARRAINAGE GLOBAL : calculé dans le Gateway pour tous les providers
-    if (newStatus === 'confirmed') {
-      // Récupération du JWT pour appeler l’API principale (users, notifications, etc.)
+    // 5️⃣ 🎁 PARRAINAGE GLOBAL (calculé dans le Gateway)
+    if (newStatus === 'confirmed' && gatewayTx) {
       const authHeader =
         req.headers.authorization || req.headers.Authorization || null;
       const authToken =
@@ -1138,18 +1158,19 @@ exports.confirmTransaction = async (req, res) => {
           ? authHeader
           : null;
 
-      if (authToken && userId) {
-        // 1) Génération éventuelle du referralCode (à partir de 2 tx confirmées)
-        await checkAndGenerateReferralCodeInMain(userId, authToken);
+      // On privilégie le userId stocké dans la transaction Gateway
+      const referralUserId = gatewayTx.userId || userId;
 
-        // 2) Bonus parrainage :
-        //    - basé sur la somme des 2 premières transactions confirmées du filleul
-        //    - seuil selon la région du filleul
-        //    - bonus et devise selon la région du parrain
-        await processReferralBonusIfEligible(userId, authToken);
+      if (authToken && referralUserId) {
+        // 1) Génération éventuelle du referralCode (à partir de 2 tx confirmées)
+        await checkAndGenerateReferralCodeInMain(referralUserId, authToken);
+
+        // 2) Bonus parrainage selon les règles métiers
+        await processReferralBonusIfEligible(referralUserId, authToken);
       } else {
         logger.warn(
-          '[Gateway][TX][Referral] Authorization manquant ou userId nul, parrainage ignoré.'
+          '[Gateway][TX][Referral] Authorization manquant ou userId nul, parrainage ignoré.',
+          { tokenPresent: !!authToken, referralUserId }
         );
       }
     }
@@ -1189,8 +1210,10 @@ exports.confirmTransaction = async (req, res) => {
       createdAt: now,
     });
 
+    // On essaye quand même de marquer la transaction Gateway comme "failed"
     await Transaction.findOneAndUpdate(
       {
+        provider,
         $or: [
           { reference: transactionId },
           { 'meta.reference': transactionId },
