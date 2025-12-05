@@ -4,6 +4,10 @@ const axios = require('axios');
 const config = require('../src/config');
 const logger = require('../src/logger');
 
+/**
+ * Nettoie les champs sensibles avant de forward vers les microservices
+ * (on évite de logger/propager le numéro de carte brut, CVC, etc.)
+ */
 function cleanSensitiveMeta(meta) {
   const clone = { ...meta };
   if (clone.cardNumber) clone.cardNumber = '****' + clone.cardNumber.slice(-4);
@@ -12,6 +16,7 @@ function cleanSensitiveMeta(meta) {
   return clone;
 }
 
+// Mapping provider → URL du microservice de paiement
 const PROVIDER_TO_ENDPOINT = {
   paynoval:    `${config.microservices.paynoval}/pay`,
   stripe:      `${config.microservices.stripe}/pay`,
@@ -22,6 +27,10 @@ const PROVIDER_TO_ENDPOINT = {
   flutterwave: config.microservices.flutterwave ? `${config.microservices.flutterwave}/pay` : undefined,
 };
 
+/**
+ * Headers d’audit envoyés vers les microservices
+ * (auth, user, session, etc.)
+ */
 function auditHeaders(req) {
   return {
     'Authorization': req.headers.authorization,
@@ -32,10 +41,115 @@ function auditHeaders(req) {
   };
 }
 
+/**
+ * Détection du provider à partir du body
+ */
 function resolveProviderKey(body) {
   if (body.provider && PROVIDER_TO_ENDPOINT[body.provider]) return body.provider;
   if (body.destination && PROVIDER_TO_ENDPOINT[body.destination]) return body.destination;
   return null;
+}
+
+/**
+ * 🔗 URL de base du backend qui gère les cagnottes
+ *
+ * 👉 À configurer dans ton config :
+ *    - soit config.microservices.cagnottes
+ *    - soit, par défaut, on retombe sur ton backend "paynoval"
+ */
+function getCagnottesBaseUrl() {
+  const base =
+    config.microservices.cagnottes ||
+    config.microservices.paynoval ||
+    '';
+  return base.replace(/\/+$/, '');
+}
+
+/**
+ * 🧩 Side-effect : informer le backend Cagnottes qu’un paiement
+ * externe pour une cagnotte a été confirmé côté Gateway.
+ *
+ * 👉 Appelle la route :
+ *    POST /api/v1/cagnottes/:id/external-payment-callback
+ *
+ * ⚠️ IMPORTANT :
+ *  - Protégé par un token partagé CAGNOTTE_GATEWAY_TOKEN
+ *  - On ne bloque PAS la réponse client si ça échoue
+ */
+async function notifyCagnotteExternalContribution(req, providerKey, providerResponse) {
+  const { context, cagnotteId, cagnotteCode, donorName } = req.body || {};
+
+  // Si ce paiement n’est PAS lié à une cagnotte → on sort
+  if (context !== 'cagnotte' || !cagnotteId) {
+    return;
+  }
+
+  const baseUrl = getCagnottesBaseUrl();
+  if (!baseUrl) {
+    logger.warn('[PAYMENT→CAGNOTTE] URL backend cagnottes non configurée (config.microservices.cagnottes ou paynoval)');
+    return;
+  }
+
+  const url = `${baseUrl}/api/v1/cagnottes/${cagnotteId}/external-payment-callback`;
+
+  const amount = Number(req.body.amount) || 0;
+  if (!amount || amount <= 0) {
+    logger.warn('[PAYMENT→CAGNOTTE] Montant invalide pour cagnotte', {
+      cagnotteId,
+      amount: req.body.amount,
+    });
+    return;
+  }
+
+  // Nom du contributeur : on prend en priorité donorName, sinon un fallback
+  const nom =
+    donorName ||
+    req.body.recipientName ||
+    req.user?.fullName ||
+    'Contributeur externe';
+
+  // Référence externe renvoyée par le microservice de paiement
+  const externalRef =
+    providerResponse?.data?.reference ||
+    providerResponse?.data?.id ||
+    null;
+
+  const payload = {
+    amount,
+    nom,
+    status: 'succeeded', // ici on part du principe que si on est là, le paiement est OK
+    provider: providerKey,
+    externalRef,
+    // Petit bonus : on peut envoyer le code de participation si tu veux t’en servir
+    codeParticipation: cagnotteCode || req.body.codeParticipation || undefined,
+  };
+
+  try {
+    await axios.post(
+      url,
+      payload,
+      {
+        timeout: 8000,
+        headers: {
+          // 🔐 Token partagé entre Gateway et backend cagnottes
+          'x-gateway-token': process.env.CAGNOTTE_GATEWAY_TOKEN || '',
+        },
+      }
+    );
+    logger.info('[PAYMENT→CAGNOTTE] Participation externe notifiée', {
+      cagnotteId,
+      amount,
+      provider: providerKey,
+      externalRef,
+    });
+  } catch (err) {
+    logger.error('[PAYMENT→CAGNOTTE] Échec callback externe', {
+      cagnotteId,
+      provider: providerKey,
+      error: err.response?.data || err.message,
+    });
+    // On NE jette PAS l’erreur : la réponse au client doit rester OK
+  }
 }
 
 exports.handlePayment = async (req, res) => {
@@ -52,6 +166,7 @@ exports.handlePayment = async (req, res) => {
   }
 
   try {
+    // 1️⃣ On envoie la requête vers le microservice de paiement
     const response = await axios.post(
       targetUrl,
       cleanSensitiveMeta(req.body),
@@ -60,6 +175,7 @@ exports.handlePayment = async (req, res) => {
         timeout: 15000,
       }
     );
+
     logger.info(`[PAYMENT→${providerKey}] Paiement réussi`, {
       provider: providerKey,
       amount: req.body.amount,
@@ -69,6 +185,20 @@ exports.handlePayment = async (req, res) => {
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
       ref: response.data?.reference || response.data?.id || null,
     });
+
+    // 2️⃣ SI ce paiement est lié à une cagnotte → on notifie le backend Cagnottes
+    //    (flot "gens SANS compte PayNoval" ou paiement externe pour une cagnotte)
+    try {
+      await notifyCagnotteExternalContribution(req, providerKey, response);
+    } catch (err) {
+      // hyper défensif : on log mais on ne bloque PAS la réponse au client
+      logger.error('[PAYMENT] Erreur side-effect cagnotte', {
+        provider: providerKey,
+        error: err.message,
+      });
+    }
+
+    // 3️⃣ Réponse normale au client
     return res.status(response.status).json(response.data);
 
   } catch (err) {

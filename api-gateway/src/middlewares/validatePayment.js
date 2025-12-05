@@ -3,8 +3,24 @@
 const Joi = require('joi');
 const logger = require('../logger');
 
+// 🧩 Champs communs pour le contexte "cagnotte"
+const commonMetaFields = {
+  // Permet de taguer le paiement comme étant lié à une cagnotte
+  context: Joi.string().valid('cagnotte').optional(),
+
+  // ID MongoDB de la cagnotte (utilisé par le Gateway pour le callback)
+  cagnotteId: Joi.string().hex().length(24).optional(),
+
+  // Code de participation (PN-XXXXXX) si tu veux aussi le passer
+  cagnotteCode: Joi.string().max(64).optional(),
+
+  // Nom du contributeur pour l’affichage dans la cagnotte
+  donorName: Joi.string().max(128).optional(),
+};
+
 // Schémas de validation par provider
 const paynovalPaymentSchema = Joi.object({
+  ...commonMetaFields,
   provider: Joi.string().valid('paynoval').required(),
   toEmail: Joi.string().email().required(),
   amount: Joi.number().min(1).required(),
@@ -23,6 +39,7 @@ const paynovalPaymentSchema = Joi.object({
 });
 
 const stripePaymentSchema = Joi.object({
+  ...commonMetaFields,
   provider: Joi.string().valid('stripe').required(),
   amount: Joi.number().min(1).required(),
   currency: Joi.string().length(3).uppercase().required(),
@@ -35,6 +52,7 @@ const stripePaymentSchema = Joi.object({
 });
 
 const mobileMoneyPaymentSchema = Joi.object({
+  ...commonMetaFields,
   provider: Joi.string().valid('mobilemoney').required(),
   amount: Joi.number().min(1).required(),
   phoneNumber: Joi.string().pattern(/^[0-9+]{8,16}$/).required(),
@@ -44,6 +62,7 @@ const mobileMoneyPaymentSchema = Joi.object({
 });
 
 const bankPaymentSchema = Joi.object({
+  ...commonMetaFields,
   provider: Joi.string().valid('bank').required(),
   amount: Joi.number().min(1).required(),
   iban: Joi.string().pattern(/^[A-Z0-9]{15,34}$/).required(),
@@ -54,6 +73,7 @@ const bankPaymentSchema = Joi.object({
 });
 
 const visaDirectSchema = Joi.object({
+  ...commonMetaFields,
   provider: Joi.string().valid('visa_direct').required(),
   amount: Joi.number().min(1).required(),
   cardNumber: Joi.string().creditCard().required(),
@@ -66,6 +86,7 @@ const visaDirectSchema = Joi.object({
 });
 
 const stripe2momoSchema = Joi.object({
+  ...commonMetaFields,
   provider: Joi.string().valid('stripe2momo').required(),
   amount: Joi.number().min(1).required(),
   // Stripe part
@@ -82,6 +103,7 @@ const stripe2momoSchema = Joi.object({
 
 // --- FLUTTERWAVE SCHEMA ---
 const flutterwavePaymentSchema = Joi.object({
+  ...commonMetaFields,
   provider: Joi.string().valid('flutterwave').required(),
   amount: Joi.number().min(1).required(),
   currency: Joi.string().length(3).uppercase().required(),
@@ -127,7 +149,11 @@ function validatePayment(req, res, next) {
     });
   }
   const schema = SCHEMAS[providerKey];
-  const { error } = schema.validate(req.body, { abortEarly: false, stripUnknown: true });
+  const { error, value } = schema.validate(req.body, {
+    abortEarly: false,
+    stripUnknown: true,
+  });
+
   if (error) {
     logger.warn(`[validatePayment][${providerKey}] Validation failed`, {
       details: error.details.map(d => d.message),
@@ -140,6 +166,10 @@ function validatePayment(req, res, next) {
       details: error.details.map(d => d.message),
     });
   }
+
+  // On remplace le body par la version "clean" validée (sans unknown)
+  req.body = value;
+
   // Pour usage ultérieur dans les controllers (routing cible dynamique)
   req.routedProvider = providerKey;
   next();
