@@ -162,6 +162,7 @@ async function patchUserInMain(userId, updates, authToken) {
   }
 }
 
+
 /**
  * Crédite la balance dans le service principal
  * ➜ utilise la route interne /users/:id/credit-internal
