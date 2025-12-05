@@ -8,7 +8,6 @@ const Transaction = require('../src/models/Transaction');
 const AMLLog = require('../src/models/AMLLog');
 const crypto = require('crypto');
 
-
 // ⬇️ service d’email transactionnel centralisé (SendGrid + templates)
 const {
   notifyTransactionEvent,
@@ -443,101 +442,12 @@ exports.getTransaction = async (req, res) => {
 };
 
 // GET /transactions
-// exports.listTransactions = async (req, res) => {
-//   const provider = resolveProvider(req, 'paynoval');
-//   const targetService = PROVIDER_TO_SERVICE[provider];
-
-//   if (!targetService) {
-//     return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
-//   }
-
-//   const base = String(targetService).replace(/\/+$/, '');
-//   const url = `${base}/transactions`;
-
-//   try {
-//     const response = await safeAxiosRequest({
-//       method: 'get',
-//       url,
-//       headers: auditHeaders(req),
-//       params: req.query,
-//       timeout: 15000,
-//     });
-//     return res.status(response.status).json(response.data);
-//   } catch (err) {
-//     // 🔎 Gestion spécifique Cloudflare 429/403
-//     if (err.isCloudflareChallenge) {
-//       logger.error('[Gateway][TX] Cloudflare challenge détecté sur GET transactions', {
-//         provider,
-//         upstreamStatus: err.response?.status,
-//         path: '/transactions',
-//       });
-
-//       // On NE renvoie PAS 429 à l’app (sinon confusion avec ton rateLimit),
-//       // mais un 503 explicite.
-//       return res.status(503).json({
-//         success: false,
-//         error:
-//           "Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.",
-//         details: 'cloudflare_challenge',
-//       });
-//     }
-
-//     const status = err.response?.status || 502;
-//     const error =
-//       err.response?.data?.error ||
-//       err.response?.data?.message ||
-//       'Erreur lors du proxy GET transactions';
-//     logger.error('[Gateway][TX] Erreur GET transactions:', { status, error, provider });
-//     return res.status(status).json({ success: false, error });
-//   }
-// };
-
-
-// GET /transactions
 exports.listTransactions = async (req, res) => {
   const provider = resolveProvider(req, 'paynoval');
-  const userId = getUserId(req);
-
-  // 🔹 1) Cas principal : historique PayNoval interne → lecture directe DB Gateway
-  if (provider === 'paynoval') {
-    try {
-      if (!userId) {
-        return res.status(401).json({
-          success: false,
-          error: 'Utilisateur non authentifié',
-        });
-      }
-
-      const txs = await Transaction.find({ userId })
-        .sort({ createdAt: -1 })
-        .limit(200)
-        .lean();
-
-      return res.status(200).json({
-        success: true,
-        data: txs,
-        source: 'gateway-db',
-      });
-    } catch (e) {
-      logger.error('[Gateway][TX] Erreur listTransactions (DB):', {
-        message: e.message,
-        stack: e.stack,
-        userId,
-      });
-      return res.status(500).json({
-        success: false,
-        error: 'Erreur lors de la récupération des transactions',
-      });
-    }
-  }
-
-  // 🔹 2) Autres providers (stripe, mobilemoney, etc.) → on garde ton proxy actuel
   const targetService = PROVIDER_TO_SERVICE[provider];
 
   if (!targetService) {
-    return res
-      .status(400)
-      .json({ success: false, error: `Provider inconnu: ${provider}` });
+    return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
   }
 
   const base = String(targetService).replace(/\/+$/, '');
@@ -551,23 +461,22 @@ exports.listTransactions = async (req, res) => {
       params: req.query,
       timeout: 15000,
     });
-
     return res.status(response.status).json(response.data);
   } catch (err) {
+    // 🔎 Gestion spécifique Cloudflare 429/403
     if (err.isCloudflareChallenge) {
-      logger.error(
-        '[Gateway][TX] Cloudflare challenge détecté sur GET transactions',
-        {
-          provider,
-          upstreamStatus: err.response?.status,
-          path: '/transactions',
-        }
-      );
+      logger.error('[Gateway][TX] Cloudflare challenge détecté sur GET transactions', {
+        provider,
+        upstreamStatus: err.response?.status,
+        path: '/transactions',
+      });
 
+      // On NE renvoie PAS 429 à l’app (sinon confusion avec ton rateLimit),
+      // mais un 503 explicite.
       return res.status(503).json({
         success: false,
         error:
-          'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
+          "Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.",
         details: 'cloudflare_challenge',
       });
     }
@@ -577,16 +486,11 @@ exports.listTransactions = async (req, res) => {
       err.response?.data?.error ||
       err.response?.data?.message ||
       'Erreur lors du proxy GET transactions';
-
-    logger.error('[Gateway][TX] Erreur GET transactions:', {
-      status,
-      error,
-      provider,
-    });
-
+    logger.error('[Gateway][TX] Erreur GET transactions:', { status, error, provider });
     return res.status(status).json({ success: false, error });
   }
 };
+
 
 
 
