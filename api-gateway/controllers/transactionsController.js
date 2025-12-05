@@ -700,6 +700,268 @@ exports.initiateTransaction = async (req, res) => {
   }
 };
 
+// // POST /transactions/confirm
+// exports.confirmTransaction = async (req, res) => {
+//   const provider = resolveProvider(req, 'paynoval');
+//   const { transactionId, securityCode } = req.body;
+//   const targetService = PROVIDER_TO_SERVICE[provider];
+//   const targetUrl = targetService
+//     ? String(targetService).replace(/\/+$/, '') + '/transactions/confirm'
+//     : null;
+
+//   if (!targetUrl) {
+//     return res.status(400).json({
+//       success: false,
+//       error: 'Provider (destination) inconnu.',
+//     });
+//   }
+
+//   const userId = getUserId(req);
+//   const now = new Date();
+
+//   // 🔐 Sécurité côté Gateway pour tous les providers ≠ paynoval
+//   // (pour paynoval, la sécurité question/code est gérée dans api-paynoval)
+//   if (provider !== 'paynoval') {
+//     // On retrouve la transaction Gateway via la référence
+//     const txRecord = await Transaction.findOne({
+//       provider,
+//       reference: transactionId,
+//     });
+
+//     if (!txRecord) {
+//       return res.status(404).json({
+//         success: false,
+//         error: 'Transaction non trouvée dans le Gateway.',
+//       });
+//     }
+
+//     if (txRecord.status !== 'pending') {
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Transaction déjà traitée ou annulée.',
+//       });
+//     }
+
+//     if (txRecord.requiresSecurityValidation && txRecord.securityCodeHash) {
+//       if (
+//         txRecord.securityLockedUntil &&
+//         txRecord.securityLockedUntil > now
+//       ) {
+//         return res.status(423).json({
+//           success: false,
+//           error:
+//             'Transaction temporairement bloquée suite à des tentatives infructueuses. Réessayez plus tard.',
+//         });
+//       }
+
+//       if (!securityCode) {
+//         return res.status(400).json({
+//           success: false,
+//           error: 'securityCode requis pour confirmer cette transaction.',
+//         });
+//       }
+
+//       const incomingHash = hashSecurityCode(securityCode);
+
+//       if (incomingHash !== txRecord.securityCodeHash) {
+//         const attempts = (txRecord.securityAttempts || 0) + 1;
+
+//         const update = {
+//           securityAttempts: attempts,
+//           updatedAt: now,
+//         };
+
+//         let errorMsg;
+//         if (attempts >= 3) {
+//           update.status = 'canceled';
+//           update.cancelledAt = now;
+//           update.cancelReason = 'Code de sécurité erroné (trop d’essais)';
+//           update.securityLockedUntil = new Date(
+//             now.getTime() + 15 * 60 * 1000
+//           );
+//           errorMsg =
+//             'Code de sécurité incorrect. Nombre d’essais dépassé, transaction annulée.';
+
+//           // Tu peux aussi déclencher ici un email 'cancelled' si besoin
+//           await triggerGatewayTxEmail('cancelled', {
+//             provider,
+//             req,
+//             result: {
+//               ...txRecord.toObject(),
+//               status: 'canceled',
+//               amount: txRecord.amount,
+//               toEmail: txRecord.toEmail,
+//             },
+//             reference: transactionId,
+//           });
+//         } else {
+//           const remaining = 3 - attempts;
+//           errorMsg = `Code de sécurité incorrect. Il vous reste ${remaining} essai(s).`;
+//         }
+
+//         await Transaction.updateOne({ _id: txRecord._id }, { $set: update });
+//         return res.status(401).json({ success: false, error: errorMsg });
+//       }
+
+//       // Code OK → reset des tentatives
+//       await Transaction.updateOne(
+//         { _id: txRecord._id },
+//         {
+//           $set: {
+//             securityAttempts: 0,
+//             securityLockedUntil: null,
+//             updatedAt: now,
+//           },
+//         }
+//       );
+//     }
+//   }
+
+//   try {
+//     const response = await safeAxiosRequest({
+//       method: 'post',
+//       url: targetUrl,
+//       data: req.body,
+//       headers: auditHeaders(req),
+//       timeout: 15000,
+//     });
+//     const result = response.data;
+//     const newStatus = result.status || 'confirmed';
+
+//     await AMLLog.create({
+//       userId,
+//       type: 'confirm',
+//       provider,
+//       amount: result.amount || 0,
+//       toEmail: result.toEmail || '',
+//       details: cleanSensitiveMeta(req.body),
+//       flagged: false,
+//       flagReason: '',
+//       createdAt: now,
+//     });
+
+//     // Mise à jour de la transaction dans le Gateway
+//     await Transaction.findOneAndUpdate(
+//       {
+//         $or: [
+//           { reference: transactionId },
+//           { 'meta.reference': transactionId },
+//           { 'meta.id': transactionId },
+//         ],
+//       },
+//       {
+//         $set: {
+//           status: newStatus,
+//           confirmedAt: newStatus === 'confirmed' ? now : undefined,
+//           updatedAt: now,
+//         },
+//       }
+//     );
+
+//     // 🔔 EMAILS "confirmed" pour TOUS les providers (sauf PayNoval interne qui envoie déjà via notifyGateway.js)
+//     await triggerGatewayTxEmail('confirmed', {
+//       provider,
+//       req,
+//       result,
+//       reference: transactionId,
+//     });
+
+//     // 🎁 PARRAINAGE GLOBAL : calculé dans le Gateway pour tous les providers
+//     if (newStatus === 'confirmed') {
+//       const txForReferral = {
+//         id:
+//           result.transactionId ||
+//           result.id ||
+//           transactionId,
+//         reference: result.reference || transactionId,
+//         amount: result.amount || req.body.amount || 0,
+//         currency:
+//           result.currency ||
+//           req.body.currency ||
+//           req.body.senderCurrencySymbol ||
+//           req.body.localCurrencySymbol ||
+//           '---',
+//         country: result.country || req.body.country || undefined,
+//         provider,
+//         confirmedAt: new Date().toISOString(),
+//       };
+
+//       // Récupération du JWT pour appeler l’API principale (users, notifications, etc.)
+//       const authHeader =
+//         req.headers.authorization || req.headers.Authorization || null;
+//       const authToken =
+//         authHeader && String(authHeader).startsWith('Bearer ')
+//           ? authHeader
+//           : null;
+
+//       if (authToken && userId) {
+//         // 1) Génération éventuelle du referralCode (à partir de 2 tx confirmées)
+//         await checkAndGenerateReferralCodeInMain(userId, authToken);
+
+//         // 2) Bonus parrainage (1ʳᵉ vraie transaction confirmée)
+//         await processReferralBonusIfEligible(userId, txForReferral, authToken);
+//       } else {
+//         logger.warn(
+//           '[Gateway][TX][Referral] Authorization manquant ou userId nul, parrainage ignoré.'
+//         );
+//       }
+//     }
+
+//     return res.status(response.status).json(result);
+//   } catch (err) {
+//     if (err.isCloudflareChallenge) {
+//       logger.error('[Gateway][TX] Cloudflare challenge détecté sur CONFIRM', {
+//         provider,
+//         upstreamStatus: err.response?.status,
+//       });
+
+//       return res.status(503).json({
+//         success: false,
+//         error:
+//           "Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.",
+//         details: 'cloudflare_challenge',
+//       });
+//     }
+
+//     const error =
+//       err.response?.data?.error ||
+//       err.response?.data?.message ||
+//       err.message ||
+//       'Erreur interne provider';
+//     const status = err.response?.status || 502;
+
+//     await AMLLog.create({
+//       userId,
+//       type: 'confirm',
+//       provider,
+//       amount: 0,
+//       toEmail: '',
+//       details: cleanSensitiveMeta({ ...req.body, error }),
+//       flagged: false,
+//       flagReason: '',
+//       createdAt: now,
+//     });
+
+//     await Transaction.findOneAndUpdate(
+//       {
+//         $or: [
+//           { reference: transactionId },
+//           { 'meta.reference': transactionId },
+//           { 'meta.id': transactionId },
+//         ],
+//       },
+//       { $set: { status: 'failed', updatedAt: now } }
+//     );
+
+//     logger.error('[Gateway][TX] confirmTransaction failed', {
+//       provider,
+//       error,
+//       status,
+//     });
+//     return res.status(status).json({ success: false, error });
+//   }
+// };
+
 // POST /transactions/confirm
 exports.confirmTransaction = async (req, res) => {
   const provider = resolveProvider(req, 'paynoval');
@@ -868,24 +1130,6 @@ exports.confirmTransaction = async (req, res) => {
 
     // 🎁 PARRAINAGE GLOBAL : calculé dans le Gateway pour tous les providers
     if (newStatus === 'confirmed') {
-      const txForReferral = {
-        id:
-          result.transactionId ||
-          result.id ||
-          transactionId,
-        reference: result.reference || transactionId,
-        amount: result.amount || req.body.amount || 0,
-        currency:
-          result.currency ||
-          req.body.currency ||
-          req.body.senderCurrencySymbol ||
-          req.body.localCurrencySymbol ||
-          '---',
-        country: result.country || req.body.country || undefined,
-        provider,
-        confirmedAt: new Date().toISOString(),
-      };
-
       // Récupération du JWT pour appeler l’API principale (users, notifications, etc.)
       const authHeader =
         req.headers.authorization || req.headers.Authorization || null;
@@ -898,8 +1142,11 @@ exports.confirmTransaction = async (req, res) => {
         // 1) Génération éventuelle du referralCode (à partir de 2 tx confirmées)
         await checkAndGenerateReferralCodeInMain(userId, authToken);
 
-        // 2) Bonus parrainage (1ʳᵉ vraie transaction confirmée)
-        await processReferralBonusIfEligible(userId, txForReferral, authToken);
+        // 2) Bonus parrainage :
+        //    - basé sur la somme des 2 premières transactions confirmées du filleul
+        //    - seuil selon la région du filleul
+        //    - bonus et devise selon la région du parrain
+        await processReferralBonusIfEligible(userId, authToken);
       } else {
         logger.warn(
           '[Gateway][TX][Referral] Authorization manquant ou userId nul, parrainage ignoré.'
@@ -961,6 +1208,9 @@ exports.confirmTransaction = async (req, res) => {
     return res.status(status).json({ success: false, error });
   }
 };
+
+
+
 
 
 

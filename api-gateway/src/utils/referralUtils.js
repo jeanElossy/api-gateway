@@ -8,7 +8,6 @@ const config             = require('../config');
 const Transaction        = require('../models/Transaction');
 
 // URL du backend principal (API Users / Wallet / Notifications)
-// ➜ Doit pointer vers la base type : https://backend.paynoval.com/api/v1
 const PRINCIPAL_URL = (config.principalUrl || process.env.PRINCIPAL_URL || '').replace(/\/+$/, '');
 
 // Token interne partagé avec le backend principal
@@ -17,9 +16,66 @@ const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || '';
 // Générateur nanoid à 3 chiffres (0-9)
 const nanoid = customAlphabet('0123456789', 3);
 
-// Listes des pays Europe/USA vs Afrique
-const EUROPE_USA_COUNTRIES = ['Canada', 'USA', 'France', 'Belgique', 'Allemagne'];
-const AFRICA_COUNTRIES     = ["Cote d'Ivoire", 'Mali', 'Burkina Faso', 'Senegal', 'Cameroun'];
+// Listes de pays par région (normalisés en minuscule, sans accents)
+const AMERICA_COUNTRIES = [
+  'canada',
+  'usa',
+  'united states',
+  'united states of america',
+];
+
+const EUROPE_COUNTRIES = [
+  'france',
+  'belgique',
+  'belgium',
+  'allemagne',
+  'germany',
+];
+
+const AFRICA_COUNTRIES = [
+  "cote d'ivoire",
+  "cote d'ivoire",
+  "cote d ivoire",
+  'cote divoire',
+  'cote divoire',
+  'cote-d-ivoire',
+  'mali',
+  'burkina faso',
+  'senegal',
+  'senegal',
+  'cameroun',
+  'cameroon',
+  'benin',
+  'benin',
+  'togo',
+  'ghana',
+];
+
+// Seuils selon la région du FILLEUL (2 premiers transferts cumulés)
+const THRESHOLDS_BY_REGION = {
+  AMERICA: { currency: 'CAD', minTotal: 200 },
+  EUROPE:  { currency: 'EUR', minTotal: 200 },
+  AFRICA:  { currency: 'XOF', minTotal: 60000 },
+};
+
+// Bonus selon la région du PARRAIN (devise du parrain)
+const BONUSES_BY_REGION = {
+  AMERICA: {
+    currency: 'CAD',
+    parrain: 5,
+    filleul: 3,
+  },
+  EUROPE: {
+    currency: 'EUR',
+    parrain: 4,
+    filleul: 2,
+  },
+  AFRICA: {
+    currency: 'XOF',
+    parrain: 2000,
+    filleul: 1000,
+  },
+};
 
 /**
  * Nettoie le nom du pays : remplace entités HTML et supprime caractères non alphabétiques initiaux
@@ -31,17 +87,31 @@ function cleanCountry(raw) {
 }
 
 /**
- * Normalise le nom du pays : retire accents et apostrophes spéciales
+ * Normalise le nom du pays : retire accents, apostrophes spéciales, met en minuscule
  */
 function normalizeCountry(str) {
   if (typeof str !== 'string') return '';
   const noAccents = str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  return noAccents.replace(/’/g, "'").trim();
+  return noAccents.replace(/’/g, "'").trim().toLowerCase();
+}
+
+/**
+ * Détermine la région (AMERICA / EUROPE / AFRICA) à partir d'un pays
+ */
+function getRegionFromCountry(countryRaw) {
+  const normalized = normalizeCountry(cleanCountry(countryRaw));
+
+  if (!normalized) return null;
+
+  if (AMERICA_COUNTRIES.includes(normalized)) return 'AMERICA';
+  if (EUROPE_COUNTRIES.includes(normalized))  return 'EUROPE';
+  if (AFRICA_COUNTRIES.includes(normalized))  return 'AFRICA';
+
+  return null;
 }
 
 /**
  * Raccourci sur le modèle Transaction du Gateway
- * (toutes les transactions agrégées : paynoval, stripe, mobilemoney, etc.)
  */
 function TransactionModel() {
   return Transaction;
@@ -94,8 +164,7 @@ async function patchUserInMain(userId, updates, authToken) {
 
 /**
  * Crédite la balance dans le service principal
- * ➜ utilise désormais la route interne /users/:id/credit-internal
- *    sécurisée par x-internal-token
+ * ➜ utilise la route interne /users/:id/credit-internal
  */
 async function creditBalanceInMain(userId, amount, currency, description, authToken) {
   if (!PRINCIPAL_URL) {
@@ -115,7 +184,6 @@ async function creditBalanceInMain(userId, amount, currency, description, authTo
       {
         headers: {
           'x-internal-token': INTERNAL_TOKEN,
-          // on peut aussi forward le JWT si tu veux le tracer côté backend
           ...(authToken ? { Authorization: authToken } : {}),
         },
       }
@@ -127,8 +195,7 @@ async function creditBalanceInMain(userId, amount, currency, description, authTo
 }
 
 /**
- * Envoi d'une notification via l'API principale (push + in-app)
- * ➜ ici on reste sur le JWT (Authorization) classique
+ * Envoi d'une notification via l'API principale
  */
 async function sendNotificationToMain(userId, title, message, data = {}, authToken) {
   if (!PRINCIPAL_URL) {
@@ -150,8 +217,7 @@ async function sendNotificationToMain(userId, title, message, data = {}, authTok
 }
 
 /**
- * Génère et assigne un referralCode après 2 transactions confirmées
- * ➜ se base sur les transactions du GATEWAY (tous providers)
+ * Génère et assigne un referralCode après ≥ 2 transactions confirmées
  */
 async function generateAndAssignReferralInMain(userMain, senderId, authToken) {
   const firstName = (userMain.fullName || '').split(' ')[0].toUpperCase() || 'USER';
@@ -169,7 +235,6 @@ async function generateAndAssignReferralInMain(userMain, senderId, authToken) {
       );
       return;
     } catch (err) {
-      // En cas de conflit (code déjà existant), on retente
       if (err.response?.status === 409) {
         logger.warn(
           `[Referral] Conflit sur le code "${newCode}", nouvelle tentative…`
@@ -185,10 +250,8 @@ async function generateAndAssignReferralInMain(userMain, senderId, authToken) {
 
 /**
  * Vérifie et génère le referralCode dans le service principal
- * Logique :
- *  - Quand l'utilisateur a ≥ 2 transactions "confirmed" (dans le GATEWAY),
- *  - et qu'il n'a pas encore de code,
- *  - on lui génère un referralCode.
+ * - Quand l'utilisateur a ≥ 2 transactions "confirmed" (Gateway),
+ * - et qu'il n'a pas encore de code.
  */
 async function checkAndGenerateReferralCodeInMain(senderId, authToken) {
   if (!senderId) return;
@@ -212,38 +275,65 @@ async function checkAndGenerateReferralCodeInMain(senderId, authToken) {
 }
 
 /**
- * Processus de crédit du bonus de parrainage
- * ➜ Appelé sur la 1ʳᵉ transaction confirmée (dans le GATEWAY) de l'utilisateur
- *
- * @param {string} userId      - Filleul (sender / user connecté)
- * @param {Object} tx          - { amount, currency, country, provider, confirmedAt, ... }
- * @param {string} authToken   - JWT du user (Authorization: Bearer ...)
+ * Calcule si les 2 premières transactions confirmées du filleul atteignent le seuil
  */
-async function processReferralBonusIfEligible(userId, tx, authToken) {
-  if (!userId || !tx) return;
+async function getFirstTwoConfirmedTotal(userId) {
+  const txs = await TransactionModel()
+    .find({ userId, status: 'confirmed' })
+    .sort({ confirmedAt: 1, createdAt: 1 })
+    .limit(2)
+    .lean();
 
-  logger.info(
-    `[Referral] processReferralBonusIfEligible pour userId=${userId}, amount=${tx.amount}, currency=${tx.currency}`
-  );
+  if (!txs || txs.length < 2) {
+    return { count: txs.length || 0, total: 0 };
+  }
 
-  // 1) Vérifier que c'est la 1ʳᵉ transaction confirmée pour ce user (dans le GATEWAY)
-  const txCount = await TransactionModel().countDocuments({
-    userId,
-    status: 'confirmed',
-  });
+  const total = txs.reduce((sum, tx) => {
+    const val = parseFloat(tx.amount);
+    if (Number.isNaN(val)) return sum;
+    return sum + val;
+  }, 0);
 
-  if (txCount !== 1) {
+  return { count: txs.length, total };
+}
+
+/**
+ * Processus de crédit du bonus de parrainage
+ *
+ * ➜ Appelé sur chaque transaction CONFIRMÉE (Gateway) du FILLEUL.
+ *    La logique va :
+ *      - vérifier qu'il y a bien 2 transactions confirmées,
+ *      - vérifier que la somme des 2 premières atteint le seuil
+ *        selon la région du FILLEUL,
+ *      - créditer PARRAIN + FILLEUL selon la région du PARRAIN (bonus & devise),
+ *      - marquer le bonus comme déjà crédité côté backend principal.
+ *
+ * @param {string} userId    - Filleul (sender / user connecté)
+ * @param {string} authToken - JWT du user (Authorization: Bearer ...)
+ */
+async function processReferralBonusIfEligible(userId, authToken) {
+  if (!userId || !authToken) return;
+
+  logger.info(`[Referral] processReferralBonusIfEligible pour userId=${userId}`);
+
+  // 1) Récupérer filleul depuis le service principal
+  const filleul = await fetchUserFromMain(userId, authToken);
+  if (!filleul) {
+    logger.info(`[Referral] Filleul ${userId} introuvable dans le backend principal.`);
+    return;
+  }
+
+  if (!filleul.referredBy) {
     logger.info(
-      `[Referral] txCount=${txCount} pour userId=${userId} (bonus uniquement à la 1ʳᵉ tx confirmée)`
+      `[Referral] Aucun parrain trouvé pour userId=${userId} (referredBy manquant).`
     );
     return;
   }
 
-  // 2) Récupérer filleul et parrain depuis le service principal
-  const filleul = await fetchUserFromMain(userId, authToken);
-  if (!filleul || !filleul.referredBy) {
+  // Si bonus déjà crédité, on ne refait rien (idempotence)
+  if (filleul.referralBonusCredited) {
     logger.info(
-      `[Referral] Aucun parrain trouvé pour userId=${userId} (referredBy manquant).`
+      `[Referral] Bonus déjà crédité pour userId=${userId}, on ne refait rien.`
     );
     return;
   }
@@ -257,97 +347,134 @@ async function processReferralBonusIfEligible(userId, tx, authToken) {
     return;
   }
 
-  // 3) Déterminer seuil et montants de bonus selon pays
+  // 2) Régions filleul + parrain
   const paysF = normalizeCountry(cleanCountry(filleul.country));
   const paysP = normalizeCountry(cleanCountry(parrain.country));
 
-  let seuil = 0,
-    bonusF = 0,
-    bonusP = 0,
-    curF = '',
-    curP = '';
+  const regionF = getRegionFromCountry(paysF);
+  const regionP = getRegionFromCountry(paysP);
 
-  if (EUROPE_USA_COUNTRIES.includes(paysF) && EUROPE_USA_COUNTRIES.includes(paysP)) {
-    seuil = 100;
-    bonusF = 3;
-    bonusP = 5;
-    curF = curP = 'USD';
-  } else if (AFRICA_COUNTRIES.includes(paysF) && AFRICA_COUNTRIES.includes(paysP)) {
-    seuil = 20000;
-    bonusF = 500;
-    bonusP = 500;
-    curF = curP = 'XOF';
-  } else {
-    if (EUROPE_USA_COUNTRIES.includes(paysF)) {
-      seuil = 100;
-      bonusF = 3;
-      curF = 'USD';
-    } else if (AFRICA_COUNTRIES.includes(paysF)) {
-      seuil = 20000;
-      bonusF = 500;
-      curF = 'XOF';
-    }
-
-    if (EUROPE_USA_COUNTRIES.includes(paysP)) {
-      bonusP = 5;
-      curP = 'USD';
-    } else if (AFRICA_COUNTRIES.includes(paysP)) {
-      bonusP = 500;
-      curP = 'XOF';
-    }
+  if (!regionF) {
+    logger.warn(
+      `[Referral] Région du filleul inconnue (country="${filleul.country}"), bonus ignoré.`
+    );
+    return;
+  }
+  if (!regionP) {
+    logger.warn(
+      `[Referral] Région du parrain inconnue (country="${parrain.country}"), bonus ignoré.`
+    );
+    return;
   }
 
-  const amountFloat = parseFloat(tx.amount);
-  if (Number.isNaN(amountFloat) || amountFloat < seuil) {
+  const seuilCfg  = THRESHOLDS_BY_REGION[regionF];
+  const bonusCfg  = BONUSES_BY_REGION[regionP];
+
+  if (!seuilCfg || !bonusCfg) {
+    logger.warn(
+      `[Referral] Configuration seuil/bonus manquante pour regions F=${regionF}, P=${regionP}`
+    );
+    return;
+  }
+
+  // 3) Récupérer les 2 premières tx confirmées et leur somme
+  const { count, total } = await getFirstTwoConfirmedTotal(userId);
+
+  logger.info(
+    `[Referral] userId=${userId}, txConfirmedCount=${count}, totalFirstTwo=${total}, seuil=${seuilCfg.minTotal}${seuilCfg.currency}`
+  );
+
+  if (count < 2) {
+    // Le programme exige les 2 premières transactions confirmées
     logger.info(
-      `[Referral] Montant ${amountFloat} < seuil ${seuil}, aucun bonus appliqué.`
+      `[Referral] Moins de 2 transactions confirmées pour userId=${userId}, bonus non déclenché.`
+    );
+    return;
+  }
+
+  if (Number.isNaN(total) || total < seuilCfg.minTotal) {
+    logger.info(
+      `[Referral] Total des 2 premières tx (${total}) < seuil (${seuilCfg.minTotal}), aucun bonus.`
     );
     return;
   }
 
   // 4) Créditer les balances via le backend principal (source de vérité des soldes)
+  const { currency: bonusCurrency, parrain: bonusParrain, filleul: bonusFilleul } = bonusCfg;
+
   try {
-    if (bonusF > 0 && curF) {
+    if (bonusFilleul > 0) {
       await creditBalanceInMain(
         userId,
-        bonusF,
-        curF,
-        'Bonus de bienvenue (filleul)',
+        bonusFilleul,
+        bonusCurrency,
+        'Bonus de bienvenue (filleul - programme de parrainage PayNoval)',
         authToken
       );
     }
-    if (bonusP > 0 && curP) {
+
+    if (bonusParrain > 0) {
       await creditBalanceInMain(
         parrainId,
-        bonusP,
-        curP,
+        bonusParrain,
+        bonusCurrency,
         `Bonus de parrainage pour ${filleul.fullName || filleul.email || userId}`,
         authToken
       );
     }
+
+    // 5) Marquer le bonus comme crédité côté backend principal (côté filleul)
+    await patchUserInMain(
+      userId,
+      {
+        referralBonusCredited: true,
+        referralBonusCurrency: bonusCurrency,
+        referralBonusParrainAmount: bonusParrain,
+        referralBonusFilleulAmount: bonusFilleul,
+        referralBonusCreditedAt: new Date().toISOString(),
+      },
+      authToken
+    );
   } catch (err) {
-    // On log mais on ne casse pas la transaction confirmée
+    // On log mais on ne casse pas la transaction confirmée globale
     logger.error(
       '[Referral] Erreur lors du crédit de bonus parrainage:',
       err.message || err
     );
+    return;
   }
 
-  // 5) Envoyer notifications via l'API principale
+  // 6) Envoyer notifications via l'API principale
   await sendNotificationToMain(
     parrainId,
     'Bonus parrain PayNoval crédité',
-    `Vous avez reçu ${bonusP}${curP} grâce à l'activité de votre filleul.`,
-    { type: 'referral_bonus', amount: bonusP, currency: curP },
+    `Vous avez reçu ${bonusParrain} ${bonusCurrency} grâce à l’activité de votre filleul.`,
+    {
+      type: 'referral_bonus',
+      role: 'parrain',
+      amount: bonusParrain,
+      currency: bonusCurrency,
+      childUserId: userId,
+    },
     authToken
   );
 
   await sendNotificationToMain(
     userId,
     'Bonus de bienvenue PayNoval crédité',
-    `Vous avez reçu ${bonusF}${curF} pour votre première transaction réussie.`,
-    { type: 'referral_bonus', amount: bonusF, currency: curF },
+    `Vous avez reçu ${bonusFilleul} ${bonusCurrency} grâce à vos premiers transferts sur PayNoval.`,
+    {
+      type: 'referral_bonus',
+      role: 'filleul',
+      amount: bonusFilleul,
+      currency: bonusCurrency,
+      parentUserId: parrainId,
+    },
     authToken
+  );
+
+  logger.info(
+    `[Referral] Bonus parrainage crédité (parrain=${parrainId}, filleul=${userId}, ${bonusParrain}/${bonusFilleul} ${bonusCurrency})`
   );
 }
 
