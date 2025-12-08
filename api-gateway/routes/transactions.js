@@ -1,12 +1,36 @@
-// routes/transactions.js (ou équivalent)
-
+// File: api-gateway/routes/transactions.js
 const express = require('express');
 const amlMiddleware = require('../src/middlewares/aml');
 const validateTransaction = require('../src/middlewares/validateTransaction');
 const controller = require('../controllers/transactionsController');
 const { requireRole } = require('../src/middlewares/authz');
+const config = require('../src/config');
 
 const router = express.Router();
+
+/**
+ * Vérification du token interne pour les appels techniques
+ * (API PayNoval → Gateway, etc.)
+ *
+ * Le token est partagé via :
+ *  - config.internalToken
+ *  - ou process.env.GATEWAY_INTERNAL_TOKEN
+ *
+ * À configurer EXACTEMENT avec la même valeur côté backend principal.
+ */
+function verifyInternalToken(req, res, next) {
+  const headerToken = req.headers['x-internal-token'] || '';
+  const expectedToken =
+    config.internalToken || process.env.GATEWAY_INTERNAL_TOKEN || '';
+
+  if (!expectedToken || headerToken !== expectedToken) {
+    return res.status(401).json({
+      success: false,
+      error: 'Non autorisé (internal token invalide).',
+    });
+  }
+  return next();
+}
 
 // GET une transaction
 router.get('/:id', controller.getTransaction);
@@ -74,6 +98,14 @@ router.post(
   requireRole(['admin', 'superadmin']),
   validateTransaction('relaunch'),
   controller.relaunchTransaction
+);
+
+// 🔐 Log interne (cagnotte participation, etc.)
+// PROTÉGÉ par un token interne x-internal-token
+router.post(
+  '/internal/log',
+  verifyInternalToken,
+  controller.logInternalTransaction
 );
 
 module.exports = router;

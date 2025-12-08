@@ -1,6 +1,7 @@
-// controllers/paymentController.js
+// File: api-gateway/controllers/paymentController.js
 
 const axios = require('axios');
+const crypto = require('crypto');
 const config = require('../src/config');
 const logger = require('../src/logger');
 
@@ -8,9 +9,11 @@ const logger = require('../src/logger');
  * Nettoie les champs sensibles avant de forward vers les microservices
  * (on évite de logger/propager le numéro de carte brut, CVC, etc.)
  */
-function cleanSensitiveMeta(meta) {
+function cleanSensitiveMeta(meta = {}) {
   const clone = { ...meta };
-  if (clone.cardNumber) clone.cardNumber = '****' + clone.cardNumber.slice(-4);
+  if (clone.cardNumber) {
+    clone.cardNumber = '****' + String(clone.cardNumber).slice(-4);
+  }
   if (clone.cvc) delete clone.cvc;
   if (clone.securityCode) delete clone.securityCode;
   return clone;
@@ -18,44 +21,93 @@ function cleanSensitiveMeta(meta) {
 
 // Mapping provider → URL du microservice de paiement
 const PROVIDER_TO_ENDPOINT = {
-  paynoval:    `${config.microservices.paynoval}/pay`,
-  stripe:      `${config.microservices.stripe}/pay`,
-  bank:        `${config.microservices.bank}/pay`,
+  paynoval: `${config.microservices.paynoval}/pay`,
+  stripe: `${config.microservices.stripe}/pay`,
+  bank: `${config.microservices.bank}/pay`,
   mobilemoney: `${config.microservices.mobilemoney}/pay`,
-  visa_direct: config.microservices.visa_direct ? `${config.microservices.visa_direct}/pay` : undefined,
-  stripe2momo: config.microservices.stripe2momo ? `${config.microservices.stripe2momo}/pay` : undefined,
-  flutterwave: config.microservices.flutterwave ? `${config.microservices.flutterwave}/pay` : undefined,
+  visa_direct: config.microservices.visa_direct
+    ? `${config.microservices.visa_direct}/pay`
+    : undefined,
+  stripe2momo: config.microservices.stripe2momo
+    ? `${config.microservices.stripe2momo}/pay`
+    : undefined,
+  flutterwave: config.microservices.flutterwave
+    ? `${config.microservices.flutterwave}/pay`
+    : undefined,
 };
+
+/**
+ * Safe request-id
+ */
+function safeRequestId(req) {
+  return (
+    req.headers['x-request-id'] ||
+    (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()))
+  );
+}
 
 /**
  * Headers d’audit envoyés vers les microservices
  * (auth, user, session, etc.)
  */
 function auditHeaders(req) {
-  return {
-    'Authorization': req.headers.authorization,
-    'x-internal-token': config.internalToken,
-    'x-request-id': req.headers['x-request-id'] || require('crypto').randomUUID(),
+  const incomingAuth =
+    req.headers.authorization || req.headers.Authorization || null;
+  const hasAuth =
+    !!incomingAuth &&
+    String(incomingAuth).toLowerCase() !== 'bearer null' &&
+    String(incomingAuth).trim().toLowerCase() !== 'null';
+
+  const headers = {
+    'x-internal-token': config.internalToken || '',
+    'x-request-id': safeRequestId(req),
     'x-user-id': req.user?._id || req.headers['x-user-id'] || '',
     'x-session-id': req.headers['x-session-id'] || '',
   };
+
+  if (hasAuth) {
+    headers.Authorization = incomingAuth;
+  }
+
+  if (req.headers['x-device-id']) {
+    headers['x-device-id'] = req.headers['x-device-id'];
+  }
+
+  return headers;
+}
+
+/**
+ * Détection challenge Cloudflare sur les microservices de paiement
+ */
+function isCloudflareChallengeResponse(response) {
+  if (!response) return false;
+  const status = response.status;
+  const data = response.data;
+
+  if (status !== 429 && status !== 403) return false;
+  if (!data || typeof data !== 'string') return false;
+
+  const lower = data.toLowerCase();
+  return (
+    lower.includes('just a moment') ||
+    lower.includes('cdn-cgi/challenge-platform') ||
+    lower.includes('__cf_chl_')
+  );
 }
 
 /**
  * Détection du provider à partir du body
  */
-function resolveProviderKey(body) {
-  if (body.provider && PROVIDER_TO_ENDPOINT[body.provider]) return body.provider;
-  if (body.destination && PROVIDER_TO_ENDPOINT[body.destination]) return body.destination;
+function resolveProviderKey(body = {}) {
+  if (body.provider && PROVIDER_TO_ENDPOINT[body.provider])
+    return body.provider;
+  if (body.destination && PROVIDER_TO_ENDPOINT[body.destination])
+    return body.destination;
   return null;
 }
 
 /**
  * 🔗 URL de base du backend qui gère les cagnottes
- *
- * 👉 À configurer dans ton config :
- *    - soit config.microservices.cagnottes
- *    - soit, par défaut, on retombe sur ton backend "paynoval"
  */
 function getCagnottesBaseUrl() {
   const base =
@@ -66,27 +118,74 @@ function getCagnottesBaseUrl() {
 }
 
 /**
+ * 🧮 Calcul dynamique des frais côté Gateway
+ *
+ * - Participation interne cagnotte PayNoval :
+ *   provider = "paynoval" && context = "cagnotte"
+ *   → 0.5% (0.005) de fee, quelle que soit la devise
+ *
+ * On ne modifie PAS amount ici, on ajoute juste des champs de fee.
+ * Le microservice (api-paynoval) décidera comment répartir (coffre / fee / admin).
+ */
+function computeDynamicFees(body = {}) {
+  const provider = body.provider || body.destination || null;
+  const context = body.context || body.operator || null;
+  const rawAmount = Number(body.amount) || 0;
+
+  if (!rawAmount || rawAmount <= 0) return null;
+
+  // 🎯 Participation interne cagnotte PayNoval (wallet user → coffre)
+  if (provider === 'paynoval' && context === 'cagnotte') {
+    const rate = 0.005; // 0.5 %
+    const feeAmount = Math.round(rawAmount * rate * 100) / 100; // 2 décimales
+
+    const currency =
+      body.currency ||
+      body.senderCurrencySymbol ||
+      body.localCurrencySymbol ||
+      null;
+
+    return {
+      feeRate: rate,
+      feeAmount,
+      feeCurrency: currency,
+      feeKind: 'paynoval_internal_cagnotte',
+    };
+  }
+
+  // 👉 Autres cas : pour l’instant pas de fee calculée ici
+  return null;
+}
+
+/**
  * 🧩 Side-effect : informer le backend Cagnottes qu’un paiement
  * externe pour une cagnotte a été confirmé côté Gateway.
  *
- * 👉 Appelle la route :
- *    POST /api/v1/cagnottes/:id/external-payment-callback
- *
- * ⚠️ IMPORTANT :
- *  - Protégé par un token partagé CAGNOTTE_GATEWAY_TOKEN
- *  - On ne bloque PAS la réponse client si ça échoue
+ * ⚠️ NE S’APPLIQUE PAS aux paiements internes PayNoval:
+ *    - providerKey === 'paynoval' → ignoré
+ *    (c’est api-paynoval qui gère la participation interne + log)
  */
-async function notifyCagnotteExternalContribution(req, providerKey, providerResponse) {
+async function notifyCagnotteExternalContribution(
+  req,
+  providerKey,
+  providerResponse
+) {
   const { context, cagnotteId, cagnotteCode, donorName } = req.body || {};
 
-  // Si ce paiement n’est PAS lié à une cagnotte → on sort
+  // ❌ On ne traite QUE les providers externes (carte, mobilemoney, etc.)
+  if (providerKey === 'paynoval') {
+    return;
+  }
+
   if (context !== 'cagnotte' || !cagnotteId) {
     return;
   }
 
   const baseUrl = getCagnottesBaseUrl();
   if (!baseUrl) {
-    logger.warn('[PAYMENT→CAGNOTTE] URL backend cagnottes non configurée (config.microservices.cagnottes ou paynoval)');
+    logger.warn(
+      '[PAYMENT→CAGNOTTE] URL backend cagnottes non configurée (config.microservices.cagnottes ou paynoval)'
+    );
     return;
   }
 
@@ -101,41 +200,31 @@ async function notifyCagnotteExternalContribution(req, providerKey, providerResp
     return;
   }
 
-  // Nom du contributeur : on prend en priorité donorName, sinon un fallback
   const nom =
     donorName ||
     req.body.recipientName ||
     req.user?.fullName ||
     'Contributeur externe';
 
-  // Référence externe renvoyée par le microservice de paiement
   const externalRef =
-    providerResponse?.data?.reference ||
-    providerResponse?.data?.id ||
-    null;
+    providerResponse?.data?.reference || providerResponse?.data?.id || null;
 
   const payload = {
     amount,
     nom,
-    status: 'succeeded', // ici on part du principe que si on est là, le paiement est OK
+    status: 'succeeded',
     provider: providerKey,
     externalRef,
-    // Petit bonus : on peut envoyer le code de participation si tu veux t’en servir
     codeParticipation: cagnotteCode || req.body.codeParticipation || undefined,
   };
 
   try {
-    await axios.post(
-      url,
-      payload,
-      {
-        timeout: 8000,
-        headers: {
-          // 🔐 Token partagé entre Gateway et backend cagnottes
-          'x-gateway-token': process.env.CAGNOTTE_GATEWAY_TOKEN || '',
-        },
-      }
-    );
+    await axios.post(url, payload, {
+      timeout: 8000,
+      headers: {
+        'x-gateway-token': process.env.CAGNOTTE_GATEWAY_TOKEN || '',
+      },
+    });
     logger.info('[PAYMENT→CAGNOTTE] Participation externe notifiée', {
       cagnotteId,
       amount,
@@ -157,7 +246,7 @@ exports.handlePayment = async (req, res) => {
   const targetUrl = providerKey ? PROVIDER_TO_ENDPOINT[providerKey] : null;
 
   if (!targetUrl) {
-    logger.error(`[PAYMENT] Provider non supporté demandé`, {
+    logger.error('[PAYMENT] Provider non supporté demandé', {
       provider: req.body.provider,
       destination: req.body.destination,
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
@@ -166,58 +255,97 @@ exports.handlePayment = async (req, res) => {
   }
 
   try {
-    // 1️⃣ On envoie la requête vers le microservice de paiement
-    const response = await axios.post(
-      targetUrl,
-      cleanSensitiveMeta(req.body),
-      {
-        headers: auditHeaders(req),
-        timeout: 15000,
-      }
-    );
+    // 🔢 Calcul dynamique des frais côté Gateway (si applicable)
+    const dynamicFees = computeDynamicFees(req.body);
+
+    // Body forward → meta nettoyée + éventuels champs de fee
+    const forwardBody = {
+      ...cleanSensitiveMeta(req.body),
+    };
+
+    if (dynamicFees) {
+      forwardBody.gatewayFee = dynamicFees.feeAmount;
+      forwardBody.gatewayFeeRate = dynamicFees.feeRate;
+      forwardBody.gatewayFeeCurrency = dynamicFees.feeCurrency;
+      forwardBody.gatewayFeeKind = dynamicFees.feeKind;
+    }
+
+    const response = await axios.post(targetUrl, forwardBody, {
+      headers: auditHeaders(req),
+      timeout: 15000,
+    });
 
     logger.info(`[PAYMENT→${providerKey}] Paiement réussi`, {
       provider: providerKey,
       amount: req.body.amount,
-      to: req.body.toEmail || req.body.phoneNumber || req.body.iban || req.body.cardNumber,
+      to:
+        req.body.toEmail ||
+        req.body.phoneNumber ||
+        req.body.iban ||
+        req.body.cardNumber,
       status: response.status,
       user: req.user?.email || null,
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
       ref: response.data?.reference || response.data?.id || null,
+      dynamicFees,
     });
 
-    // 2️⃣ SI ce paiement est lié à une cagnotte → on notifie le backend Cagnottes
-    //    (flot "gens SANS compte PayNoval" ou paiement externe pour une cagnotte)
+    // Side-effect cagnotte externe (non bloquant, providers ≠ paynoval)
     try {
       await notifyCagnotteExternalContribution(req, providerKey, response);
     } catch (err) {
-      // hyper défensif : on log mais on ne bloque PAS la réponse au client
       logger.error('[PAYMENT] Erreur side-effect cagnotte', {
         provider: providerKey,
         error: err.message,
       });
     }
 
-    // 3️⃣ Réponse normale au client
     return res.status(response.status).json(response.data);
-
   } catch (err) {
+    if (err.response && isCloudflareChallengeResponse(err.response)) {
+      logger.error(
+        `[PAYMENT→${providerKey}] Cloudflare challenge détecté`,
+        {
+          status: err.response.status,
+        }
+      );
+      return res.status(503).json({
+        error:
+          'Service de paiement temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
+        details: 'cloudflare_challenge',
+      });
+    }
+
     if (err.response) {
+      const status = err.response.status;
+      let errorMsg =
+        err.response.data?.error ||
+        err.response.data?.message ||
+        `Erreur interne ${providerKey}`;
+
+      if (status === 429) {
+        errorMsg =
+          'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
+      }
+
       logger.error(`[PAYMENT→${providerKey}] Échec API`, {
         provider: providerKey,
-        status: err.response.status,
-        data: err.response.data,
+        status,
+        data:
+          typeof err.response.data === 'string'
+            ? err.response.data.slice(0, 300)
+            : err.response.data,
         ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
       });
-      return res.status(err.response.status).json({
-        error: err.response.data?.error || `Erreur interne ${providerKey}`
-      });
-    } else {
-      logger.error(`[PAYMENT→${providerKey}] Axios error: ${err.message}`, {
-        provider: providerKey,
-        ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
-      });
-      return res.status(502).json({ error: `Service ${providerKey} temporairement indisponible.` });
+      return res.status(status).json({ error: errorMsg });
     }
+
+    logger.error(`[PAYMENT→${providerKey}] Axios error: ${err.message}`, {
+      provider: providerKey,
+      ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+    });
+    return res.status(502).json({
+      error: `Service ${providerKey} temporairement indisponible.`,
+    });
   }
 };
