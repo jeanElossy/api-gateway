@@ -45,6 +45,11 @@ const PROVIDER_TO_SERVICE = {
   flutterwave: config.microservices.flutterwave, // NEW
 };
 
+// User-Agent par défaut pour tous les appels sortants du Gateway
+const GATEWAY_USER_AGENT =
+  config.gatewayUserAgent ||
+  'PayNoval-Gateway/1.0 (+https://paynoval.com)';
+
 /* Safe UUID helper (Node < 14 fallback) */
 function safeUUID() {
   if (crypto && typeof crypto.randomUUID === 'function') {
@@ -157,35 +162,78 @@ function isCloudflareChallengeResponse(response) {
   const status = response.status;
   const data = response.data;
 
-  if (status !== 429 && status !== 403) return false;
   if (!data || typeof data !== 'string') return false;
-
   const lower = data.toLowerCase();
 
-  return (
+  const looksLikeHtml = lower.includes('<html') || lower.includes('<!doctype html');
+
+  const hasCloudflareMarkers =
     lower.includes('just a moment') ||
+    lower.includes('attention required') ||
     lower.includes('cdn-cgi/challenge-platform') ||
-    lower.includes('__cf_chl_')
-  );
+    lower.includes('__cf_chl_') ||
+    lower.includes('cloudflare');
+
+  const suspiciousStatus =
+    status === 403 || status === 429 || status === 503;
+
+  return hasCloudflareMarkers && (suspiciousStatus || looksLikeHtml);
 }
 
-/* Safe axios request wrapper that logs richer info on errors */
+/**
+ * Wrapper axios centralisé :
+ * - ajoute un User-Agent propre
+ * - détecte Cloudflare
+ * - logue les erreurs avec un petit aperçu
+ * - expose isCloudflareChallenge / isRateLimited sur l’erreur relancée
+ */
 async function safeAxiosRequest(opts) {
+  const finalOpts = { ...opts };
+
+  // Timeout par défaut si non fourni
+  if (!finalOpts.timeout) {
+    finalOpts.timeout = 15000;
+  }
+
+  // Méthode par défaut
+  finalOpts.method = finalOpts.method || 'get';
+
+  // Headers + User-Agent
+  finalOpts.headers = { ...(finalOpts.headers || {}) };
+  const hasUA =
+    finalOpts.headers['User-Agent'] || finalOpts.headers['user-agent'];
+  if (!hasUA) {
+    finalOpts.headers['User-Agent'] = GATEWAY_USER_AGENT;
+  }
+
   try {
-    return await axios(opts);
+    const response = await axios(finalOpts);
+
+    // Si jamais Cloudflare renvoie un HTML "challenge" avec un statut 2xx/3xx (rare mais on se protège)
+    if (isCloudflareChallengeResponse(response)) {
+      const e = new Error('Cloudflare challenge détecté');
+      e.response = response;
+      e.isCloudflareChallenge = true;
+      throw e;
+    }
+
+    return response;
   } catch (err) {
     const status = err.response?.status || 502;
     const data = err.response?.data || null;
-    const message = err.message || 'Unknown axios error';
+    const message = err.message || 'Erreur axios inconnue';
 
     const preview = typeof data === 'string' ? data.slice(0, 300) : data;
-    const isCf = isCloudflareChallengeResponse(err.response);
+    const isCf =
+      err.isCloudflareChallenge || isCloudflareChallengeResponse(err.response);
+    const isRateLimited = status === 429;
 
     logger.error('[Gateway][Axios] request failed', {
-      url: opts.url,
-      method: opts.method,
+      url: finalOpts.url,
+      method: finalOpts.method,
       status,
       isCloudflare: isCf,
+      isRateLimited,
       dataPreview: preview,
       message,
     });
@@ -193,6 +241,7 @@ async function safeAxiosRequest(opts) {
     const e = new Error(message);
     e.response = err.response;
     e.isCloudflareChallenge = isCf;
+    e.isRateLimited = isRateLimited;
     throw e;
   }
 }
@@ -242,15 +291,17 @@ async function creditAdminCommissionFromGateway({
 
     const description = `Commission PayNoval (${kind}) - provider=${provider}`;
 
-    await axios.post(
+    await safeAxiosRequest({
+      method: 'post',
       url,
-      {
+      data: {
         amount: num,
         currency: currency || 'CAD',
         description,
       },
-      { headers }
-    );
+      headers,
+      timeout: 10000,
+    });
 
     logger.info('[Gateway][Fees] Crédit admin OK', {
       provider,
