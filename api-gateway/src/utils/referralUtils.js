@@ -1,11 +1,11 @@
 // File: api-gateway/src/utils/referralUtils.js
 'use strict';
 
-const axios              = require('axios');
-const { customAlphabet } = require('nanoid');
-const logger             = require('../logger') || console;
-const config             = require('../config');
-const Transaction        = require('../models/Transaction');
+const axios = require('axios');
+const crypto = require('crypto');
+const logger = require('../logger') || console;
+const config = require('../config');
+const Transaction = require('../models/Transaction');
 
 // URL du backend principal (API Users / Wallet / Notifications)
 const PRINCIPAL_URL = (config.principalUrl || process.env.PRINCIPAL_URL || '').replace(/\/+$/, '');
@@ -13,69 +13,39 @@ const PRINCIPAL_URL = (config.principalUrl || process.env.PRINCIPAL_URL || '').r
 // Token interne partagé avec le backend principal
 const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || '';
 
-// Générateur nanoid à 3 chiffres (0-9)
-const nanoid = customAlphabet('0123456789', 3);
+/**
+ * Génère un code parrainage au format :
+ *   PNV-XXXX
+ * - XXXX = 4 chars MAJ alphanum (A-Z0-9)
+ * - doit contenir au moins 1 lettre ET 1 chiffre
+ */
+function generatePNVReferralCode() {
+  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const digits = '0123456789';
+  const all = letters + digits;
 
-// Listes de pays par région (normalisés en minuscule, sans accents)
-const AMERICA_COUNTRIES = [
-  'canada',
-  'usa',
-  'united states',
-  'united states of america',
-];
+  // génère 4 chars
+  const buf = crypto.randomBytes(4);
+  let raw = '';
+  for (let i = 0; i < 4; i++) raw += all[buf[i] % all.length];
 
-const EUROPE_COUNTRIES = [
-  'france',
-  'belgique',
-  'belgium',
-  'allemagne',
-  'germany',
-];
+  // force au moins 1 chiffre et 1 lettre
+  const hasDigit = /[0-9]/.test(raw);
+  const hasLetter = /[A-Z]/.test(raw);
 
-const AFRICA_COUNTRIES = [
-  "cote d'ivoire",
-  "cote d'ivoire",
-  "cote d ivoire",
-  'cote divoire',
-  'cote divoire',
-  'cote-d-ivoire',
-  'mali',
-  'burkina faso',
-  'senegal',
-  'senegal',
-  'cameroun',
-  'cameroon',
-  'benin',
-  'benin',
-  'togo',
-  'ghana',
-];
+  let arr = raw.split('');
 
-// Seuils selon la région du FILLEUL (2 premiers transferts cumulés)
-const THRESHOLDS_BY_REGION = {
-  AMERICA: { currency: 'CAD', minTotal: 200 },
-  EUROPE:  { currency: 'EUR', minTotal: 200 },
-  AFRICA:  { currency: 'XOF', minTotal: 60000 },
-};
+  if (!hasDigit) {
+    const pos = crypto.randomBytes(1)[0] % 4;
+    arr[pos] = digits[crypto.randomBytes(1)[0] % digits.length];
+  }
+  if (!hasLetter) {
+    const pos = crypto.randomBytes(1)[0] % 4;
+    arr[pos] = letters[crypto.randomBytes(1)[0] % letters.length];
+  }
 
-// Bonus selon la région du PARRAIN (devise du parrain)
-const BONUSES_BY_REGION = {
-  AMERICA: {
-    currency: 'CAD',
-    parrain: 5,
-    filleul: 3,
-  },
-  EUROPE: {
-    currency: 'EUR',
-    parrain: 4,
-    filleul: 2,
-  },
-  AFRICA: {
-    currency: 'XOF',
-    parrain: 2000,
-    filleul: 1000,
-  },
-};
+  return `PNV-${arr.join('')}`;
+}
 
 /**
  * Nettoie le nom du pays : remplace entités HTML et supprime caractères non alphabétiques initiaux
@@ -96,19 +66,69 @@ function normalizeCountry(str) {
 }
 
 /**
+ * Listes de pays par région (normalisés en minuscule, sans accents)
+ */
+const AMERICA_COUNTRIES = [
+  'canada',
+  'usa',
+  'united states',
+  'united states of america',
+];
+
+const EUROPE_COUNTRIES = [
+  'france',
+  'belgique',
+  'belgium',
+  'allemagne',
+  'germany',
+];
+
+const AFRICA_COUNTRIES = [
+  "cote d'ivoire",
+  "cote d ivoire",
+  'cote divoire',
+  'cote-d-ivoire',
+  'mali',
+  'burkina faso',
+  'senegal',
+  'cameroun',
+  'cameroon',
+  'benin',
+  'togo',
+  'ghana',
+];
+
+/**
  * Détermine la région (AMERICA / EUROPE / AFRICA) à partir d'un pays
  */
 function getRegionFromCountry(countryRaw) {
   const normalized = normalizeCountry(cleanCountry(countryRaw));
-
   if (!normalized) return null;
 
   if (AMERICA_COUNTRIES.includes(normalized)) return 'AMERICA';
-  if (EUROPE_COUNTRIES.includes(normalized))  return 'EUROPE';
-  if (AFRICA_COUNTRIES.includes(normalized))  return 'AFRICA';
+  if (EUROPE_COUNTRIES.includes(normalized)) return 'EUROPE';
+  if (AFRICA_COUNTRIES.includes(normalized)) return 'AFRICA';
 
   return null;
 }
+
+/**
+ * Seuils selon la région du FILLEUL (2 premiers transferts cumulés)
+ */
+const THRESHOLDS_BY_REGION = {
+  AMERICA: { currency: 'CAD', minTotal: 200 },
+  EUROPE: { currency: 'EUR', minTotal: 200 },
+  AFRICA: { currency: 'XOF', minTotal: 60000 },
+};
+
+/**
+ * Bonus selon la région du PARRAIN (devise du parrain)
+ */
+const BONUSES_BY_REGION = {
+  AMERICA: { currency: 'CAD', parrain: 5, filleul: 3 },
+  EUROPE: { currency: 'EUR', parrain: 4, filleul: 2 },
+  AFRICA: { currency: 'XOF', parrain: 2000, filleul: 1000 },
+};
 
 /**
  * Raccourci sur le modèle Transaction du Gateway
@@ -161,7 +181,6 @@ async function patchUserInMain(userId, updates, authToken) {
     throw err;
   }
 }
-
 
 /**
  * Crédite la balance dans le service principal
@@ -218,35 +237,43 @@ async function sendNotificationToMain(userId, title, message, data = {}, authTok
 }
 
 /**
- * Génère et assigne un referralCode après ≥ 2 transactions confirmées
+ * Génère et assigne un referralCode (PNV-XXXX) après ≥ 2 transactions confirmées
  */
 async function generateAndAssignReferralInMain(userMain, senderId, authToken) {
-  const firstName = (userMain.fullName || '').split(' ')[0].toUpperCase() || 'USER';
+  // IMPORTANT : format PNV-XXXX
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const newCode = generatePNVReferralCode();
 
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const newCode = `${firstName}_${nanoid()}`;
     try {
       await patchUserInMain(
         senderId,
         { referralCode: newCode, hasGeneratedReferral: true },
         authToken
       );
+
       logger.info(
         `[Referral] Code "${newCode}" assigné pour ${senderId} (tentative ${attempt + 1})`
       );
       return;
     } catch (err) {
+      // Si ton backend renvoie un 409 sur collision unique
       if (err.response?.status === 409) {
-        logger.warn(
-          `[Referral] Conflit sur le code "${newCode}", nouvelle tentative…`
-        );
+        logger.warn(`[Referral] Conflit sur le code "${newCode}", nouvelle tentative…`);
         continue;
       }
+
+      // Si un proxy transforme en 400 mais message "duplicate" etc.
+      const msg = String(err.response?.data?.error || err.response?.data?.message || err.message || '');
+      if (/duplicate|E11000|already exists|conflict/i.test(msg)) {
+        logger.warn(`[Referral] Collision probable "${newCode}", retry…`);
+        continue;
+      }
+
       throw err;
     }
   }
 
-  throw new Error(`Impossible de générer un referralCode unique pour ${senderId}`);
+  throw new Error(`Impossible de générer un referralCode unique (PNV-XXXX) pour ${senderId}`);
 }
 
 /**
@@ -262,14 +289,13 @@ async function checkAndGenerateReferralCodeInMain(senderId, authToken) {
     status: 'confirmed',
   });
 
-  logger.info(
-    `[Referral] Nombre de transactions confirmées (gateway) pour ${senderId}: ${count}`
-  );
-
+  logger.info(`[Referral] Nombre de transactions confirmées (gateway) pour ${senderId}: ${count}`);
   if (count < 2) return;
 
   const userMain = await fetchUserFromMain(senderId, authToken);
   if (!userMain) return;
+
+  // si déjà un code => OK (on ne force pas migration ici)
   if (userMain.hasGeneratedReferral || userMain.referralCode) return;
 
   await generateAndAssignReferralInMain(userMain, senderId, authToken);
@@ -300,17 +326,6 @@ async function getFirstTwoConfirmedTotal(userId) {
 
 /**
  * Processus de crédit du bonus de parrainage
- *
- * ➜ Appelé sur chaque transaction CONFIRMÉE (Gateway) du FILLEUL.
- *    La logique va :
- *      - vérifier qu'il y a bien 2 transactions confirmées,
- *      - vérifier que la somme des 2 premières atteint le seuil
- *        selon la région du FILLEUL,
- *      - créditer PARRAIN + FILLEUL selon la région du PARRAIN (bonus & devise),
- *      - marquer le bonus comme déjà crédité côté backend principal.
- *
- * @param {string} userId    - Filleul (sender / user connecté)
- * @param {string} authToken - JWT du user (Authorization: Bearer ...)
  */
 async function processReferralBonusIfEligible(userId, authToken) {
   if (!userId || !authToken) return;
@@ -325,26 +340,20 @@ async function processReferralBonusIfEligible(userId, authToken) {
   }
 
   if (!filleul.referredBy) {
-    logger.info(
-      `[Referral] Aucun parrain trouvé pour userId=${userId} (referredBy manquant).`
-    );
+    logger.info(`[Referral] Aucun parrain trouvé pour userId=${userId} (referredBy manquant).`);
     return;
   }
 
-  // Si bonus déjà crédité, on ne refait rien (idempotence)
+  // Idempotence
   if (filleul.referralBonusCredited) {
-    logger.info(
-      `[Referral] Bonus déjà crédité pour userId=${userId}, on ne refait rien.`
-    );
+    logger.info(`[Referral] Bonus déjà crédité pour userId=${userId}, on ne refait rien.`);
     return;
   }
 
   const parrainId = filleul.referredBy;
-  const parrain   = await fetchUserFromMain(parrainId, authToken);
+  const parrain = await fetchUserFromMain(parrainId, authToken);
   if (!parrain) {
-    logger.warn(
-      `[Referral] Utilisateur parrain ${parrainId} introuvable, bonus ignoré.`
-    );
+    logger.warn(`[Referral] Utilisateur parrain ${parrainId} introuvable, bonus ignoré.`);
     return;
   }
 
@@ -356,25 +365,19 @@ async function processReferralBonusIfEligible(userId, authToken) {
   const regionP = getRegionFromCountry(paysP);
 
   if (!regionF) {
-    logger.warn(
-      `[Referral] Région du filleul inconnue (country="${filleul.country}"), bonus ignoré.`
-    );
+    logger.warn(`[Referral] Région du filleul inconnue (country="${filleul.country}"), bonus ignoré.`);
     return;
   }
   if (!regionP) {
-    logger.warn(
-      `[Referral] Région du parrain inconnue (country="${parrain.country}"), bonus ignoré.`
-    );
+    logger.warn(`[Referral] Région du parrain inconnue (country="${parrain.country}"), bonus ignoré.`);
     return;
   }
 
-  const seuilCfg  = THRESHOLDS_BY_REGION[regionF];
-  const bonusCfg  = BONUSES_BY_REGION[regionP];
+  const seuilCfg = THRESHOLDS_BY_REGION[regionF];
+  const bonusCfg = BONUSES_BY_REGION[regionP];
 
   if (!seuilCfg || !bonusCfg) {
-    logger.warn(
-      `[Referral] Configuration seuil/bonus manquante pour regions F=${regionF}, P=${regionP}`
-    );
+    logger.warn(`[Referral] Configuration seuil/bonus manquante pour regions F=${regionF}, P=${regionP}`);
     return;
   }
 
@@ -386,21 +389,16 @@ async function processReferralBonusIfEligible(userId, authToken) {
   );
 
   if (count < 2) {
-    // Le programme exige les 2 premières transactions confirmées
-    logger.info(
-      `[Referral] Moins de 2 transactions confirmées pour userId=${userId}, bonus non déclenché.`
-    );
+    logger.info(`[Referral] Moins de 2 transactions confirmées pour userId=${userId}, bonus non déclenché.`);
     return;
   }
 
   if (Number.isNaN(total) || total < seuilCfg.minTotal) {
-    logger.info(
-      `[Referral] Total des 2 premières tx (${total}) < seuil (${seuilCfg.minTotal}), aucun bonus.`
-    );
+    logger.info(`[Referral] Total des 2 premières tx (${total}) < seuil (${seuilCfg.minTotal}), aucun bonus.`);
     return;
   }
 
-  // 4) Créditer les balances via le backend principal (source de vérité des soldes)
+  // 4) Créditer les balances via le backend principal
   const { currency: bonusCurrency, parrain: bonusParrain, filleul: bonusFilleul } = bonusCfg;
 
   try {
@@ -437,15 +435,11 @@ async function processReferralBonusIfEligible(userId, authToken) {
       authToken
     );
   } catch (err) {
-    // On log mais on ne casse pas la transaction confirmée globale
-    logger.error(
-      '[Referral] Erreur lors du crédit de bonus parrainage:',
-      err.message || err
-    );
+    logger.error('[Referral] Erreur lors du crédit de bonus parrainage:', err.message || err);
     return;
   }
 
-  // 6) Envoyer notifications via l'API principale
+  // 6) Notifications
   await sendNotificationToMain(
     parrainId,
     'Bonus parrain PayNoval crédité',

@@ -1,11 +1,15 @@
 // File: api-gateway/src/services/referralGatewayService.js
 'use strict';
 
-const axios  = require('axios');
+const axios = require('axios');
 const config = require('../config');
 const logger = require('../logger') || console;
 
-const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || '';
+// Token interne (fallback config.internalToken)
+const INTERNAL_TOKEN =
+  process.env.INTERNAL_TOKEN ||
+  config.internalToken ||
+  '';
 
 /**
  * Base URL du service de parrainage :
@@ -37,27 +41,10 @@ if (!INTERNAL_TOKEN) {
  *
  * ➜ Endpoint attendu côté backend/parrainage :
  *    POST /internal/referral/on-transaction-confirm
- *
- * Body :
- * {
- *   userId: '...',          // user qui doit potentiellement gagner le bonus
- *   provider: 'stripe' | 'paynoval' | 'mobilemoney' | ...,
- *   transaction: {
- *     id: '...',
- *     reference: '...',
- *     amount: 123.45,
- *     currency: 'CAD',
- *     country: 'CA' | 'CI' | ...,
- *     provider: 'stripe',
- *     confirmedAt: '2025-12-01T12:34:56.000Z'
- *   }
- * }
  */
 async function notifyReferralOnConfirm({ userId, provider, transaction }) {
   if (!REFERRAL_SERVICE_BASE) {
-    logger.warn(
-      '[Gateway][Referral] REFERRAL_SERVICE_BASE manquant, notification parrainage ignorée.'
-    );
+    logger.warn('[Gateway][Referral] REFERRAL_SERVICE_BASE manquant, notification ignorée.');
     return;
   }
 
@@ -74,11 +61,7 @@ async function notifyReferralOnConfirm({ userId, provider, transaction }) {
   try {
     await axios.post(
       url,
-      {
-        userId,
-        provider,
-        transaction,
-      },
+      { userId, provider, transaction },
       {
         timeout: 8000,
         headers: {
@@ -103,7 +86,7 @@ async function notifyReferralOnConfirm({ userId, provider, transaction }) {
       txId: transaction.id,
       message: err.response?.data || err.message || err,
     });
-    // ❗ On NE throw PAS : la transaction reste confirmée même si le bonus plante.
+    // ❗ On ne throw PAS : la transaction reste confirmée même si le bonus plante.
   }
 }
 
