@@ -294,6 +294,7 @@ async function processReferralBonusIfEligible(userId, authToken) {
         referralBonusFilleulAmount: bonusFilleul,
         referralBonusCreditedAt: new Date().toISOString(),
       },
+      
       authToken
     );
 
