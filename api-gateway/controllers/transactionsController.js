@@ -1,4 +1,3 @@
-
 // // File: api-gateway/controllers/transactionsController.js
 // 'use strict';
 
@@ -6,20 +5,14 @@
 //  * -------------------------------------------------------------------
 //  * CONTROLLER TRANSACTIONS (API GATEWAY)
 //  * -------------------------------------------------------------------
-//  * Rôle de ce fichier :
-//  *  - Proxyer les appels "transactions" vers les microservices providers
-//  *  - Journaliser côté Gateway (Transaction + AMLLog) pour traçabilité
-//  *  - Appliquer une couche de sécurité générique (question + code) pour certains providers
-//  *  - Déclencher des emails transactionnels (hors PayNoval interne)
-//  *  - Gérer les commissions admin (hors PayNoval interne)
-//  *  - Déclencher la logique de parrainage :
-//  *      1) logique "programme" (seuils/bonus) via referralUtils
-//  *      2) notification interne vers backend principal pour assurer la génération du code PNV-XXXX
-//  *
 //  * ✅ FIX IMPORTANT (2025-12) :
 //  *  - Le parrainage doit s'appliquer à l'EXPÉDITEUR (initiateur), pas à celui qui confirme.
 //  *  - Or /transactions/confirm est souvent appelé par le destinataire.
 //  *  => On stocke explicitement ownerUserId à l'initiate, et au confirm on utilise ownerUserId.
+//  *  => IMPORTANT : si on ne retrouve pas la TX Gateway, on SKIP (pas de fallback vers caller).
+//  *
+//  * ✅ FIX 2 :
+//  *  - transactionId peut être un ObjectId Mongo (24 hex) => retrouver par _id aussi.
 //  */
 
 // const axios = require('axios');
@@ -29,62 +22,39 @@
 // const AMLLog = require('../src/models/AMLLog');
 // const crypto = require('crypto');
 
-// // ⬇️ Service d’email transactionnel centralisé (SendGrid + templates)
 // const { notifyTransactionEvent } = require('../src/services/transactionNotificationService');
 
-// // ⬇️ Utilitaires de parrainage (logique programme : seuils/bonus, etc.)
 // const {
 //   checkAndGenerateReferralCodeInMain,
 //   processReferralBonusIfEligible,
 // } = require('../src/utils/referralUtils');
 
-// // ⬇️ Service gateway -> backend principal (route interne) pour "assurer" la génération du code PNV-XXXX
 // const { notifyReferralOnConfirm } = require('../src/services/referralGatewayService');
 
-// // 🌐 Backend principal (API Users / Wallet / Notifications)
 // const PRINCIPAL_URL = (config.principalUrl || process.env.PRINCIPAL_URL || '').replace(/\/+$/, '');
-
-// // 🧑‍💼 ID MongoDB de l’admin (admin@paynoval.com) – à configurer en ENV
-// // ex: ADMIN_USER_ID=6920a9528e93adc20e71d2cf
 // const ADMIN_USER_ID = config.adminUserId || process.env.ADMIN_USER_ID || null;
 
-// /**
-//  * Mapping centralisé des providers -> service URL
-//  * Ajoute ici toute nouvelle intégration (flutterwave, stripe, etc.)
-//  */
 // const PROVIDER_TO_SERVICE = {
 //   paynoval: config.microservices.paynoval,
 //   stripe: config.microservices.stripe,
 //   bank: config.microservices.bank,
 //   mobilemoney: config.microservices.mobilemoney,
 //   visa_direct: config.microservices.visa_direct,
-//   visadirect: config.microservices.visa_direct, // alias
+//   visadirect: config.microservices.visa_direct,
 //   cashin: config.microservices.cashin,
 //   cashout: config.microservices.cashout,
 //   stripe2momo: config.microservices.stripe2momo,
-//   flutterwave: config.microservices.flutterwave, // NEW
+//   flutterwave: config.microservices.flutterwave,
 // };
 
-// // User-Agent par défaut pour tous les appels sortants du Gateway
 // const GATEWAY_USER_AGENT =
 //   config.gatewayUserAgent || 'PayNoval-Gateway/1.0 (+https://paynoval.com)';
 
-// /**
-//  * safeUUID()
-//  * -------------------------------------------------------------------
-//  * Génère un identifiant de requête.
-//  * - Si crypto.randomUUID existe (Node récent), on l'utilise.
-//  * - Sinon fallback simple (timestamp + random).
-//  * Objectif :
-//  * - tracer facilement les requêtes dans les logs (x-request-id)
-//  */
 // function safeUUID() {
 //   if (crypto && typeof crypto.randomUUID === 'function') {
 //     try {
 //       return crypto.randomUUID();
-//     } catch (e) {
-//       // fallback
-//     }
+//     } catch (e) {}
 //   }
 //   return (
 //     Date.now().toString(16) +
@@ -95,46 +65,18 @@
 //   );
 // }
 
-// /**
-//  * cleanSensitiveMeta(meta)
-//  * -------------------------------------------------------------------
-//  * Nettoie un objet "meta" avant stockage ou logs :
-//  * - Masque les numéros de carte
-//  * - Supprime cvc / securityCode
-//  * Objectif :
-//  * - conformité & sécurité : ne jamais stocker des secrets en clair.
-//  */
 // function cleanSensitiveMeta(meta = {}) {
 //   const clone = { ...meta };
-//   if (clone.cardNumber) {
-//     clone.cardNumber = '****' + String(clone.cardNumber).slice(-4);
-//   }
+//   if (clone.cardNumber) clone.cardNumber = '****' + String(clone.cardNumber).slice(-4);
 //   if (clone.cvc) delete clone.cvc;
 //   if (clone.securityCode) delete clone.securityCode;
 //   return clone;
 // }
 
-// /**
-//  * getUserId(req)
-//  * -------------------------------------------------------------------
-//  * Extrait l'identifiant utilisateur de façon robuste.
-//  * Objectif :
-//  * - éviter les crash si req.user change de forme (id ou _id).
-//  */
 // function getUserId(req) {
 //   return req.user?._id || req.user?.id || null;
 // }
 
-// /**
-//  * resolveProvider(req, fallback)
-//  * -------------------------------------------------------------------
-//  * Détermine le provider ciblé (microservice) à partir de :
-//  * - req.routedProvider (si route dynamique)
-//  * - body.provider
-//  * - body.destination
-//  * - query.provider
-//  * - fallback (par défaut paynoval)
-//  */
 // function resolveProvider(req, fallback = 'paynoval') {
 //   const body = req.body || {};
 //   const query = req.query || {};
@@ -142,41 +84,24 @@
 // }
 
 // /**
-//  * getTxOwnerUserId(gatewayTx, fallbackReqUserId, reqBody)
-//  * -------------------------------------------------------------------
-//  * ✅ Fix parrainage : renvoyer l'EXPÉDITEUR (initiateur) de la transaction.
-//  * On ne doit JAMAIS dépendre du userId du "confirm" (souvent destinataire).
+//  * ✅ IMPORTANT:
+//  *  - On ne fallback JAMAIS sur le caller pour le parrainage.
 //  */
-// function getTxOwnerUserId(gatewayTx, fallbackReqUserId, reqBody = {}) {
+// function resolveReferralOwnerUserId(txDoc) {
 //   return (
-//     gatewayTx?.ownerUserId ||
-//     gatewayTx?.initiatorUserId ||
-//     gatewayTx?.fromUserId ||
-//     gatewayTx?.senderId ||
-//     gatewayTx?.createdBy ||
-//     gatewayTx?.userId || // dernier recours si ton modèle stocke bien l'expéditeur ici
-//     reqBody?.ownerUserId ||
-//     reqBody?.fromUserId ||
-//     reqBody?.senderId ||
-//     reqBody?.initiatorUserId ||
-//     fallbackReqUserId ||
+//     txDoc?.ownerUserId ||
+//     txDoc?.initiatorUserId ||
+//     txDoc?.fromUserId ||
+//     txDoc?.senderId ||
+//     txDoc?.createdBy ||
+//     txDoc?.userId || // legacy
 //     null
 //   );
 // }
 
-// /**
-//  * auditForwardHeaders(req)
-//  * -------------------------------------------------------------------
-//  * Construit les headers à transmettre aux microservices :
-//  * - Authorization (uniquement si valide)
-//  * - x-internal-token (auth inter-services)
-//  * - x-request-id (trace)
-//  * - x-user-id / x-session-id / x-device-id (traçabilité / anti-fraude)
-//  */
 // function auditForwardHeaders(req) {
 //   const incomingAuth = req.headers.authorization || req.headers.Authorization || null;
 
-//   // On ignore les Authorization invalides type "Bearer null"
 //   const hasAuth =
 //     !!incomingAuth &&
 //     String(incomingAuth).toLowerCase() !== 'bearer null' &&
@@ -196,7 +121,6 @@
 
 //   if (hasAuth) headers.Authorization = incomingAuth;
 
-//   // Logs debug "safe" (on ne log jamais le token complet)
 //   try {
 //     const authPreview = headers.Authorization ? String(headers.Authorization).slice(0, 12) : null;
 //     logger.debug('[Gateway][AUDIT HEADERS] forwarding', {
@@ -206,18 +130,11 @@
 //       userId,
 //       dest: req.path,
 //     });
-//   } catch (e) {
-//     // noop
-//   }
+//   } catch (e) {}
 
 //   return headers;
 // }
 
-// /**
-//  * isCloudflareChallengeResponse(response)
-//  * -------------------------------------------------------------------
-//  * Détecte une réponse Cloudflare "challenge" (HTML) qui casse les appels API.
-//  */
 // function isCloudflareChallengeResponse(response) {
 //   if (!response) return false;
 //   const status = response.status;
@@ -240,15 +157,6 @@
 //   return hasCloudflareMarkers && (suspiciousStatus || looksLikeHtml);
 // }
 
-// /**
-//  * safeAxiosRequest(opts)
-//  * -------------------------------------------------------------------
-//  * Wrapper Axios centralisé :
-//  * - Ajoute un User-Agent propre
-//  * - Ajoute un timeout par défaut
-//  * - Détecte Cloudflare challenge
-//  * - Logue les erreurs (avec preview du body)
-//  */
 // async function safeAxiosRequest(opts) {
 //   const finalOpts = { ...opts };
 
@@ -297,26 +205,52 @@
 //   }
 // }
 
-// /**
-//  * hashSecurityCode(code)
-//  * -------------------------------------------------------------------
-//  * Hash SHA256 simple du code de sécurité.
-//  */
 // function hashSecurityCode(code) {
 //   return crypto.createHash('sha256').update(String(code || '').trim()).digest('hex');
 // }
 
+// function looksLikeObjectId(v) {
+//   return typeof v === 'string' && /^[a-fA-F0-9]{24}$/.test(v);
+// }
+
 // /**
-//  * creditAdminCommissionFromGateway({provider, kind, amount, currency, req})
-//  * -------------------------------------------------------------------
-//  * Crédite la commission sur le compte admin dans le backend principal.
+//  * ✅ findGatewayTxForConfirm(provider, transactionId, body)
+//  * -> recherche par reference/meta + ✅ par _id si ObjectId
 //  */
+// async function findGatewayTxForConfirm(provider, transactionId, body = {}) {
+//   const candidates = Array.from(
+//     new Set(
+//       [
+//         transactionId,
+//         body.transactionId,
+//         body.reference,
+//         body.ref,
+//         body.id,
+//         body.txId,
+//         body._id,
+//       ]
+//         .filter(Boolean)
+//         .map((v) => String(v))
+//     )
+//   );
+
+//   if (!candidates.length) return null;
+
+//   const or = [];
+//   for (const c of candidates) {
+//     or.push({ reference: c });
+//     or.push({ 'meta.reference': c });
+//     or.push({ 'meta.id': c });
+//     if (looksLikeObjectId(c)) or.push({ _id: c });
+//   }
+
+//   return Transaction.findOne({ provider, $or: or });
+// }
+
 // async function creditAdminCommissionFromGateway({ provider, kind, amount, currency, req }) {
 //   try {
 //     if (!PRINCIPAL_URL || !ADMIN_USER_ID) {
-//       logger.warn(
-//         '[Gateway][Fees] PRINCIPAL_URL ou ADMIN_USER_ID manquant, commission admin non créditée.'
-//       );
+//       logger.warn('[Gateway][Fees] PRINCIPAL_URL ou ADMIN_USER_ID manquant, commission admin non créditée.');
 //       return;
 //     }
 
@@ -359,11 +293,6 @@
 //   }
 // }
 
-// /**
-//  * triggerGatewayTxEmail(type, { provider, req, result, reference })
-//  * -------------------------------------------------------------------
-//  * Envoie les emails transactionnels via notifyTransactionEvent
-//  */
 // async function triggerGatewayTxEmail(type, { provider, req, result, reference }) {
 //   try {
 //     if (provider === 'paynoval') return;
@@ -419,30 +348,16 @@
 //     };
 
 //     await notifyTransactionEvent(payload);
-//     logger.info('[Gateway][TX] triggerGatewayTxEmail OK', {
-//       type,
-//       provider,
-//       txId,
-//       senderEmail,
-//       receiverEmail,
-//     });
+//     logger.info('[Gateway][TX] triggerGatewayTxEmail OK', { type, provider, txId, senderEmail, receiverEmail });
 //   } catch (err) {
-//     logger.error('[Gateway][TX] triggerGatewayTxEmail ERROR', {
-//       type,
-//       provider,
-//       message: err.message,
-//     });
+//     logger.error('[Gateway][TX] triggerGatewayTxEmail ERROR', { type, provider, message: err.message });
 //   }
 // }
 
 // /* -------------------------------------------------------------------
 //  *                       CONTROLLER ACTIONS
-//  * -------------------------------------------------------------------
-//  */
+//  * ------------------------------------------------------------------- */
 
-// /**
-//  * GET /transactions/:id
-//  */
 // exports.getTransaction = async (req, res) => {
 //   const provider = resolveProvider(req, 'paynoval');
 //   const targetService = PROVIDER_TO_SERVICE[provider];
@@ -474,8 +389,7 @@
 
 //       return res.status(503).json({
 //         success: false,
-//         error:
-//           'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
+//         error: 'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
 //         details: 'cloudflare_challenge',
 //       });
 //     }
@@ -488,8 +402,7 @@
 //       'Erreur lors du proxy GET transaction';
 
 //     if (status === 429) {
-//       error =
-//         'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
+//       error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
 //     }
 
 //     logger.error('[Gateway][TX] Erreur GET transaction:', { status, error, provider, transactionId: id });
@@ -497,9 +410,6 @@
 //   }
 // };
 
-// /**
-//  * GET /transactions
-//  */
 // exports.listTransactions = async (req, res) => {
 //   const provider = resolveProvider(req, 'paynoval');
 //   const targetService = PROVIDER_TO_SERVICE[provider];
@@ -530,8 +440,7 @@
 
 //       return res.status(503).json({
 //         success: false,
-//         error:
-//           'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
+//         error: 'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
 //         details: 'cloudflare_challenge',
 //       });
 //     }
@@ -544,8 +453,7 @@
 //       'Erreur lors du proxy GET transactions';
 
 //     if (status === 429) {
-//       error =
-//         'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
+//       error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
 //     }
 
 //     logger.error('[Gateway][TX] Erreur GET transactions:', { status, error, provider });
@@ -555,16 +463,12 @@
 
 // /**
 //  * POST /transactions/initiate
-//  * -------------------------------------------------------------------
-//  * ✅ FIX :
-//  * - On stocke ownerUserId/initiatorUserId (expéditeur) dès l'initiate.
+//  * ✅ On stocke ownerUserId/initiatorUserId (expéditeur) dès l'initiate.
 //  */
 // exports.initiateTransaction = async (req, res) => {
 //   const targetProvider = resolveProvider(req, 'paynoval');
 //   const targetService = PROVIDER_TO_SERVICE[targetProvider];
-//   const targetUrl = targetService
-//     ? String(targetService).replace(/\/+$/, '') + '/transactions/initiate'
-//     : null;
+//   const targetUrl = targetService ? String(targetService).replace(/\/+$/, '') + '/transactions/initiate' : null;
 
 //   logger.debug('[Gateway][TX] initiateTransaction targetUrl', { targetProvider, targetUrl });
 
@@ -572,12 +476,11 @@
 //     return res.status(400).json({ success: false, error: 'Provider (destination) inconnu.' });
 //   }
 
-//   const userId = getUserId(req); // ✅ expéditeur (celui qui initie)
+//   const userId = getUserId(req);
 //   const now = new Date();
 //   let reference = null;
 //   let statusResult = 'pending';
 
-//   // 🔐 Sécurité obligatoire (question + code)
 //   const securityQuestion = (req.body.securityQuestion || req.body.question || '').trim();
 //   const securityCode = (req.body.securityCode || '').trim();
 
@@ -590,7 +493,6 @@
 //   const securityCodeHash = hashSecurityCode(securityCode);
 
 //   try {
-//     // 1) Appel provider
 //     const response = await safeAxiosRequest({
 //       method: 'post',
 //       url: targetUrl,
@@ -599,12 +501,10 @@
 //       timeout: 15000,
 //     });
 
-//     // 2) Résultat provider
 //     const result = response.data;
 //     reference = result.reference || result.id || null;
 //     statusResult = result.status || 'pending';
 
-//     // 3) AML log (initiate)
 //     await AMLLog.create({
 //       userId,
 //       type: 'initiate',
@@ -617,12 +517,10 @@
 //       createdAt: now,
 //     });
 
-//     // 4) Journal "Transaction" côté Gateway
 //     await Transaction.create({
-//       userId, // compat legacy (chez toi)
-//       ownerUserId: userId, // ✅ expéditeur (IMPORTANT pour parrainage)
-//       initiatorUserId: userId, // ✅ alias (pratique)
-//       // recipientUserId: req.body.recipientUserId || req.body.toUserId || undefined, // optionnel si tu l’as
+//       userId, // legacy compat
+//       ownerUserId: userId,
+//       initiatorUserId: userId,
 
 //       provider: targetProvider,
 //       amount: req.body.amount,
@@ -642,7 +540,6 @@
 //       createdAt: now,
 //       updatedAt: now,
 
-//       // 🔐 sécurité côté Gateway pour tous les providers
 //       requiresSecurityValidation: true,
 //       securityQuestion,
 //       securityCodeHash,
@@ -650,10 +547,8 @@
 //       securityLockedUntil: null,
 //     });
 
-//     // 5) Email "initiated" (hors paynoval)
 //     await triggerGatewayTxEmail('initiated', { provider: targetProvider, req, result, reference });
 
-//     // 6) Commission admin globale pour tous les providers ≠ paynoval
 //     if (targetProvider !== 'paynoval') {
 //       try {
 //         const rawFee = (result && (result.fees || result.fee || result.transactionFees)) || null;
@@ -677,16 +572,12 @@
 //             });
 //           }
 //         } else {
-//           logger.debug(
-//             '[Gateway][Fees] Aucun champ fees/fee/transactionFees dans la réponse provider, commission admin non calculée.',
-//             { provider: targetProvider }
-//           );
+//           logger.debug('[Gateway][Fees] Aucun champ fees/fee/transactionFees, commission admin non calculée.', {
+//             provider: targetProvider,
+//           });
 //         }
 //       } catch (e) {
-//         logger.error('[Gateway][Fees] Erreur crédit admin (initiate)', {
-//           provider: targetProvider,
-//           message: e.message,
-//         });
+//         logger.error('[Gateway][Fees] Erreur crédit admin (initiate)', { provider: targetProvider, message: e.message });
 //       }
 //     }
 
@@ -700,8 +591,7 @@
 
 //       return res.status(503).json({
 //         success: false,
-//         error:
-//           'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
+//         error: 'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
 //         details: 'cloudflare_challenge',
 //       });
 //     }
@@ -715,11 +605,9 @@
 //       'Erreur interne provider';
 
 //     if (status === 429) {
-//       error =
-//         'Trop de requêtes vers le service de paiement PayNoval. Merci de patienter quelques instants avant de réessayer.';
+//       error = 'Trop de requêtes vers le service de paiement PayNoval. Merci de patienter quelques instants avant de réessayer.';
 //     }
 
-//     // AML log (initiate fail)
 //     await AMLLog.create({
 //       userId,
 //       type: 'initiate',
@@ -732,7 +620,6 @@
 //       createdAt: now,
 //     });
 
-//     // Transaction gateway en échec
 //     await Transaction.create({
 //       userId,
 //       ownerUserId: userId,
@@ -757,29 +644,22 @@
 //       updatedAt: now,
 //     });
 
-//     logger.error('[Gateway][TX] initiateTransaction failed', {
-//       provider: targetProvider,
-//       error,
-//       status,
-//     });
+//     logger.error('[Gateway][TX] initiateTransaction failed', { provider: targetProvider, error, status });
 //     return res.status(status).json({ success: false, error });
 //   }
 // };
 
 // /**
 //  * POST /transactions/confirm
-//  * -------------------------------------------------------------------
-//  * ✅ FIX :
-//  * - referralUserId = ownerUserId (expéditeur), pas userId(req) (destinataire)
+//  * ✅ referralUserId = ownerUserId (expéditeur)
+//  * ✅ si owner introuvable => SKIP (pas de fallback vers caller)
 //  */
 // exports.confirmTransaction = async (req, res) => {
 //   const provider = resolveProvider(req, 'paynoval');
 //   const { transactionId, securityCode } = req.body;
 
 //   const targetService = PROVIDER_TO_SERVICE[provider];
-//   const targetUrl = targetService
-//     ? String(targetService).replace(/\/+$/, '') + '/transactions/confirm'
-//     : null;
+//   const targetUrl = targetService ? String(targetService).replace(/\/+$/, '') + '/transactions/confirm' : null;
 
 //   if (!targetUrl) {
 //     return res.status(400).json({ success: false, error: 'Provider (destination) inconnu.' });
@@ -788,23 +668,24 @@
 //   const confirmCallerUserId = getUserId(req); // ⚠️ souvent destinataire
 //   const now = new Date();
 
-//   // ✅ Normalisation robuste des statuts provider => statut "gateway"
+//   // ✅ Précharge txRecord pour obtenir ownerUserId de manière fiable
+//   let txRecord = await findGatewayTxForConfirm(provider, transactionId, req.body);
+
 //   const normalizeStatus = (raw) => {
 //     const s = String(raw || '').toLowerCase().trim();
 //     if (s === 'cancelled' || s === 'canceled') return 'canceled';
-//     if (s === 'confirmed' || s === 'success' || s === 'validated' || s === 'completed')
-//       return 'confirmed';
-//     if (s === 'failed' || s === 'error' || s === 'declined' || s === 'rejected')
-//       return 'failed';
+//     if (s === 'confirmed' || s === 'success' || s === 'validated' || s === 'completed') return 'confirmed';
+//     if (s === 'failed' || s === 'error' || s === 'declined' || s === 'rejected') return 'failed';
 //     if (s === 'pending' || s === 'processing' || s === 'in_progress') return 'pending';
 //     return s || 'confirmed';
 //   };
 
-//   /**
-//    * 1) Couche de sécurité côté Gateway (providers ≠ paynoval)
-//    */
+//   // 1) Couche de sécurité côté Gateway (providers ≠ paynoval)
 //   if (provider !== 'paynoval') {
-//     const txRecord = await Transaction.findOne({ provider, reference: transactionId });
+//     if (!txRecord) {
+//       const strict = await Transaction.findOne({ provider, reference: String(transactionId) });
+//       if (strict) txRecord = strict;
+//     }
 
 //     if (!txRecord) {
 //       return res.status(404).json({ success: false, error: 'Transaction non trouvée dans le Gateway.' });
@@ -818,8 +699,7 @@
 //       if (txRecord.securityLockedUntil && txRecord.securityLockedUntil > now) {
 //         return res.status(423).json({
 //           success: false,
-//           error:
-//             'Transaction temporairement bloquée suite à des tentatives infructueuses. Réessayez plus tard.',
+//           error: 'Transaction temporairement bloquée suite à des tentatives infructueuses. Réessayez plus tard.',
 //         });
 //       }
 
@@ -844,8 +724,7 @@
 //           update.cancelReason = 'Code de sécurité erroné (trop d’essais)';
 //           update.securityLockedUntil = new Date(now.getTime() + 15 * 60 * 1000);
 
-//           errorMsg =
-//             'Code de sécurité incorrect. Nombre d’essais dépassé, transaction annulée.';
+//           errorMsg = 'Code de sécurité incorrect. Nombre d’essais dépassé, transaction annulée.';
 
 //           await triggerGatewayTxEmail('cancelled', {
 //             provider,
@@ -880,9 +759,7 @@
 //     }
 //   }
 
-//   /**
-//    * 2) Appel au provider + update gateway
-//    */
+//   // 2) Appel au provider + update gateway
 //   try {
 //     const response = await safeAxiosRequest({
 //       method: 'post',
@@ -893,31 +770,24 @@
 //     });
 
 //     const result = response.data;
-
 //     const newStatus = normalizeStatus(result.status || 'confirmed');
 
-//     const refFromResult =
-//       result.reference || result.transaction?.reference || req.body.reference || null;
-
+//     const refFromResult = result.reference || result.transaction?.reference || req.body.reference || null;
 //     const idFromResult = result.id || result.transaction?.id || transactionId || null;
 
-//     const candidates = Array.from(
-//       new Set([refFromResult, idFromResult, transactionId].filter(Boolean).map(String))
-//     );
+//     const candidates = Array.from(new Set([refFromResult, idFromResult, transactionId].filter(Boolean).map(String)));
 
 //     let query = { provider };
 //     if (candidates.length > 0) {
-//       query = {
-//         provider,
-//         $or: [
-//           ...candidates.map((v) => ({ reference: v })),
-//           ...candidates.map((v) => ({ 'meta.reference': v })),
-//           ...candidates.map((v) => ({ 'meta.id': v })),
-//         ],
-//       };
+//       const or = [];
+//       for (const v of candidates) {
+//         or.push({ reference: v }, { 'meta.reference': v }, { 'meta.id': v });
+//         if (looksLikeObjectId(v)) or.push({ _id: v });
+//       }
+//       query = { provider, $or: or };
 //     }
 
-//     // 3) AML log confirm
+//     // 3) AML log confirm (caller)
 //     await AMLLog.create({
 //       userId: confirmCallerUserId,
 //       type: 'confirm',
@@ -930,19 +800,36 @@
 //       createdAt: now,
 //     });
 
-//     // 4) Update Transaction Gateway + récup du doc
-//     const gatewayTx = await Transaction.findOneAndUpdate(
-//       query,
-//       {
-//         $set: {
-//           status: newStatus,
-//           confirmedAt: newStatus === 'confirmed' ? now : undefined,
-//           cancelledAt: newStatus === 'canceled' ? now : undefined,
-//           updatedAt: now,
+//     // 4) Update Transaction Gateway + récup du doc (priorité _id)
+//     let gatewayTx = null;
+
+//     if (txRecord?._id) {
+//       gatewayTx = await Transaction.findByIdAndUpdate(
+//         txRecord._id,
+//         {
+//           $set: {
+//             status: newStatus,
+//             confirmedAt: newStatus === 'confirmed' ? now : undefined,
+//             cancelledAt: newStatus === 'canceled' ? now : undefined,
+//             updatedAt: now,
+//           },
 //         },
-//       },
-//       { new: true }
-//     );
+//         { new: true }
+//       );
+//     } else {
+//       gatewayTx = await Transaction.findOneAndUpdate(
+//         query,
+//         {
+//           $set: {
+//             status: newStatus,
+//             confirmedAt: newStatus === 'confirmed' ? now : undefined,
+//             cancelledAt: newStatus === 'canceled' ? now : undefined,
+//             updatedAt: now,
+//           },
+//         },
+//         { new: true }
+//       );
+//     }
 
 //     if (!gatewayTx) {
 //       logger.warn('[Gateway][TX] confirmTransaction: aucune transaction Gateway trouvée à mettre à jour', {
@@ -951,6 +838,18 @@
 //         refFromResult,
 //         candidates,
 //       });
+//     }
+
+//     // ✅ Backfill ownerUserId si absent mais userId présent (legacy)
+//     if (gatewayTx && !gatewayTx.ownerUserId && gatewayTx.userId) {
+//       try {
+//         await Transaction.updateOne(
+//           { _id: gatewayTx._id, ownerUserId: { $exists: false } },
+//           { $set: { ownerUserId: gatewayTx.userId, initiatorUserId: gatewayTx.userId } }
+//         );
+//         gatewayTx.ownerUserId = gatewayTx.userId;
+//         gatewayTx.initiatorUserId = gatewayTx.userId;
+//       } catch (e) {}
 //     }
 
 //     // 5) Email selon statut final
@@ -962,18 +861,16 @@
 //       await triggerGatewayTxEmail('failed', { provider, req, result, reference: refFromResult || transactionId });
 //     }
 
-//     /**
-//      * 6) PARRAINAGE (SEULEMENT SI CONFIRMÉ)
-//      * ✅ referralUserId = EXPÉDITEUR (ownerUserId)
-//      */
+//     // 6) PARRAINAGE (SEULEMENT SI CONFIRMÉ)
 //     if (newStatus === 'confirmed') {
-//       const referralUserId = getTxOwnerUserId(gatewayTx, confirmCallerUserId, req.body);
+//       const referralUserId = resolveReferralOwnerUserId(gatewayTx || txRecord);
 
 //       if (!referralUserId) {
-//         logger.warn('[Gateway][TX][Referral] referralUserId introuvable -> skip', {
+//         logger.warn('[Gateway][TX][Referral] owner introuvable => SKIP (évite attribution au destinataire)', {
 //           provider,
 //           transactionId,
 //           gatewayTxId: gatewayTx?._id,
+//           confirmCallerUserId,
 //         });
 //       } else {
 //         try {
@@ -984,26 +881,28 @@
 //             id: String(txIdSafe || refSafe || ''),
 //             reference: refSafe ? String(refSafe) : '',
 //             status: 'confirmed',
-//             amount: Number(result.amount || gatewayTx?.amount || 0),
-//             currency: String(result.currency || gatewayTx?.currency || req.body.currency || 'CAD'),
-//             country: String(result.country || gatewayTx?.country || req.body.country || ''),
+//             amount: Number(result.amount || gatewayTx?.amount || txRecord?.amount || 0),
+//             currency: String(
+//               result.currency ||
+//                 gatewayTx?.currency ||
+//                 txRecord?.currency ||
+//                 req.body.currency ||
+//                 'CAD'
+//             ),
+//             country: String(result.country || gatewayTx?.country || txRecord?.country || req.body.country || ''),
 //             provider: String(provider),
-//             createdAt: gatewayTx?.createdAt
-//               ? new Date(gatewayTx.createdAt).toISOString()
+//             createdAt: (gatewayTx?.createdAt || txRecord?.createdAt)
+//               ? new Date(gatewayTx?.createdAt || txRecord?.createdAt).toISOString()
 //               : new Date().toISOString(),
 //             confirmedAt: new Date().toISOString(),
 //           };
 
-//           // A) Assure le code referral (1ère tx confirmée suffit)
 //           await checkAndGenerateReferralCodeInMain(referralUserId, null, txForReferral);
-
-//           // B) Bonus si éligible (>=2 tx confirmées + seuil + referredBy)
 //           await processReferralBonusIfEligible(referralUserId, null);
 //         } catch (e) {
-//           logger.warn('[Gateway][TX][Referral] parrainage skipped/failed', { message: e?.message });
+//           logger.warn('[Gateway][TX][Referral] parrainage failed', { referralUserId, message: e?.message });
 //         }
 
-//         // Best effort : appelle aussi la route interne "ensure code"
 //         try {
 //           const txIdSafe = result.id || result.transaction?.id || transactionId || null;
 //           const refSafe = result.reference || result.transaction?.reference || transactionId || null;
@@ -1014,16 +913,22 @@
 //             transaction: {
 //               id: String(txIdSafe || refSafe || ''),
 //               reference: refSafe ? String(refSafe) : '',
-//               amount: Number(result.amount || gatewayTx?.amount || 0),
-//               currency: String(result.currency || gatewayTx?.currency || req.body.currency || 'CAD'),
-//               country: String(result.country || gatewayTx?.country || req.body.country || ''),
+//               amount: Number(result.amount || gatewayTx?.amount || txRecord?.amount || 0),
+//               currency: String(
+//                 result.currency ||
+//                   gatewayTx?.currency ||
+//                   txRecord?.currency ||
+//                   req.body.currency ||
+//                   'CAD'
+//               ),
+//               country: String(result.country || gatewayTx?.country || txRecord?.country || req.body.country || ''),
 //               provider: String(provider),
 //               confirmedAt: new Date().toISOString(),
 //             },
 //             requestId: req.id,
 //           });
 //         } catch (e) {
-//           logger.warn('[Gateway][Referral] notifyReferralOnConfirm skipped/failed', { message: e?.message });
+//           logger.warn('[Gateway][Referral] notifyReferralOnConfirm failed', { message: e?.message });
 //         }
 //       }
 //     }
@@ -1038,8 +943,7 @@
 
 //       return res.status(503).json({
 //         success: false,
-//         error:
-//           'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
+//         error: 'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
 //         details: 'cloudflare_challenge',
 //       });
 //     }
@@ -1053,11 +957,9 @@
 //       'Erreur interne provider';
 
 //     if (status === 429) {
-//       error =
-//         'Trop de requêtes vers le service de paiement PayNoval. Merci de patienter quelques instants avant de réessayer.';
+//       error = 'Trop de requêtes vers le service de paiement PayNoval. Merci de patienter quelques instants avant de réessayer.';
 //     }
 
-//     // AML log confirm fail
 //     await AMLLog.create({
 //       userId: confirmCallerUserId,
 //       type: 'confirm',
@@ -1070,16 +972,16 @@
 //       createdAt: now,
 //     });
 
-//     // Update transaction gateway fail (best effort)
+//     // ✅ update fail : support _id
+//     const or = [
+//       { reference: String(transactionId) },
+//       { 'meta.reference': String(transactionId) },
+//       { 'meta.id': String(transactionId) },
+//     ];
+//     if (looksLikeObjectId(String(transactionId))) or.push({ _id: String(transactionId) });
+
 //     await Transaction.findOneAndUpdate(
-//       {
-//         provider,
-//         $or: [
-//           { reference: transactionId },
-//           { 'meta.reference': transactionId },
-//           { 'meta.id': transactionId },
-//         ],
-//       },
+//       { provider, $or: or },
 //       { $set: { status: 'failed', updatedAt: now } }
 //     );
 
@@ -1096,9 +998,7 @@
 //   const { transactionId } = req.body;
 
 //   const targetService = PROVIDER_TO_SERVICE[provider];
-//   const targetUrl = targetService
-//     ? String(targetService).replace(/\/+$/, '') + '/transactions/cancel'
-//     : null;
+//   const targetUrl = targetService ? String(targetService).replace(/\/+$/, '') + '/transactions/cancel' : null;
 
 //   if (!targetUrl) {
 //     return res.status(400).json({ success: false, error: 'Provider (destination) inconnu.' });
@@ -1131,8 +1031,15 @@
 //       createdAt: now,
 //     });
 
+//     const or = [
+//       { reference: String(transactionId) },
+//       { 'meta.reference': String(transactionId) },
+//       { 'meta.id': String(transactionId) },
+//     ];
+//     if (looksLikeObjectId(String(transactionId))) or.push({ _id: String(transactionId) });
+
 //     await Transaction.findOneAndUpdate(
-//       { $or: [{ reference: transactionId }, { 'meta.reference': transactionId }, { 'meta.id': transactionId }] },
+//       { provider, $or: or },
 //       {
 //         $set: {
 //           status: newStatus,
@@ -1169,10 +1076,7 @@
 //             });
 //           }
 //         } else {
-//           logger.debug(
-//             '[Gateway][Fees] Aucun champ cancellationFee*/fees dans la réponse provider, pas de commission admin.',
-//             { provider }
-//           );
+//           logger.debug('[Gateway][Fees] Aucun champ cancellationFee*/fees, pas de commission admin.', { provider });
 //         }
 //       } catch (e) {
 //         logger.error('[Gateway][Fees] Erreur crédit admin (cancel)', { provider, message: e.message });
@@ -1189,8 +1093,7 @@
 
 //       return res.status(503).json({
 //         success: false,
-//         error:
-//           'Service de paiement temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
+//         error: 'Service de paiement temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
 //         details: 'cloudflare_challenge',
 //       });
 //     }
@@ -1204,8 +1107,7 @@
 //       'Erreur interne provider';
 
 //     if (status === 429) {
-//       error =
-//         'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
+//       error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
 //     }
 
 //     await AMLLog.create({
@@ -1220,8 +1122,15 @@
 //       createdAt: now,
 //     });
 
+//     const or = [
+//       { reference: String(transactionId) },
+//       { 'meta.reference': String(transactionId) },
+//       { 'meta.id': String(transactionId) },
+//     ];
+//     if (looksLikeObjectId(String(transactionId))) or.push({ _id: String(transactionId) });
+
 //     await Transaction.findOneAndUpdate(
-//       { $or: [{ reference: transactionId }, { 'meta.reference': transactionId }, { 'meta.id': transactionId }] },
+//       { provider, $or: or },
 //       { $set: { status: 'failed', updatedAt: now } }
 //     );
 
@@ -1265,6 +1174,7 @@
 //       netAmount,
 //       ownerUserId,
 //       initiatorUserId,
+//       recipientInfo,
 //     } = req.body || {};
 
 //     const numAmount = Number(amount);
@@ -1289,6 +1199,7 @@
 //       securityLockedUntil: null,
 //       confirmedAt: status === 'confirmed' ? now : undefined,
 //       meta: cleanSensitiveMeta(meta),
+//       recipientInfo: recipientInfo || undefined,
 //       createdAt: now,
 //       updatedAt: now,
 //       createdBy: createdBy || userId,
@@ -1307,18 +1218,12 @@
 //   }
 // };
 
-// /**
-//  * Les actions admin/ops ci-dessous suivent le même pattern :
-//  */
 // exports.refundTransaction = async (req, res) => forwardTransactionProxy(req, res, 'refund');
 // exports.reassignTransaction = async (req, res) => forwardTransactionProxy(req, res, 'reassign');
 // exports.validateTransaction = async (req, res) => forwardTransactionProxy(req, res, 'validate');
 // exports.archiveTransaction = async (req, res) => forwardTransactionProxy(req, res, 'archive');
 // exports.relaunchTransaction = async (req, res) => forwardTransactionProxy(req, res, 'relaunch');
 
-// /**
-//  * forwardTransactionProxy(req, res, action)
-//  */
 // async function forwardTransactionProxy(req, res, action) {
 //   const provider = resolveProvider(req, 'paynoval');
 //   const targetService = PROVIDER_TO_SERVICE[provider];
@@ -1349,8 +1254,7 @@
 
 //       return res.status(503).json({
 //         success: false,
-//         error:
-//           'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
+//         error: 'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
 //         details: 'cloudflare_challenge',
 //       });
 //     }
@@ -1364,16 +1268,13 @@
 //       `Erreur proxy ${action}`;
 
 //     if (status === 429) {
-//       error =
-//         'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
+//       error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
 //     }
 
 //     logger.error(`[Gateway][TX] Erreur ${action}:`, { status, error, provider });
 //     return res.status(status).json({ success: false, error });
 //   }
 // }
-
-
 
 
 
@@ -1387,12 +1288,14 @@
  * -------------------------------------------------------------------
  * ✅ FIX IMPORTANT (2025-12) :
  *  - Le parrainage doit s'appliquer à l'EXPÉDITEUR (initiateur), pas à celui qui confirme.
- *  - Or /transactions/confirm est souvent appelé par le destinataire.
+ *  - /transactions/confirm est souvent appelé par le destinataire.
  *  => On stocke explicitement ownerUserId à l'initiate, et au confirm on utilise ownerUserId.
  *  => IMPORTANT : si on ne retrouve pas la TX Gateway, on SKIP (pas de fallback vers caller).
  *
- * ✅ FIX 2 :
- *  - transactionId peut être un ObjectId Mongo (24 hex) => retrouver par _id aussi.
+ * ✅ FIX 2 (TON BUG ACTUEL) :
+ *  - Le confirm arrive avec transactionId = ID provider (Mongo id), alors que le doc Gateway a reference = PNV-XXXX
+ *  - Donc Gateway ne retrouve pas la TX => owner introuvable => referral SKIP.
+ *  => On stocke providerTxId dès l’initiate + on match dessus au confirm/cancel.
  */
 
 const axios = require('axios');
@@ -1432,9 +1335,7 @@ const GATEWAY_USER_AGENT =
 
 function safeUUID() {
   if (crypto && typeof crypto.randomUUID === 'function') {
-    try {
-      return crypto.randomUUID();
-    } catch (e) {}
+    try { return crypto.randomUUID(); } catch {}
   }
   return (
     Date.now().toString(16) +
@@ -1463,10 +1364,6 @@ function resolveProvider(req, fallback = 'paynoval') {
   return req.routedProvider || body.provider || body.destination || query.provider || fallback;
 }
 
-/**
- * ✅ IMPORTANT:
- *  - On ne fallback JAMAIS sur le caller pour le parrainage.
- */
 function resolveReferralOwnerUserId(txDoc) {
   return (
     txDoc?.ownerUserId ||
@@ -1474,7 +1371,7 @@ function resolveReferralOwnerUserId(txDoc) {
     txDoc?.fromUserId ||
     txDoc?.senderId ||
     txDoc?.createdBy ||
-    txDoc?.userId || // legacy
+    txDoc?.userId ||
     null
   );
 }
@@ -1510,7 +1407,7 @@ function auditForwardHeaders(req) {
       userId,
       dest: req.path,
     });
-  } catch (e) {}
+  } catch {}
 
   return headers;
 }
@@ -1589,13 +1486,10 @@ function hashSecurityCode(code) {
   return crypto.createHash('sha256').update(String(code || '').trim()).digest('hex');
 }
 
-function looksLikeObjectId(v) {
-  return typeof v === 'string' && /^[a-fA-F0-9]{24}$/.test(v);
-}
-
 /**
- * ✅ findGatewayTxForConfirm(provider, transactionId, body)
- * -> recherche par reference/meta + ✅ par _id si ObjectId
+ * findGatewayTxForConfirm(provider, transactionId, body)
+ * ----------------------------------------------------
+ * ✅ Ajout: match aussi providerTxId / meta.providerTxId
  */
 async function findGatewayTxForConfirm(provider, transactionId, body = {}) {
   const candidates = Array.from(
@@ -1607,7 +1501,7 @@ async function findGatewayTxForConfirm(provider, transactionId, body = {}) {
         body.ref,
         body.id,
         body.txId,
-        body._id,
+        body.providerTxId,
       ]
         .filter(Boolean)
         .map((v) => String(v))
@@ -1616,15 +1510,16 @@ async function findGatewayTxForConfirm(provider, transactionId, body = {}) {
 
   if (!candidates.length) return null;
 
-  const or = [];
-  for (const c of candidates) {
-    or.push({ reference: c });
-    or.push({ 'meta.reference': c });
-    or.push({ 'meta.id': c });
-    if (looksLikeObjectId(c)) or.push({ _id: c });
-  }
-
-  return Transaction.findOne({ provider, $or: or });
+  return Transaction.findOne({
+    provider,
+    $or: [
+      ...candidates.map((v) => ({ reference: v })),
+      ...candidates.map((v) => ({ providerTxId: v })),
+      ...candidates.map((v) => ({ 'meta.reference': v })),
+      ...candidates.map((v) => ({ 'meta.id': v })),
+      ...candidates.map((v) => ({ 'meta.providerTxId': v })),
+    ],
+  });
 }
 
 async function creditAdminCommissionFromGateway({ provider, kind, amount, currency, req }) {
@@ -1655,21 +1550,9 @@ async function creditAdminCommissionFromGateway({ provider, kind, amount, curren
       timeout: 10000,
     });
 
-    logger.info('[Gateway][Fees] Crédit admin OK', {
-      provider,
-      kind,
-      amount: num,
-      currency: currency || 'CAD',
-      adminUserId: ADMIN_USER_ID,
-    });
+    logger.info('[Gateway][Fees] Crédit admin OK', { provider, kind, amount: num, currency: currency || 'CAD', adminUserId: ADMIN_USER_ID });
   } catch (err) {
-    logger.error('[Gateway][Fees] Échec crédit admin', {
-      provider,
-      kind,
-      amount,
-      currency,
-      message: err.message,
-    });
+    logger.error('[Gateway][Fees] Échec crédit admin', { provider, kind, amount, currency, message: err.message });
   }
 }
 
@@ -1721,9 +1604,7 @@ async function triggerGatewayTxEmail(type, { provider, req, result, reference })
       reason: type === 'cancelled' ? result.reason || req.body.reason || '' : undefined,
       links: {
         sender: `${frontendBase}/transactions`,
-        receiverConfirm: txId
-          ? `${frontendBase}/transactions/confirm/${encodeURIComponent(txId)}`
-          : '',
+        receiverConfirm: txId ? `${frontendBase}/transactions/confirm/${encodeURIComponent(txId)}` : '',
       },
     };
 
@@ -1742,9 +1623,7 @@ exports.getTransaction = async (req, res) => {
   const provider = resolveProvider(req, 'paynoval');
   const targetService = PROVIDER_TO_SERVICE[provider];
 
-  if (!targetService) {
-    return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
-  }
+  if (!targetService) return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
 
   const { id } = req.params;
   const base = String(targetService).replace(/\/+$/, '');
@@ -1761,12 +1640,7 @@ exports.getTransaction = async (req, res) => {
     return res.status(response.status).json(response.data);
   } catch (err) {
     if (err.isCloudflareChallenge) {
-      logger.error('[Gateway][TX] Cloudflare challenge détecté sur GET transaction', {
-        provider,
-        transactionId: id,
-        upstreamStatus: err.response?.status,
-      });
-
+      logger.error('[Gateway][TX] Cloudflare challenge détecté sur GET transaction', { provider, transactionId: id, upstreamStatus: err.response?.status });
       return res.status(503).json({
         success: false,
         error: 'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
@@ -1781,9 +1655,7 @@ exports.getTransaction = async (req, res) => {
       (typeof err.response?.data === 'string' ? err.response.data : null) ||
       'Erreur lors du proxy GET transaction';
 
-    if (status === 429) {
-      error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
-    }
+    if (status === 429) error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
 
     logger.error('[Gateway][TX] Erreur GET transaction:', { status, error, provider, transactionId: id });
     return res.status(status).json({ success: false, error });
@@ -1794,9 +1666,7 @@ exports.listTransactions = async (req, res) => {
   const provider = resolveProvider(req, 'paynoval');
   const targetService = PROVIDER_TO_SERVICE[provider];
 
-  if (!targetService) {
-    return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
-  }
+  if (!targetService) return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
 
   const base = String(targetService).replace(/\/+$/, '');
   const url = `${base}/transactions`;
@@ -1812,12 +1682,7 @@ exports.listTransactions = async (req, res) => {
     return res.status(response.status).json(response.data);
   } catch (err) {
     if (err.isCloudflareChallenge) {
-      logger.error('[Gateway][TX] Cloudflare challenge détecté sur GET transactions', {
-        provider,
-        upstreamStatus: err.response?.status,
-        path: '/transactions',
-      });
-
+      logger.error('[Gateway][TX] Cloudflare challenge détecté sur GET transactions', { provider, upstreamStatus: err.response?.status, path: '/transactions' });
       return res.status(503).json({
         success: false,
         error: 'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
@@ -1832,9 +1697,7 @@ exports.listTransactions = async (req, res) => {
       (typeof err.response?.data === 'string' ? err.response.data : null) ||
       'Erreur lors du proxy GET transactions';
 
-    if (status === 429) {
-      error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
-    }
+    if (status === 429) error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
 
     logger.error('[Gateway][TX] Erreur GET transactions:', { status, error, provider });
     return res.status(status).json({ success: false, error });
@@ -1843,7 +1706,7 @@ exports.listTransactions = async (req, res) => {
 
 /**
  * POST /transactions/initiate
- * ✅ On stocke ownerUserId/initiatorUserId (expéditeur) dès l'initiate.
+ * ✅ On stocke ownerUserId/initiatorUserId (expéditeur) + providerTxId
  */
 exports.initiateTransaction = async (req, res) => {
   const targetProvider = resolveProvider(req, 'paynoval');
@@ -1852,9 +1715,7 @@ exports.initiateTransaction = async (req, res) => {
 
   logger.debug('[Gateway][TX] initiateTransaction targetUrl', { targetProvider, targetUrl });
 
-  if (!targetUrl) {
-    return res.status(400).json({ success: false, error: 'Provider (destination) inconnu.' });
-  }
+  if (!targetUrl) return res.status(400).json({ success: false, error: 'Provider (destination) inconnu.' });
 
   const userId = getUserId(req);
   const now = new Date();
@@ -1882,7 +1743,14 @@ exports.initiateTransaction = async (req, res) => {
     });
 
     const result = response.data;
-    reference = result.reference || result.id || null;
+
+    // ✅ IMPORTANT : on capture les deux identifiants
+    reference = result.reference || result.transaction?.reference || null;
+    const providerTxId = result.id || result.transactionId || result.transaction?.id || null;
+
+    // fallback (si le provider ne renvoie pas reference)
+    const finalReference = reference || (providerTxId ? String(providerTxId) : null);
+
     statusResult = result.status || 'pending';
 
     await AMLLog.create({
@@ -1898,7 +1766,7 @@ exports.initiateTransaction = async (req, res) => {
     });
 
     await Transaction.create({
-      userId, // legacy compat
+      userId,
       ownerUserId: userId,
       initiatorUserId: userId,
 
@@ -1915,8 +1783,20 @@ exports.initiateTransaction = async (req, res) => {
         undefined,
       operator: req.body.operator || undefined,
       country: req.body.country || undefined,
-      reference,
-      meta: cleanSensitiveMeta(req.body),
+
+      // ✅ stable human reference
+      reference: finalReference,
+
+      // ✅ clé du fix: id provider
+      providerTxId: providerTxId ? String(providerTxId) : undefined,
+
+      meta: {
+        ...cleanSensitiveMeta(req.body),
+        reference: finalReference || '',
+        id: providerTxId ? String(providerTxId) : undefined,
+        providerTxId: providerTxId ? String(providerTxId) : undefined,
+      },
+
       createdAt: now,
       updatedAt: now,
 
@@ -1927,7 +1807,7 @@ exports.initiateTransaction = async (req, res) => {
       securityLockedUntil: null,
     });
 
-    await triggerGatewayTxEmail('initiated', { provider: targetProvider, req, result, reference });
+    await triggerGatewayTxEmail('initiated', { provider: targetProvider, req, result, reference: finalReference });
 
     if (targetProvider !== 'paynoval') {
       try {
@@ -1952,9 +1832,7 @@ exports.initiateTransaction = async (req, res) => {
             });
           }
         } else {
-          logger.debug('[Gateway][Fees] Aucun champ fees/fee/transactionFees, commission admin non calculée.', {
-            provider: targetProvider,
-          });
+          logger.debug('[Gateway][Fees] Aucun champ fees/fee/transactionFees, commission admin non calculée.', { provider: targetProvider });
         }
       } catch (e) {
         logger.error('[Gateway][Fees] Erreur crédit admin (initiate)', { provider: targetProvider, message: e.message });
@@ -1964,11 +1842,7 @@ exports.initiateTransaction = async (req, res) => {
     return res.status(response.status).json(result);
   } catch (err) {
     if (err.isCloudflareChallenge) {
-      logger.error('[Gateway][TX] Cloudflare challenge détecté sur INITIATE', {
-        provider: targetProvider,
-        upstreamStatus: err.response?.status,
-      });
-
+      logger.error('[Gateway][TX] Cloudflare challenge détecté sur INITIATE', { provider: targetProvider, upstreamStatus: err.response?.status });
       return res.status(503).json({
         success: false,
         error: 'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
@@ -1984,9 +1858,7 @@ exports.initiateTransaction = async (req, res) => {
       err.message ||
       'Erreur interne provider';
 
-    if (status === 429) {
-      error = 'Trop de requêtes vers le service de paiement PayNoval. Merci de patienter quelques instants avant de réessayer.';
-    }
+    if (status === 429) error = 'Trop de requêtes vers le service de paiement PayNoval. Merci de patienter quelques instants avant de réessayer.';
 
     await AMLLog.create({
       userId,
@@ -2032,23 +1904,22 @@ exports.initiateTransaction = async (req, res) => {
 /**
  * POST /transactions/confirm
  * ✅ referralUserId = ownerUserId (expéditeur)
- * ✅ si owner introuvable => SKIP (pas de fallback vers caller)
+ * ✅ si owner introuvable => SKIP
+ * ✅ FIX: retrouve la tx gateway via providerTxId
  */
 exports.confirmTransaction = async (req, res) => {
   const provider = resolveProvider(req, 'paynoval');
   const { transactionId, securityCode } = req.body;
 
   const targetService = PROVIDER_TO_SERVICE[provider];
-  const targetUrl = targetService ? String(targetService).replace(/\/+$/, '') + '/transactions/confirm' : null;
+  const base = targetService ? String(targetService).replace(/\/+$/, '') : null;
+  const targetUrl = base ? base + '/transactions/confirm' : null;
 
-  if (!targetUrl) {
-    return res.status(400).json({ success: false, error: 'Provider (destination) inconnu.' });
-  }
+  if (!targetUrl) return res.status(400).json({ success: false, error: 'Provider (destination) inconnu.' });
 
   const confirmCallerUserId = getUserId(req); // ⚠️ souvent destinataire
   const now = new Date();
 
-  // ✅ Précharge txRecord pour obtenir ownerUserId de manière fiable
   let txRecord = await findGatewayTxForConfirm(provider, transactionId, req.body);
 
   const normalizeStatus = (raw) => {
@@ -2060,20 +1931,17 @@ exports.confirmTransaction = async (req, res) => {
     return s || 'confirmed';
   };
 
-  // 1) Couche de sécurité côté Gateway (providers ≠ paynoval)
+  /**
+   * 1) Sécurité côté Gateway (providers ≠ paynoval)
+   */
   if (provider !== 'paynoval') {
     if (!txRecord) {
       const strict = await Transaction.findOne({ provider, reference: String(transactionId) });
       if (strict) txRecord = strict;
     }
 
-    if (!txRecord) {
-      return res.status(404).json({ success: false, error: 'Transaction non trouvée dans le Gateway.' });
-    }
-
-    if (txRecord.status !== 'pending') {
-      return res.status(400).json({ success: false, error: 'Transaction déjà traitée ou annulée.' });
-    }
+    if (!txRecord) return res.status(404).json({ success: false, error: 'Transaction non trouvée dans le Gateway.' });
+    if (txRecord.status !== 'pending') return res.status(400).json({ success: false, error: 'Transaction déjà traitée ou annulée.' });
 
     if (txRecord.requiresSecurityValidation && txRecord.securityCodeHash) {
       if (txRecord.securityLockedUntil && txRecord.securityLockedUntil > now) {
@@ -2084,10 +1952,7 @@ exports.confirmTransaction = async (req, res) => {
       }
 
       if (!securityCode) {
-        return res.status(400).json({
-          success: false,
-          error: 'securityCode requis pour confirmer cette transaction.',
-        });
+        return res.status(400).json({ success: false, error: 'securityCode requis pour confirmer cette transaction.' });
       }
 
       const incomingHash = hashSecurityCode(securityCode);
@@ -2128,18 +1993,14 @@ exports.confirmTransaction = async (req, res) => {
 
       await Transaction.updateOne(
         { _id: txRecord._id },
-        {
-          $set: {
-            securityAttempts: 0,
-            securityLockedUntil: null,
-            updatedAt: now,
-          },
-        }
+        { $set: { securityAttempts: 0, securityLockedUntil: null, updatedAt: now } }
       );
     }
   }
 
-  // 2) Appel au provider + update gateway
+  /**
+   * 2) Appel provider + update gateway
+   */
   try {
     const response = await safeAxiosRequest({
       method: 'post',
@@ -2153,21 +2014,11 @@ exports.confirmTransaction = async (req, res) => {
     const newStatus = normalizeStatus(result.status || 'confirmed');
 
     const refFromResult = result.reference || result.transaction?.reference || req.body.reference || null;
-    const idFromResult = result.id || result.transaction?.id || transactionId || null;
+    const idFromResult = result.id || result.transaction?.id || result.transactionId || transactionId || null;
 
     const candidates = Array.from(new Set([refFromResult, idFromResult, transactionId].filter(Boolean).map(String)));
 
-    let query = { provider };
-    if (candidates.length > 0) {
-      const or = [];
-      for (const v of candidates) {
-        or.push({ reference: v }, { 'meta.reference': v }, { 'meta.id': v });
-        if (looksLikeObjectId(v)) or.push({ _id: v });
-      }
-      query = { provider, $or: or };
-    }
-
-    // 3) AML log confirm (caller)
+    // AML log confirm
     await AMLLog.create({
       userId: confirmCallerUserId,
       type: 'confirm',
@@ -2180,35 +2031,87 @@ exports.confirmTransaction = async (req, res) => {
       createdAt: now,
     });
 
-    // 4) Update Transaction Gateway + récup du doc (priorité _id)
+    // Update Transaction Gateway + récup du doc (priorité _id)
     let gatewayTx = null;
 
+    const query = {
+      provider,
+      $or: [
+        ...candidates.map((v) => ({ reference: v })),
+        ...candidates.map((v) => ({ providerTxId: v })),
+        ...candidates.map((v) => ({ 'meta.reference': v })),
+        ...candidates.map((v) => ({ 'meta.id': v })),
+        ...candidates.map((v) => ({ 'meta.providerTxId': v })),
+      ],
+    };
+
+    const patch = {
+      status: newStatus,
+      confirmedAt: newStatus === 'confirmed' ? now : undefined,
+      cancelledAt: newStatus === 'canceled' ? now : undefined,
+      updatedAt: now,
+
+      // ✅ si providerTxId connu, on le garde
+      providerTxId: idFromResult ? String(idFromResult) : undefined,
+      ...(refFromResult ? { reference: String(refFromResult) } : {}),
+      meta: {
+        ...(txRecord?.meta || {}),
+        ...(idFromResult ? { id: String(idFromResult), providerTxId: String(idFromResult) } : {}),
+        ...(refFromResult ? { reference: String(refFromResult) } : {}),
+      },
+    };
+
     if (txRecord?._id) {
-      gatewayTx = await Transaction.findByIdAndUpdate(
-        txRecord._id,
-        {
-          $set: {
-            status: newStatus,
-            confirmedAt: newStatus === 'confirmed' ? now : undefined,
-            cancelledAt: newStatus === 'canceled' ? now : undefined,
-            updatedAt: now,
-          },
-        },
-        { new: true }
-      );
+      gatewayTx = await Transaction.findByIdAndUpdate(txRecord._id, { $set: patch }, { new: true });
     } else {
-      gatewayTx = await Transaction.findOneAndUpdate(
-        query,
-        {
-          $set: {
-            status: newStatus,
-            confirmedAt: newStatus === 'confirmed' ? now : undefined,
-            cancelledAt: newStatus === 'canceled' ? now : undefined,
-            updatedAt: now,
-          },
-        },
-        { new: true }
-      );
+      gatewayTx = await Transaction.findOneAndUpdate(query, { $set: patch }, { new: true });
+    }
+
+    /**
+     * ✅ Best-effort: si on ne retrouve toujours pas, on tente un GET provider /transactions/:id
+     * pour récupérer une reference et mettre à jour le doc gateway.
+     * (Ça évite ton cas exact où le provider confirm ne renvoie pas reference)
+     */
+    if (!gatewayTx && base && idFromResult) {
+      try {
+        const getResp = await safeAxiosRequest({
+          method: 'get',
+          url: `${base}/transactions/${encodeURIComponent(String(idFromResult))}`,
+          headers: auditForwardHeaders(req),
+          timeout: 10000,
+        });
+
+        const full = getResp.data?.data || getResp.data || {};
+        const fullRef = full.reference || full.transaction?.reference || null;
+
+        if (fullRef) {
+          gatewayTx = await Transaction.findOneAndUpdate(
+            {
+              provider,
+              $or: [
+                { reference: String(fullRef) },
+                { 'meta.reference': String(fullRef) },
+                { providerTxId: String(idFromResult) },
+                { 'meta.id': String(idFromResult) },
+                { 'meta.providerTxId': String(idFromResult) },
+              ],
+            },
+            {
+              $set: {
+                ...patch,
+                reference: String(fullRef),
+                meta: {
+                  ...(patch.meta || {}),
+                  reference: String(fullRef),
+                },
+              },
+            },
+            { new: true }
+          );
+        }
+      } catch (e) {
+        logger.warn('[Gateway][TX] Best-effort GET after confirm failed', { provider, idFromResult: String(idFromResult), message: e?.message });
+      }
     }
 
     if (!gatewayTx) {
@@ -2220,19 +2123,7 @@ exports.confirmTransaction = async (req, res) => {
       });
     }
 
-    // ✅ Backfill ownerUserId si absent mais userId présent (legacy)
-    if (gatewayTx && !gatewayTx.ownerUserId && gatewayTx.userId) {
-      try {
-        await Transaction.updateOne(
-          { _id: gatewayTx._id, ownerUserId: { $exists: false } },
-          { $set: { ownerUserId: gatewayTx.userId, initiatorUserId: gatewayTx.userId } }
-        );
-        gatewayTx.ownerUserId = gatewayTx.userId;
-        gatewayTx.initiatorUserId = gatewayTx.userId;
-      } catch (e) {}
-    }
-
-    // 5) Email selon statut final
+    // Email selon statut final
     if (newStatus === 'confirmed') {
       await triggerGatewayTxEmail('confirmed', { provider, req, result, reference: refFromResult || transactionId });
     } else if (newStatus === 'canceled') {
@@ -2241,7 +2132,9 @@ exports.confirmTransaction = async (req, res) => {
       await triggerGatewayTxEmail('failed', { provider, req, result, reference: refFromResult || transactionId });
     }
 
-    // 6) PARRAINAGE (SEULEMENT SI CONFIRMÉ)
+    /**
+     * 3) PARRAINAGE (SEULEMENT SI CONFIRMÉ)
+     */
     if (newStatus === 'confirmed') {
       const referralUserId = resolveReferralOwnerUserId(gatewayTx || txRecord);
 
@@ -2253,22 +2146,14 @@ exports.confirmTransaction = async (req, res) => {
           confirmCallerUserId,
         });
       } else {
+        // A) Assure le code referral (via utils)
         try {
-          const txIdSafe = result.id || result.transaction?.id || transactionId || null;
-          const refSafe = result.reference || result.transaction?.reference || transactionId || null;
-
           const txForReferral = {
-            id: String(txIdSafe || refSafe || ''),
-            reference: refSafe ? String(refSafe) : '',
+            id: String(idFromResult || refFromResult || transactionId || ''),
+            reference: refFromResult ? String(refFromResult) : '',
             status: 'confirmed',
             amount: Number(result.amount || gatewayTx?.amount || txRecord?.amount || 0),
-            currency: String(
-              result.currency ||
-                gatewayTx?.currency ||
-                txRecord?.currency ||
-                req.body.currency ||
-                'CAD'
-            ),
+            currency: String(result.currency || gatewayTx?.currency || txRecord?.currency || req.body.currency || 'CAD'),
             country: String(result.country || gatewayTx?.country || txRecord?.country || req.body.country || ''),
             provider: String(provider),
             createdAt: (gatewayTx?.createdAt || txRecord?.createdAt)
@@ -2283,24 +2168,16 @@ exports.confirmTransaction = async (req, res) => {
           logger.warn('[Gateway][TX][Referral] parrainage failed', { referralUserId, message: e?.message });
         }
 
+        // B) Best effort : route interne ensure code
         try {
-          const txIdSafe = result.id || result.transaction?.id || transactionId || null;
-          const refSafe = result.reference || result.transaction?.reference || transactionId || null;
-
           await notifyReferralOnConfirm({
             userId: referralUserId,
             provider,
             transaction: {
-              id: String(txIdSafe || refSafe || ''),
-              reference: refSafe ? String(refSafe) : '',
+              id: String(idFromResult || refFromResult || transactionId || ''),
+              reference: refFromResult ? String(refFromResult) : '',
               amount: Number(result.amount || gatewayTx?.amount || txRecord?.amount || 0),
-              currency: String(
-                result.currency ||
-                  gatewayTx?.currency ||
-                  txRecord?.currency ||
-                  req.body.currency ||
-                  'CAD'
-              ),
+              currency: String(result.currency || gatewayTx?.currency || txRecord?.currency || req.body.currency || 'CAD'),
               country: String(result.country || gatewayTx?.country || txRecord?.country || req.body.country || ''),
               provider: String(provider),
               confirmedAt: new Date().toISOString(),
@@ -2316,11 +2193,7 @@ exports.confirmTransaction = async (req, res) => {
     return res.status(response.status).json(result);
   } catch (err) {
     if (err.isCloudflareChallenge) {
-      logger.error('[Gateway][TX] Cloudflare challenge détecté sur CONFIRM', {
-        provider,
-        upstreamStatus: err.response?.status,
-      });
-
+      logger.error('[Gateway][TX] Cloudflare challenge détecté sur CONFIRM', { provider, upstreamStatus: err.response?.status });
       return res.status(503).json({
         success: false,
         error: 'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
@@ -2336,9 +2209,7 @@ exports.confirmTransaction = async (req, res) => {
       err.message ||
       'Erreur interne provider';
 
-    if (status === 429) {
-      error = 'Trop de requêtes vers le service de paiement PayNoval. Merci de patienter quelques instants avant de réessayer.';
-    }
+    if (status === 429) error = 'Trop de requêtes vers le service de paiement PayNoval. Merci de patienter quelques instants avant de réessayer.';
 
     await AMLLog.create({
       userId: confirmCallerUserId,
@@ -2352,16 +2223,17 @@ exports.confirmTransaction = async (req, res) => {
       createdAt: now,
     });
 
-    // ✅ update fail : support _id
-    const or = [
-      { reference: String(transactionId) },
-      { 'meta.reference': String(transactionId) },
-      { 'meta.id': String(transactionId) },
-    ];
-    if (looksLikeObjectId(String(transactionId))) or.push({ _id: String(transactionId) });
-
     await Transaction.findOneAndUpdate(
-      { provider, $or: or },
+      {
+        provider,
+        $or: [
+          { reference: String(transactionId) },
+          { providerTxId: String(transactionId) },
+          { 'meta.reference': String(transactionId) },
+          { 'meta.id': String(transactionId) },
+          { 'meta.providerTxId': String(transactionId) },
+        ],
+      },
       { $set: { status: 'failed', updatedAt: now } }
     );
 
@@ -2372,17 +2244,17 @@ exports.confirmTransaction = async (req, res) => {
 
 /**
  * POST /transactions/cancel
+ * ✅ match aussi providerTxId
  */
 exports.cancelTransaction = async (req, res) => {
   const provider = resolveProvider(req, 'paynoval');
   const { transactionId } = req.body;
 
   const targetService = PROVIDER_TO_SERVICE[provider];
-  const targetUrl = targetService ? String(targetService).replace(/\/+$/, '') + '/transactions/cancel' : null;
+  const base = targetService ? String(targetService).replace(/\/+$/, '') : null;
+  const targetUrl = base ? base + '/transactions/cancel' : null;
 
-  if (!targetUrl) {
-    return res.status(400).json({ success: false, error: 'Provider (destination) inconnu.' });
-  }
+  if (!targetUrl) return res.status(400).json({ success: false, error: 'Provider (destination) inconnu.' });
 
   const userId = getUserId(req);
   const now = new Date();
@@ -2411,15 +2283,17 @@ exports.cancelTransaction = async (req, res) => {
       createdAt: now,
     });
 
-    const or = [
-      { reference: String(transactionId) },
-      { 'meta.reference': String(transactionId) },
-      { 'meta.id': String(transactionId) },
-    ];
-    if (looksLikeObjectId(String(transactionId))) or.push({ _id: String(transactionId) });
-
     await Transaction.findOneAndUpdate(
-      { provider, $or: or },
+      {
+        provider,
+        $or: [
+          { reference: String(transactionId) },
+          { providerTxId: String(transactionId) },
+          { 'meta.reference': String(transactionId) },
+          { 'meta.id': String(transactionId) },
+          { 'meta.providerTxId': String(transactionId) },
+        ],
+      },
       {
         $set: {
           status: newStatus,
@@ -2466,11 +2340,7 @@ exports.cancelTransaction = async (req, res) => {
     return res.status(response.status).json(result);
   } catch (err) {
     if (err.isCloudflareChallenge) {
-      logger.error('[Gateway][TX] Cloudflare challenge détecté sur CANCEL', {
-        provider,
-        upstreamStatus: err.response?.status,
-      });
-
+      logger.error('[Gateway][TX] Cloudflare challenge détecté sur CANCEL', { provider, upstreamStatus: err.response?.status });
       return res.status(503).json({
         success: false,
         error: 'Service de paiement temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
@@ -2486,9 +2356,7 @@ exports.cancelTransaction = async (req, res) => {
       err.message ||
       'Erreur interne provider';
 
-    if (status === 429) {
-      error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
-    }
+    if (status === 429) error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
 
     await AMLLog.create({
       userId,
@@ -2502,15 +2370,17 @@ exports.cancelTransaction = async (req, res) => {
       createdAt: now,
     });
 
-    const or = [
-      { reference: String(transactionId) },
-      { 'meta.reference': String(transactionId) },
-      { 'meta.id': String(transactionId) },
-    ];
-    if (looksLikeObjectId(String(transactionId))) or.push({ _id: String(transactionId) });
-
     await Transaction.findOneAndUpdate(
-      { provider, $or: or },
+      {
+        provider,
+        $or: [
+          { reference: String(transactionId) },
+          { providerTxId: String(transactionId) },
+          { 'meta.reference': String(transactionId) },
+          { 'meta.id': String(transactionId) },
+          { 'meta.providerTxId': String(transactionId) },
+        ],
+      },
       { $set: { status: 'failed', updatedAt: now } }
     );
 
@@ -2519,85 +2389,7 @@ exports.cancelTransaction = async (req, res) => {
   }
 };
 
-/**
- * POST /transactions/internal/log
- */
-exports.logInternalTransaction = async (req, res) => {
-  try {
-    const headerToken = req.headers['x-internal-token'] || '';
-    const expectedToken = config.internalToken || process.env.INTERNAL_LOG_TOKEN || '';
-
-    if (expectedToken && headerToken !== expectedToken) {
-      logger.warn('[Gateway][TX] logInternalTransaction: token interne invalide');
-      return res.status(401).json({ success: false, error: 'Appel interne non autorisé.' });
-    }
-
-    const now = new Date();
-    const userId = getUserId(req) || req.body.userId;
-
-    if (!userId) {
-      return res.status(400).json({ success: false, error: 'userId manquant pour loguer la transaction.' });
-    }
-
-    const {
-      provider = 'paynoval',
-      amount,
-      status = 'confirmed',
-      currency,
-      operator = 'paynoval',
-      country,
-      reference,
-      meta = {},
-      createdBy,
-      receiver,
-      fees,
-      netAmount,
-      ownerUserId,
-      initiatorUserId,
-      recipientInfo,
-    } = req.body || {};
-
-    const numAmount = Number(amount);
-    if (!numAmount || Number.isNaN(numAmount) || numAmount <= 0) {
-      return res.status(400).json({ success: false, error: 'amount invalide ou manquant pour loguer la transaction.' });
-    }
-
-    const tx = await Transaction.create({
-      userId,
-      ownerUserId: ownerUserId || initiatorUserId || createdBy || userId,
-      initiatorUserId: initiatorUserId || ownerUserId || createdBy || userId,
-
-      provider,
-      amount: numAmount,
-      status,
-      currency,
-      operator,
-      country,
-      reference,
-      requiresSecurityValidation: false,
-      securityAttempts: 0,
-      securityLockedUntil: null,
-      confirmedAt: status === 'confirmed' ? now : undefined,
-      meta: cleanSensitiveMeta(meta),
-      recipientInfo: recipientInfo || undefined,
-      createdAt: now,
-      updatedAt: now,
-      createdBy: createdBy || userId,
-      receiver: receiver || userId,
-      fees: typeof fees === 'number' ? fees : undefined,
-      netAmount: typeof netAmount === 'number' ? netAmount : undefined,
-    });
-
-    return res.status(201).json({ success: true, data: tx });
-  } catch (err) {
-    logger.error('[Gateway][TX] logInternalTransaction error', { message: err.message, stack: err.stack });
-    return res.status(500).json({
-      success: false,
-      error: 'Erreur lors de la création de la transaction interne.',
-    });
-  }
-};
-
+// autres actions inchangées
 exports.refundTransaction = async (req, res) => forwardTransactionProxy(req, res, 'refund');
 exports.reassignTransaction = async (req, res) => forwardTransactionProxy(req, res, 'reassign');
 exports.validateTransaction = async (req, res) => forwardTransactionProxy(req, res, 'validate');
@@ -2608,9 +2400,7 @@ async function forwardTransactionProxy(req, res, action) {
   const provider = resolveProvider(req, 'paynoval');
   const targetService = PROVIDER_TO_SERVICE[provider];
 
-  if (!targetService) {
-    return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
-  }
+  if (!targetService) return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
 
   const url = String(targetService).replace(/\/+$/, '') + `/transactions/${action}`;
 
@@ -2626,12 +2416,7 @@ async function forwardTransactionProxy(req, res, action) {
     return res.status(response.status).json(response.data);
   } catch (err) {
     if (err.isCloudflareChallenge) {
-      logger.error('[Gateway][TX] Cloudflare challenge détecté sur action', {
-        provider,
-        action,
-        upstreamStatus: err.response?.status,
-      });
-
+      logger.error('[Gateway][TX] Cloudflare challenge détecté sur action', { provider, action, upstreamStatus: err.response?.status });
       return res.status(503).json({
         success: false,
         error: 'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
@@ -2647,9 +2432,7 @@ async function forwardTransactionProxy(req, res, action) {
       err.message ||
       `Erreur proxy ${action}`;
 
-    if (status === 429) {
-      error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
-    }
+    if (status === 429) error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
 
     logger.error(`[Gateway][TX] Erreur ${action}:`, { status, error, provider });
     return res.status(status).json({ success: false, error });

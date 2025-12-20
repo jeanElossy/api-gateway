@@ -1,66 +1,67 @@
 // File: api-gateway/src/models/Transaction.js
-"use strict";
+const mongoose = require('mongoose');
 
-const mongoose = require("mongoose");
-
-const { Schema } = mongoose;
-
-const TransactionSchema = new Schema(
+const TransactionSchema = new mongoose.Schema(
   {
-    // ✅ Legacy (présent dans tes docs)
-    userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true,
+    },
 
-    // ✅ IMPORTANT : expéditeur / initiateur (pour parrainage + historique)
-    ownerUserId: { type: Schema.Types.ObjectId, ref: "User", index: true },
-    initiatorUserId: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    // ✅ Expéditeur (owner) / initiateur (source fiable pour parrainage)
+    ownerUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+    initiatorUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+
+    // Legacy compat si tu as déjà des champs différents
+    fromUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    senderId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 
     // 🔥 Ajout pour l'app mobile (filtrage historique / rôles)
-    createdBy: { type: Schema.Types.ObjectId, ref: "User", index: true },
-
-    // receiver peut être ObjectId OU email/texte selon provider
-    receiver: { type: Schema.Types.Mixed, default: null, index: true },
-
-    recipientUserId: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    receiver: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 
     provider: {
       type: String,
       required: true,
       enum: [
-        "paynoval",
-        "stripe",
-        "bank",
-        "mobilemoney",
-        "visa_direct",
-        "cashin",
-        "cashout",
-        "stripe2momo",
-        "flutterwave",
+        'paynoval',
+        'stripe',
+        'bank',
+        'mobilemoney',
+        'visa_direct',
+        'cashin',
+        'cashout',
+        'stripe2momo',
+        'flutterwave',
       ],
-      index: true,
     },
 
     amount: { type: Number, required: true },
 
-    // 💸 Frais et netAmount (optionnels)
     fees: { type: Number },
     netAmount: { type: Number },
 
     status: {
       type: String,
-      enum: ["pending", "confirmed", "canceled", "failed", "refunded"],
-      default: "pending",
-      index: true,
+      enum: ['pending', 'confirmed', 'canceled', 'failed', 'refunded'],
+      default: 'pending',
     },
 
-    toEmail: { type: String, index: true },
+    toEmail: { type: String },
     toIBAN: { type: String },
     toPhone: { type: String },
     currency: { type: String },
     operator: { type: String },
-    country: { type: String, index: true },
-    reference: { type: String, index: true },
+    country: { type: String },
 
-    // 🔐 Sécurité PayNoval
+    // ✅ reference “humaine” (ex PNV-XXXX...)
+    reference: { type: String },
+
+    // ✅ providerTxId (ID provider retourné par le microservice, ex 69470dcdd9c...)
+    providerTxId: { type: String, index: true },
+
+    // 🔐 Sécurité
     requiresSecurityValidation: { type: Boolean, default: true },
     securityQuestion: { type: String },
     securityCodeHash: { type: String },
@@ -71,27 +72,24 @@ const TransactionSchema = new Schema(
     cancelledAt: { type: Date },
     cancelReason: { type: String },
 
-    // Snapshot complet de la requête, sans secrets
-    meta: { type: Schema.Types.Mixed, default: {} },
+    meta: { type: Object },
 
-    // ✅ pour garder les infos recipient (comme ton exemple)
-    recipientInfo: { type: Schema.Types.Mixed, default: {} },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now },
   },
-  {
-    timestamps: true,
-    minimize: false,
-  }
+  { minimize: false }
 );
 
 // Index performant pour audit et requêtes multi-provider
 TransactionSchema.index({ provider: 1, status: 1, createdAt: -1 });
 TransactionSchema.index({ userId: 1, provider: 1, reference: 1 });
 
-// Pour historique mobile par rôles
+// 🔍 Pour historique mobile par rôles
 TransactionSchema.index({ createdBy: 1, createdAt: -1 });
 TransactionSchema.index({ receiver: 1, createdAt: -1 });
 
-// Unicité "souple" sur (provider, reference) pour éviter les doublons
+// ✅ Recherche robuste confirm/cancel
+TransactionSchema.index({ provider: 1, providerTxId: 1 });
 TransactionSchema.index({ provider: 1, reference: 1 }, { sparse: true });
 
-module.exports = mongoose.models.Transaction || mongoose.model("Transaction", TransactionSchema);
+module.exports = mongoose.model('Transaction', TransactionSchema);

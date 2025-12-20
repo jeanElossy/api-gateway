@@ -3,7 +3,11 @@
 
 const axios = require('axios');
 const config = require('../config');
-const logger = require('../logger') || console;
+
+let logger = console;
+try {
+  logger = require('../logger');
+} catch {}
 
 const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || config.internalToken || '';
 const PRINCIPAL_URL = (config.principalUrl || process.env.PRINCIPAL_URL || '').replace(/\/+$/, '');
@@ -36,12 +40,16 @@ function buildHeaders(extra = {}) {
     ...extra,
   };
 
-  if (INTERNAL_TOKEN) base['x-internal-token'] = INTERNAL_TOKEN;
+  // ✅ n’envoie pas un token vide
+  if (INTERNAL_TOKEN) {
+    base['x-internal-token'] = INTERNAL_TOKEN;
+  }
+
   return base;
 }
 
 async function postWithFallback(paths, payload, requestId) {
-  if (!PRINCIPAL_URL || !INTERNAL_TOKEN) return { ok: false };
+  if (!PRINCIPAL_URL || !INTERNAL_TOKEN) return { ok: false, skipped: true };
 
   for (const p of paths) {
     const url = `${PRINCIPAL_URL}${p}`;
@@ -71,11 +79,7 @@ async function notifyReferralOnConfirm({ userId, provider, transaction, requestI
   const txRef = transaction?.reference ? String(transaction.reference) : '';
 
   if (!userId || (!txId && !txRef)) {
-    logger.warn('[Gateway][Referral] notifyReferralOnConfirm payload incomplet', {
-      userId,
-      txId,
-      txRef,
-    });
+    logger.warn('[Gateway][Referral] notifyReferralOnConfirm payload incomplet', { userId, txId, txRef });
     return;
   }
 
@@ -94,39 +98,22 @@ async function notifyReferralOnConfirm({ userId, provider, transaction, requestI
       path: result.path,
     });
   } else {
-    // Ne casse jamais la TX
     logger.error('[Gateway][Referral] notifyReferralOnConfirm FAILED', { userId, txId: txId || txRef });
   }
 }
 
 /**
- * ✅ 2) Déclenche bonus (parrain + filleul) une seule fois
+ * ✅ 2) Déclenche bonus (parrain + filleul) une seule fois (idempotence principale côté backend)
  */
 async function awardReferralBonus({ refereeId, triggerTxId, stats, requestId }) {
-  if (!PRINCIPAL_URL || !INTERNAL_TOKEN) return { ok: false };
+  if (!PRINCIPAL_URL || !INTERNAL_TOKEN) return { ok: false, skipped: true };
 
   if (!refereeId || !triggerTxId) {
-    logger.warn('[Gateway][Referral] awardReferralBonus payload incomplet', {
-      refereeId,
-      triggerTxId,
-    });
+    logger.warn('[Gateway][Referral] awardReferralBonus payload incomplet', { refereeId, triggerTxId });
     return { ok: false };
   }
 
-  // ✅ Compat : accepte stats.firstTwoTotal (ancien) ou stats.confirmedTotal (nouveau)
-  const confirmedTotal =
-    (stats && typeof stats.confirmedTotal === 'number' && stats.confirmedTotal) ||
-    (stats && typeof stats.firstTwoTotal === 'number' && stats.firstTwoTotal) ||
-    undefined;
-
-  const payload = {
-    refereeId,
-    triggerTxId,
-    stats: {
-      ...(stats || {}),
-      ...(typeof confirmedTotal === 'number' ? { confirmedTotal } : {}),
-    },
-  };
+  const payload = { refereeId, triggerTxId, stats };
 
   const result = await postWithFallback(
     ['/internal/referral/award-bonus', '/api/v1/internal/referral/award-bonus'],
@@ -135,11 +122,7 @@ async function awardReferralBonus({ refereeId, triggerTxId, stats, requestId }) 
   );
 
   if (result.ok) {
-    logger.info('[Gateway][Referral] awardReferralBonus result', {
-      refereeId,
-      triggerTxId,
-      response: result.data,
-    });
+    logger.info('[Gateway][Referral] awardReferralBonus result', { refereeId, triggerTxId, response: result.data });
     return { ok: true, data: result.data };
   }
 

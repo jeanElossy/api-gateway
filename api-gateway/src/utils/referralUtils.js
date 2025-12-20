@@ -10,9 +10,6 @@ const Transaction = require("../models/Transaction");
 const PRINCIPAL_URL = (config.principalUrl || process.env.PRINCIPAL_URL || "").replace(/\/+$/, "");
 const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || config.internalToken || "";
 
-/* -----------------------
- * Helpers
- * ----------------------- */
 const safeNumber = (v) => {
   const n = typeof v === "number" ? v : parseFloat(String(v ?? "").replace(",", "."));
   return Number.isFinite(n) ? n : 0;
@@ -31,6 +28,9 @@ const buildHeaders = (authToken) => ({
 async function postInternal(paths, payload, authToken) {
   if (!PRINCIPAL_URL) throw new Error("PRINCIPAL_URL manquant");
 
+  // ✅ si tu utilises des routes internes protégées, le token est obligatoire
+  if (!INTERNAL_TOKEN) return { ok: false, skipped: true, reason: "INTERNAL_TOKEN_MISSING" };
+
   let lastErr = null;
   for (const p of paths) {
     const url = `${PRINCIPAL_URL}${p}`;
@@ -43,8 +43,7 @@ async function postInternal(paths, payload, authToken) {
     } catch (e) {
       lastErr = e;
       const status = e?.response?.status;
-      if (status === 404) continue;
-      if (status === 401 || status === 403) continue;
+      if (status === 404 || status === 401 || status === 403) continue;
       continue;
     }
   }
@@ -66,28 +65,17 @@ function normalizeCountry(str) {
 const AMERICA_COUNTRIES = ["canada", "usa", "united states", "united states of america"];
 const EUROPE_COUNTRIES = ["france", "belgique", "belgium", "allemagne", "germany"];
 const AFRICA_COUNTRIES = [
-  "cote d'ivoire",
-  "cote d ivoire",
-  "cote divoire",
-  "cote-d-ivoire",
-  "mali",
-  "burkina faso",
-  "senegal",
-  "cameroun",
-  "cameroon",
-  "benin",
-  "togo",
-  "ghana",
+  "cote d'ivoire", "cote d ivoire", "cote divoire", "cote-d-ivoire",
+  "mali", "burkina faso", "senegal", "cameroun", "cameroon",
+  "benin", "togo", "ghana",
 ];
 
 function getRegionFromCountry(countryRaw) {
   const normalized = normalizeCountry(cleanCountry(countryRaw));
   if (!normalized) return null;
-
   if (AMERICA_COUNTRIES.includes(normalized)) return "AMERICA";
   if (EUROPE_COUNTRIES.includes(normalized)) return "EUROPE";
   if (AFRICA_COUNTRIES.includes(normalized)) return "AFRICA";
-
   return null;
 }
 
@@ -107,12 +95,8 @@ function TransactionModel() {
   return Transaction;
 }
 
-/* -----------------------
- * Legacy helpers (fallback)
- * ----------------------- */
 async function fetchUserFromMain(userId, authToken) {
   if (!PRINCIPAL_URL) return null;
-
   const url = `${PRINCIPAL_URL}/users/${userId}`;
   try {
     const res = await axios.get(url, { headers: buildHeaders(authToken), timeout: 8000 });
@@ -132,7 +116,6 @@ async function patchUserInMain(userId, updates, authToken) {
 async function creditBalanceInMain(userId, amount, currency, description, authToken) {
   if (!PRINCIPAL_URL) return;
   if (!INTERNAL_TOKEN) throw new Error("INTERNAL_TOKEN manquant");
-
   const url = `${PRINCIPAL_URL}/users/${userId}/credit-internal`;
   await axios.post(url, { amount, currency, description }, { headers: buildHeaders(authToken), timeout: 8000 });
 }
@@ -141,19 +124,12 @@ async function sendNotificationToMain(userId, title, message, data = {}, authTok
   if (!PRINCIPAL_URL) return;
   const url = `${PRINCIPAL_URL}/notifications`;
   try {
-    await axios.post(
-      url,
-      { recipient: userId, title, message, data },
-      { headers: buildHeaders(authToken), timeout: 8000 }
-    );
+    await axios.post(url, { recipient: userId, title, message, data }, { headers: buildHeaders(authToken), timeout: 8000 });
   } catch (err) {
     logger.warn("[Referral] Notification failed:", err?.response?.data || err.message);
   }
 }
 
-/* -----------------------
- * Code generation (legacy fallback only)
- * ----------------------- */
 function generatePNVReferralCode() {
   const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   const digits = "0123456789";
@@ -194,9 +170,6 @@ async function generateAndAssignReferralInMain(senderId, authToken) {
   throw new Error(`Impossible de générer un referralCode unique pour ${senderId}`);
 }
 
-/* -----------------------
- * TX stats (gateway)
- * ----------------------- */
 async function getFirstTwoConfirmedTotal(userId) {
   const txs = await TransactionModel()
     .find({
@@ -214,9 +187,6 @@ async function getFirstTwoConfirmedTotal(userId) {
   return { count, total };
 }
 
-/* =========================
- * ✅ 1) Code parrainage
- * ========================= */
 async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
   if (!senderId) return;
   if (tx && !isConfirmedStatus(tx.status)) return;
@@ -261,16 +231,12 @@ async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
   }
 }
 
-/* =========================
- * ✅ 2) Bonus parrainage
- * ========================= */
 async function processReferralBonusIfEligible(userId, authToken) {
   if (!userId) return;
 
   const { count, total } = await getFirstTwoConfirmedTotal(userId);
   if (count < 2) return;
 
-  // ✅ Nouveau mode : envoyer confirmedTotal (et garder firstTwoTotal pour compat)
   const internal = await postInternal(
     ["/internal/referral/award-bonus", "/api/v1/internal/referral/award-bonus"],
     {
@@ -278,8 +244,7 @@ async function processReferralBonusIfEligible(userId, authToken) {
       triggerTxId: `first2_${userId}_${Date.now()}`,
       stats: {
         confirmedCount: count,
-        confirmedTotal: total, // ✅ FIX
-        firstTwoTotal: total,  // ✅ compat si principal ancien
+        firstTwoTotal: total,
       },
     },
     authToken
@@ -290,7 +255,7 @@ async function processReferralBonusIfEligible(userId, authToken) {
     return;
   }
 
-  // ✅ Fallback legacy
+  // fallback legacy (inchangé)
   try {
     const filleul = await fetchUserFromMain(userId, authToken);
     if (!filleul) return;
@@ -314,23 +279,10 @@ async function processReferralBonusIfEligible(userId, authToken) {
     const { currency: bonusCurrency, parrain: bonusParrain, filleul: bonusFilleul } = bonusCfg;
 
     if (bonusFilleul > 0) {
-      await creditBalanceInMain(
-        userId,
-        bonusFilleul,
-        bonusCurrency,
-        "Bonus de bienvenue (filleul - programme de parrainage PayNoval)",
-        authToken
-      );
+      await creditBalanceInMain(userId, bonusFilleul, bonusCurrency, "Bonus de bienvenue (filleul - programme de parrainage PayNoval)", authToken);
     }
-
     if (bonusParrain > 0) {
-      await creditBalanceInMain(
-        parrainId,
-        bonusParrain,
-        bonusCurrency,
-        `Bonus de parrainage pour ${filleul.fullName || filleul.email || userId}`,
-        authToken
-      );
+      await creditBalanceInMain(parrainId, bonusParrain, bonusCurrency, `Bonus de parrainage pour ${filleul.fullName || filleul.email || userId}`, authToken);
     }
 
     await patchUserInMain(
@@ -361,9 +313,7 @@ async function processReferralBonusIfEligible(userId, authToken) {
       authToken
     );
 
-    logger.info(
-      `[Referral][legacy] Bonus crédité (parrain=${parrainId}, filleul=${userId}, ${bonusParrain}/${bonusFilleul} ${bonusCurrency})`
-    );
+    logger.info(`[Referral][legacy] Bonus crédité (parrain=${parrainId}, filleul=${userId}, ${bonusParrain}/${bonusFilleul} ${bonusCurrency})`);
   } catch (err) {
     logger.error("[Referral] Erreur bonus legacy:", err?.response?.data || err.message);
   }
