@@ -5,92 +5,150 @@ const axios = require('axios');
 const config = require('../config');
 const logger = require('../logger') || console;
 
-// Token interne (fallback config.internalToken)
-const INTERNAL_TOKEN =
-  process.env.INTERNAL_TOKEN ||
-  config.internalToken ||
-  '';
+const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || config.internalToken || '';
+const PRINCIPAL_URL = (config.principalUrl || process.env.PRINCIPAL_URL || '').replace(/\/+$/, '');
 
-/**
- * ✅ Base URL du service principal (Users/Wallet/Notifications)
- * - priorité: REFERRAL_SERVICE_URL (si tu veux router ailleurs)
- * - sinon: PRINCIPAL_URL (backend principal)
- */
-const PRINCIPAL_URL =
-  (config.principalUrl || process.env.PRINCIPAL_URL || '').replace(/\/+$/, '');
-
-const REFERRAL_SERVICE_BASE =
-  (process.env.REFERRAL_SERVICE_URL &&
-    process.env.REFERRAL_SERVICE_URL.replace(/\/+$/, '')) ||
-  PRINCIPAL_URL ||
-  '';
-
-if (!REFERRAL_SERVICE_BASE) {
-  logger.warn(
-    '[Gateway][Referral] REFERRAL_SERVICE_BASE non défini (REFERRAL_SERVICE_URL / PRINCIPAL_URL manquant). Les notifications de parrainage seront ignorées.'
-  );
+if (!PRINCIPAL_URL) {
+  logger.warn('[Gateway][Referral] PRINCIPAL_URL manquant (config.principalUrl / ENV PRINCIPAL_URL).');
 }
-
 if (!INTERNAL_TOKEN) {
-  logger.warn(
-    '[Gateway][Referral] INTERNAL_TOKEN manquant. Vérifie que le même token est bien configuré côté backend /internal/referral.'
-  );
+  logger.warn('[Gateway][Referral] INTERNAL_TOKEN manquant, les actions referral internes seront ignorées.');
+}
+
+/** Petit helper pour éviter logs trop gros/sensibles */
+function safeErrMessage(err) {
+  const status = err?.response?.status;
+  const data = err?.response?.data;
+
+  let msg =
+    (typeof data === 'string' && data) ||
+    (data && typeof data === 'object' && (data.error || data.message || JSON.stringify(data))) ||
+    err?.message ||
+    String(err);
+
+  if (typeof msg === 'string' && msg.length > 450) msg = msg.slice(0, 450) + '…';
+  return { status, msg };
+}
+
+function buildHeaders(extra = {}) {
+  // ✅ n’envoie pas un token vide
+  const base = {
+    'Content-Type': 'application/json',
+    ...extra,
+  };
+
+  if (INTERNAL_TOKEN) {
+    base['x-internal-token'] = INTERNAL_TOKEN;
+  }
+  return base;
+}
+
+async function postWithFallback(paths, payload, requestId) {
+  if (!PRINCIPAL_URL || !INTERNAL_TOKEN) return { ok: false };
+
+  for (const p of paths) {
+    const url = `${PRINCIPAL_URL}${p}`;
+    try {
+      const r = await axios.post(url, payload, {
+        timeout: 8000,
+        headers: buildHeaders(requestId ? { 'x-request-id': String(requestId) } : {}),
+        // ✅ par défaut axios throw si non-2xx, c’est ce qu’on veut ici
+      });
+      return { ok: true, data: r.data, path: p };
+    } catch (err) {
+      const { status, msg } = safeErrMessage(err);
+      logger.warn('[Gateway][Referral] call failed', { url, status, message: msg });
+    }
+  }
+
+  return { ok: false };
 }
 
 /**
- * Notifie le backend principal qu'une transaction a été confirmée.
- *
- * Endpoint attendu :
- *    POST /internal/referral/on-transaction-confirm
+ * ✅ 1) Génère/assure le code parrainage au 1er confirm
+ * Le principal doit être idempotent (ne pas régénérer si déjà présent).
  */
-async function notifyReferralOnConfirm({ userId, provider, transaction }) {
-  if (!REFERRAL_SERVICE_BASE) {
-    logger.warn('[Gateway][Referral] REFERRAL_SERVICE_BASE manquant, notification ignorée.');
+async function notifyReferralOnConfirm({ userId, provider, transaction, requestId }) {
+  if (!PRINCIPAL_URL || !INTERNAL_TOKEN) return;
+
+  const txId = transaction?.id ? String(transaction.id) : '';
+  const txRef = transaction?.reference ? String(transaction.reference) : '';
+
+  // ✅ accepte id OU reference
+  if (!userId || (!txId && !txRef)) {
+    logger.warn('[Gateway][Referral] notifyReferralOnConfirm payload incomplet', {
+      userId,
+      txId,
+      txRef,
+    });
     return;
   }
 
-  if (!userId || !transaction || !transaction.id) {
-    logger.warn(
-      '[Gateway][Referral] payload incomplet (userId ou transaction.id manquant), notification ignorée.',
-      { userId, provider, transactionId: transaction && transaction.id }
-    );
-    return;
+  const payload = { userId, provider, transaction };
+
+  const result = await postWithFallback(
+    ['/internal/referral/on-transaction-confirm', '/api/v1/internal/referral/on-transaction-confirm'],
+    payload,
+    requestId
+  );
+
+  if (result.ok) {
+    logger.info('[Gateway][Referral] referral code ensured', {
+      userId,
+      txId: txId || txRef,
+      path: result.path,
+    });
+  } else {
+    // Ne casse jamais la TX
+    logger.error('[Gateway][Referral] notifyReferralOnConfirm FAILED', { userId, txId: txId || txRef });
+  }
+}
+
+/**
+ * ✅ 2) Déclenche bonus (parrain + filleul) une seule fois quand :
+ * - le user est un filleul (referredBy existe côté principal)
+ * - il a >= 2 transactions confirmées
+ * - il respecte les seuils
+ *
+ * L’idempotence finale est garantie côté principal via un modèle ReferralReward unique.
+ */
+async function awardReferralBonus({ refereeId, triggerTxId, stats, requestId }) {
+  if (!PRINCIPAL_URL || !INTERNAL_TOKEN) return { ok: false };
+
+  if (!refereeId || !triggerTxId) {
+    logger.warn('[Gateway][Referral] awardReferralBonus payload incomplet', {
+      refereeId,
+      triggerTxId,
+    });
+    return { ok: false };
   }
 
-  const url = `${REFERRAL_SERVICE_BASE}/internal/referral/on-transaction-confirm`;
+  const payload = {
+    refereeId,
+    triggerTxId,
+    stats, // { confirmedCount, confirmedTotal, currency, minConfirmedRequired, minTotalRequired, minTxAmountRequired }
+  };
 
-  try {
-    await axios.post(
-      url,
-      { userId, provider, transaction },
-      {
-        timeout: 8000,
-        headers: {
-          'Content-Type': 'application/json',
-          'x-internal-token': INTERNAL_TOKEN,
-        },
-      }
-    );
+  const result = await postWithFallback(
+    ['/internal/referral/award-bonus', '/api/v1/internal/referral/award-bonus'],
+    payload,
+    requestId
+  );
 
-    logger.info('[Gateway][Referral] notifyReferralOnConfirm OK', {
-      userId,
-      provider,
-      txId: transaction.id,
-      amount: transaction.amount,
-      currency: transaction.currency,
+  if (result.ok) {
+    logger.info('[Gateway][Referral] awardReferralBonus result', {
+      refereeId,
+      triggerTxId,
+      response: result.data,
     });
-  } catch (err) {
-    logger.error('[Gateway][Referral] notifyReferralOnConfirm ERROR', {
-      url,
-      userId,
-      provider,
-      txId: transaction.id,
-      message: err.response?.data || err.message || err,
-    });
-    // ❗On ne throw PAS : la transaction reste confirmée même si le parrainage plante.
+    return { ok: true, data: result.data };
   }
+
+  logger.error('[Gateway][Referral] awardReferralBonus FAILED', { refereeId, triggerTxId });
+  return { ok: false };
 }
 
 module.exports = {
   notifyReferralOnConfirm,
+  awardReferralBonus,
 };

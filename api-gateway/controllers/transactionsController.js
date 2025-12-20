@@ -815,18 +815,20 @@ exports.initiateTransaction = async (req, res) => {
   }
 };
 
+
+
 /**
  * POST /transactions/confirm
  * -------------------------------------------------------------------
  * Confirme une transaction auprès du provider ciblé.
  * Étapes :
- *  1) Pour providers ≠ paynoval : applique une validation "securityCode" côté Gateway
+ *  1) Pour providers ≠ paynoval : validation "securityCode" côté Gateway
  *  2) Appelle le microservice provider /transactions/confirm
  *  3) Log AML + met à jour la Transaction côté Gateway
- *  4) Email "confirmed"
+ *  4) Email selon statut final
  *  5) Parrainage :
- *      - exécute la logique programme (seuil/bonus)
- *      - notifie le backend principal via route interne pour assurer le code PNV-XXXX
+ *      - referralCode : généré dès la 1ère tx confirmée (idempotent)
+ *      - bonus : uniquement si filleul(referredBy) a >=2 tx confirmées + seuil OK
  */
 exports.confirmTransaction = async (req, res) => {
   const provider = resolveProvider(req, 'paynoval');
@@ -846,6 +848,28 @@ exports.confirmTransaction = async (req, res) => {
 
   const userId = getUserId(req);
   const now = new Date();
+
+  // ✅ Normalisation robuste des statuts provider => statut "gateway"
+  const normalizeStatus = (raw) => {
+    const s = String(raw || '').toLowerCase().trim();
+
+    // cancelled variants
+    if (s === 'cancelled' || s === 'canceled') return 'canceled';
+
+    // confirmed variants
+    if (s === 'confirmed' || s === 'success' || s === 'validated' || s === 'completed')
+      return 'confirmed';
+
+    // failed variants
+    if (s === 'failed' || s === 'error' || s === 'declined' || s === 'rejected')
+      return 'failed';
+
+    // pending variants
+    if (s === 'pending' || s === 'processing' || s === 'in_progress') return 'pending';
+
+    // fallback : si provider renvoie un truc inconnu, on garde brut
+    return s || 'confirmed';
+  };
 
   /**
    * 1) Couche de sécurité côté Gateway (providers ≠ paynoval)
@@ -964,9 +988,8 @@ exports.confirmTransaction = async (req, res) => {
 
     const result = response.data;
 
-    // Normalisation status
-    let newStatus = result.status || 'confirmed';
-    if (newStatus === 'cancelled') newStatus = 'canceled';
+    // ✅ Normalisation status (IMPORTANT pour parrainage + confirmedAt)
+    const newStatus = normalizeStatus(result.status || 'confirmed');
 
     // On tente de récupérer reference/id depuis la réponse provider
     const refFromResult =
@@ -1011,6 +1034,7 @@ exports.confirmTransaction = async (req, res) => {
         $set: {
           status: newStatus,
           confirmedAt: newStatus === 'confirmed' ? now : undefined,
+          cancelledAt: newStatus === 'canceled' ? now : undefined,
           updatedAt: now,
         },
       },
@@ -1024,43 +1048,73 @@ exports.confirmTransaction = async (req, res) => {
       );
     }
 
-    // 5) Email confirmed (hors paynoval)
-    await triggerGatewayTxEmail('confirmed', {
-      provider,
-      req,
-      result,
-      reference: refFromResult || transactionId,
-    });
+    // 5) Email selon statut final (plus propre)
+    // - Si tu veux garder uniquement "confirmed", tu peux simplifier.
+    if (newStatus === 'confirmed') {
+      await triggerGatewayTxEmail('confirmed', {
+        provider,
+        req,
+        result,
+        reference: refFromResult || transactionId,
+      });
+    } else if (newStatus === 'canceled') {
+      await triggerGatewayTxEmail('cancelled', {
+        provider,
+        req,
+        result,
+        reference: refFromResult || transactionId,
+      });
+    } else if (newStatus === 'failed') {
+      await triggerGatewayTxEmail('failed', {
+        provider,
+        req,
+        result,
+        reference: refFromResult || transactionId,
+      });
+    }
 
     /**
      * 6) PARRAINAGE
-     * - On déclenche uniquement si confirmé
-     * - On utilise gatewayTx.userId comme user "éligible" (fallback sur userId)
+     * - déclenche uniquement si confirmé
+     * - ✅ NE DÉPEND PLUS d'un Authorization utilisateur
+     * - referralCode: dès la 1ère tx confirmée
+     * - bonus: seulement si >=2 tx confirmées + seuil + referredBy côté principal
      */
-
     if (newStatus === 'confirmed') {
       const referralUserId = gatewayTx?.userId || userId;
 
+      try {
+        // On construit un tx minimal pour aider l'idempotence / traçabilité
+        const txIdSafe = result.id || result.transaction?.id || transactionId || null;
+        const refSafe = result.reference || result.transaction?.reference || transactionId || null;
 
-      // (A) LOGIQUE PROGRAMME (seuils/bonus)
-      const authHeader = req.headers.authorization || req.headers.Authorization || null;
-      const authToken = authHeader && String(authHeader).startsWith('Bearer ') ? authHeader : null;
+        const txForReferral = {
+          id: String(txIdSafe || refSafe || ''),
+          reference: refSafe ? String(refSafe) : '',
+          status: 'confirmed',
+          amount: Number(result.amount || gatewayTx?.amount || 0),
+          currency: String(result.currency || gatewayTx?.currency || req.body.currency || 'CAD'),
+          country: String(result.country || gatewayTx?.country || req.body.country || ''),
+          provider: String(provider),
+          createdAt: gatewayTx?.createdAt ? new Date(gatewayTx.createdAt).toISOString() : new Date().toISOString(),
+          confirmedAt: new Date().toISOString(),
+        };
 
-      if (authToken && referralUserId) {
-        // Génération du code côté principal après 2 tx confirmées (logique programme)
-        await checkAndGenerateReferralCodeInMain(referralUserId, authToken);
-        // Crédit bonus si éligible (programme)
-        await processReferralBonusIfEligible(referralUserId, authToken);
-      } else {
-        logger.warn(
-          '[Gateway][TX][Referral] Authorization manquant ou userId nul, parrainage (programme) ignoré.',
-          { tokenPresent: !!authToken, referralUserId }
-        );
+        // ✅ A) Assure le code referral (1ère tx confirmée suffit)
+        // authToken optionnel (null): referralUtils utilise x-internal-token
+        await checkAndGenerateReferralCodeInMain(referralUserId, null, txForReferral);
+
+        // ✅ B) Bonus si éligible (>=2 tx confirmées + seuil + referredBy)
+        await processReferralBonusIfEligible(referralUserId, null);
+      } catch (e) {
+        logger.warn('[Gateway][TX][Referral] parrainage skipped/failed', {
+          message: e?.message,
+        });
       }
 
-      // (B) NOTIFICATION INTERNE VERS BACKEND PRINCIPAL (ASSURANCE CODE PNV-XXXX)
-      // Objectif : même si la logique programme n'a pas tourné (token absent),
-      // le backend principal peut "assurer" l'assignation idempotente du code.
+      // (Optionnel) ton notifyReferralOnConfirm peut rester,
+      // mais devient redondant si /internal/referral/on-transaction-confirm existe.
+      // On le garde "best effort" sans bloquer.
       try {
         const txIdSafe = result.id || result.transaction?.id || transactionId || null;
         const refSafe =
@@ -1080,6 +1134,7 @@ exports.confirmTransaction = async (req, res) => {
             provider: String(provider),
             confirmedAt: new Date().toISOString(),
           },
+          requestId: req.id,
         });
       } catch (e) {
         logger.warn('[Gateway][Referral] notifyReferralOnConfirm skipped/failed', {
@@ -1153,6 +1208,11 @@ exports.confirmTransaction = async (req, res) => {
     return res.status(status).json({ success: false, error });
   }
 };
+
+
+
+
+
 
 /**
  * POST /transactions/cancel
