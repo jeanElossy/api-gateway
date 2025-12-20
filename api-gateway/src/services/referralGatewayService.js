@@ -12,21 +12,22 @@ const INTERNAL_TOKEN =
   '';
 
 /**
- * Base URL du service de parrainage :
- *  - idéalement via REFERRAL_SERVICE_URL (ex: https://backend-main.internal)
- *  - sinon fallback sur le microservice PayNoval configuré dans le Gateway
+ * ✅ Base URL du service principal (Users/Wallet/Notifications)
+ * - priorité: REFERRAL_SERVICE_URL (si tu veux router ailleurs)
+ * - sinon: PRINCIPAL_URL (backend principal)
  */
+const PRINCIPAL_URL =
+  (config.principalUrl || process.env.PRINCIPAL_URL || '').replace(/\/+$/, '');
+
 const REFERRAL_SERVICE_BASE =
   (process.env.REFERRAL_SERVICE_URL &&
     process.env.REFERRAL_SERVICE_URL.replace(/\/+$/, '')) ||
-  (config.microservices &&
-    config.microservices.paynoval &&
-    String(config.microservices.paynoval).replace(/\/+$/, '')) ||
+  PRINCIPAL_URL ||
   '';
 
 if (!REFERRAL_SERVICE_BASE) {
   logger.warn(
-    '[Gateway][Referral] REFERRAL_SERVICE_BASE non défini (REFERRAL_SERVICE_URL ou microservices.paynoval manquant). Les notifications de parrainage seront ignorées.'
+    '[Gateway][Referral] REFERRAL_SERVICE_BASE non défini (REFERRAL_SERVICE_URL / PRINCIPAL_URL manquant). Les notifications de parrainage seront ignorées.'
   );
 }
 
@@ -37,9 +38,9 @@ if (!INTERNAL_TOKEN) {
 }
 
 /**
- * Notifie le service de parrainage qu'une transaction a été confirmée.
+ * Notifie le backend principal qu'une transaction a été confirmée.
  *
- * ➜ Endpoint attendu côté backend/parrainage :
+ * Endpoint attendu :
  *    POST /internal/referral/on-transaction-confirm
  */
 async function notifyReferralOnConfirm({ userId, provider, transaction }) {
@@ -86,7 +87,7 @@ async function notifyReferralOnConfirm({ userId, provider, transaction }) {
       txId: transaction.id,
       message: err.response?.data || err.message || err,
     });
-    // ❗ On ne throw PAS : la transaction reste confirmée même si le bonus plante.
+    // ❗On ne throw PAS : la transaction reste confirmée même si le parrainage plante.
   }
 }
 
