@@ -7,10 +7,7 @@ const logger = require("../logger") || console;
 const config = require("../config");
 const Transaction = require("../models/Transaction");
 
-// URL du backend principal
 const PRINCIPAL_URL = (config.principalUrl || process.env.PRINCIPAL_URL || "").replace(/\/+$/, "");
-
-// Token interne partagé avec le backend principal
 const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || config.internalToken || "";
 
 /* -----------------------
@@ -38,47 +35,36 @@ async function postInternal(paths, payload, authToken) {
   for (const p of paths) {
     const url = `${PRINCIPAL_URL}${p}`;
     try {
-      const res = await axios.post(url, payload, { headers: buildHeaders(authToken), timeout: 8000 });
+      const res = await axios.post(url, payload, {
+        headers: buildHeaders(authToken),
+        timeout: 8000,
+      });
       return { ok: true, data: res.data, path: p };
     } catch (e) {
       lastErr = e;
       const status = e?.response?.status;
-      // 404 => on tente le next path
       if (status === 404) continue;
-      // 401/403 peut arriver si token pas configuré => on continue aussi
       if (status === 401 || status === 403) continue;
-      // sinon on garde et continue quand même
       continue;
     }
   }
   return { ok: false, error: lastErr };
 }
 
-/**
- * Nettoie le nom du pays : remplace entités HTML et supprime caractères non alphabétiques initiaux
- */
 function cleanCountry(raw) {
   if (typeof raw !== "string") return "";
   const step1 = raw.replace(/&#x27;/g, "'");
   return step1.replace(/^[^\p{L}]*/u, "");
 }
 
-/**
- * Normalise le nom du pays : retire accents, apostrophes spéciales, met en minuscule
- */
 function normalizeCountry(str) {
   if (typeof str !== "string") return "";
   const noAccents = str.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   return noAccents.replace(/’/g, "'").trim().toLowerCase();
 }
 
-/**
- * Listes de pays par région (normalisés)
- */
 const AMERICA_COUNTRIES = ["canada", "usa", "united states", "united states of america"];
-
 const EUROPE_COUNTRIES = ["france", "belgique", "belgium", "allemagne", "germany"];
-
 const AFRICA_COUNTRIES = [
   "cote d'ivoire",
   "cote d ivoire",
@@ -105,18 +91,12 @@ function getRegionFromCountry(countryRaw) {
   return null;
 }
 
-/**
- * Seuils selon la région du FILLEUL (2 premiers transferts cumulés)
- */
 const THRESHOLDS_BY_REGION = {
   AMERICA: { currency: "CAD", minTotal: 200 },
   EUROPE: { currency: "EUR", minTotal: 200 },
   AFRICA: { currency: "XOF", minTotal: 60000 },
 };
 
-/**
- * Bonus selon la région du PARRAIN (devise du parrain)
- */
 const BONUSES_BY_REGION = {
   AMERICA: { currency: "CAD", parrain: 5, filleul: 3 },
   EUROPE: { currency: "EUR", parrain: 4, filleul: 2 },
@@ -130,11 +110,6 @@ function TransactionModel() {
 /* -----------------------
  * Legacy helpers (fallback)
  * ----------------------- */
-
-/**
- * Récupère un utilisateur depuis le service principal
- * (fallback legacy si routes internes referral pas encore en place)
- */
 async function fetchUserFromMain(userId, authToken) {
   if (!PRINCIPAL_URL) return null;
 
@@ -148,34 +123,20 @@ async function fetchUserFromMain(userId, authToken) {
   }
 }
 
-/**
- * Patch user (legacy fallback)
- */
 async function patchUserInMain(userId, updates, authToken) {
   if (!PRINCIPAL_URL) return;
-
   const url = `${PRINCIPAL_URL}/users/${userId}`;
   await axios.patch(url, updates, { headers: buildHeaders(authToken), timeout: 8000 });
 }
 
-/**
- * Créditer balance via route interne
- */
 async function creditBalanceInMain(userId, amount, currency, description, authToken) {
   if (!PRINCIPAL_URL) return;
   if (!INTERNAL_TOKEN) throw new Error("INTERNAL_TOKEN manquant");
 
   const url = `${PRINCIPAL_URL}/users/${userId}/credit-internal`;
-  await axios.post(
-    url,
-    { amount, currency, description },
-    { headers: buildHeaders(authToken), timeout: 8000 }
-  );
+  await axios.post(url, { amount, currency, description }, { headers: buildHeaders(authToken), timeout: 8000 });
 }
 
-/**
- * Notification (si route ouverte)
- */
 async function sendNotificationToMain(userId, title, message, data = {}, authToken) {
   if (!PRINCIPAL_URL) return;
   const url = `${PRINCIPAL_URL}/notifications`;
@@ -215,7 +176,11 @@ async function generateAndAssignReferralInMain(senderId, authToken) {
     try {
       await patchUserInMain(
         senderId,
-        { referralCode: newCode, hasGeneratedReferral: true, referralCodeGeneratedAt: new Date().toISOString() },
+        {
+          referralCode: newCode,
+          hasGeneratedReferral: true,
+          referralCodeGeneratedAt: new Date().toISOString(),
+        },
         authToken
       );
       logger.info(`[Referral][legacy] Code "${newCode}" assigné pour ${senderId}`);
@@ -235,8 +200,8 @@ async function generateAndAssignReferralInMain(senderId, authToken) {
 async function getFirstTwoConfirmedTotal(userId) {
   const txs = await TransactionModel()
     .find({
-      userId,
       status: "confirmed",
+      $or: [{ ownerUserId: userId }, { initiatorUserId: userId }, { userId: userId }],
     })
     .sort({ confirmedAt: 1, createdAt: 1 })
     .limit(2)
@@ -251,25 +216,18 @@ async function getFirstTwoConfirmedTotal(userId) {
 
 /* =========================
  * ✅ 1) Code parrainage
- * =========================
- * RÈGLE: généré dès la 1ère TX confirmée.
- *
- * Cette fonction DOIT être appelée au moment où la tx devient confirmée.
- * Param optionnel `tx` pour éviter de recalculer.
- */
+ * ========================= */
 async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
   if (!senderId) return;
-
-  // Si tx fournie, on check qu’elle est confirmée
   if (tx && !isConfirmedStatus(tx.status)) return;
 
-  // ✅ Nouveau mode (recommandé): route interne referral
   const internal = await postInternal(
     ["/internal/referral/on-transaction-confirm", "/api/v1/internal/referral/on-transaction-confirm"],
     {
       userId: senderId,
       transaction: {
         id: String(tx?.id || tx?._id || tx?.reference || Date.now()),
+        reference: tx?.reference ? String(tx.reference) : "",
         status: "confirmed",
         amount: safeNumber(tx?.amount),
         currency: tx?.currency,
@@ -284,9 +242,12 @@ async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
     return;
   }
 
-  // ✅ Fallback legacy: si la route interne n’existe pas encore
+  // fallback legacy
   try {
-    const count = await TransactionModel().countDocuments({ userId: senderId, status: "confirmed" });
+    const count = await TransactionModel().countDocuments({
+      status: "confirmed",
+      $or: [{ ownerUserId: senderId }, { initiatorUserId: senderId }, { userId: senderId }],
+    });
     if (count < 1) return;
 
     const userMain = await fetchUserFromMain(senderId, authToken);
@@ -302,22 +263,14 @@ async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
 
 /* =========================
  * ✅ 2) Bonus parrainage
- * =========================
- * RÈGLE: bonus uniquement si:
- * - filleul a referredBy (côté principal)
- * - filleul a MINIMUM 2 transactions confirmées
- * - total des 2 premières tx >= seuil selon région filleul
- * -> bonus au parrain + bonus au filleul
- */
+ * ========================= */
 async function processReferralBonusIfEligible(userId, authToken) {
   if (!userId) return;
 
-  // 1) minimum 2 tx confirmées côté gateway
   const { count, total } = await getFirstTwoConfirmedTotal(userId);
   if (count < 2) return;
 
-  // ✅ Nouveau mode (recommandé): déléguer l'idempotence + attribution au principal
-  // On envoie les stats, le principal vérifiera referredBy + conditions (et ne créditera jamais 2 fois).
+  // ✅ Nouveau mode : envoyer confirmedTotal (et garder firstTwoTotal pour compat)
   const internal = await postInternal(
     ["/internal/referral/award-bonus", "/api/v1/internal/referral/award-bonus"],
     {
@@ -325,7 +278,8 @@ async function processReferralBonusIfEligible(userId, authToken) {
       triggerTxId: `first2_${userId}_${Date.now()}`,
       stats: {
         confirmedCount: count,
-        firstTwoTotal: total,
+        confirmedTotal: total, // ✅ FIX
+        firstTwoTotal: total,  // ✅ compat si principal ancien
       },
     },
     authToken
@@ -336,14 +290,11 @@ async function processReferralBonusIfEligible(userId, authToken) {
     return;
   }
 
-  // ✅ Fallback legacy: si route interne non dispo, on garde ton ancien flow (corrigé)
+  // ✅ Fallback legacy
   try {
     const filleul = await fetchUserFromMain(userId, authToken);
     if (!filleul) return;
-
     if (!filleul.referredBy) return;
-
-    // Idempotence legacy
     if (filleul.referralBonusCredited) return;
 
     const parrainId = filleul.referredBy;
@@ -362,7 +313,6 @@ async function processReferralBonusIfEligible(userId, authToken) {
 
     const { currency: bonusCurrency, parrain: bonusParrain, filleul: bonusFilleul } = bonusCfg;
 
-    // Créditer balances
     if (bonusFilleul > 0) {
       await creditBalanceInMain(
         userId,
@@ -383,7 +333,6 @@ async function processReferralBonusIfEligible(userId, authToken) {
       );
     }
 
-    // Marquer crédité
     await patchUserInMain(
       userId,
       {
@@ -396,7 +345,6 @@ async function processReferralBonusIfEligible(userId, authToken) {
       authToken
     );
 
-    // Notifications
     await sendNotificationToMain(
       parrainId,
       "Bonus parrain PayNoval crédité",

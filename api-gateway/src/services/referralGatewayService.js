@@ -31,15 +31,12 @@ function safeErrMessage(err) {
 }
 
 function buildHeaders(extra = {}) {
-  // ✅ n’envoie pas un token vide
   const base = {
     'Content-Type': 'application/json',
     ...extra,
   };
 
-  if (INTERNAL_TOKEN) {
-    base['x-internal-token'] = INTERNAL_TOKEN;
-  }
+  if (INTERNAL_TOKEN) base['x-internal-token'] = INTERNAL_TOKEN;
   return base;
 }
 
@@ -52,7 +49,6 @@ async function postWithFallback(paths, payload, requestId) {
       const r = await axios.post(url, payload, {
         timeout: 8000,
         headers: buildHeaders(requestId ? { 'x-request-id': String(requestId) } : {}),
-        // ✅ par défaut axios throw si non-2xx, c’est ce qu’on veut ici
       });
       return { ok: true, data: r.data, path: p };
     } catch (err) {
@@ -74,7 +70,6 @@ async function notifyReferralOnConfirm({ userId, provider, transaction, requestI
   const txId = transaction?.id ? String(transaction.id) : '';
   const txRef = transaction?.reference ? String(transaction.reference) : '';
 
-  // ✅ accepte id OU reference
   if (!userId || (!txId && !txRef)) {
     logger.warn('[Gateway][Referral] notifyReferralOnConfirm payload incomplet', {
       userId,
@@ -105,12 +100,7 @@ async function notifyReferralOnConfirm({ userId, provider, transaction, requestI
 }
 
 /**
- * ✅ 2) Déclenche bonus (parrain + filleul) une seule fois quand :
- * - le user est un filleul (referredBy existe côté principal)
- * - il a >= 2 transactions confirmées
- * - il respecte les seuils
- *
- * L’idempotence finale est garantie côté principal via un modèle ReferralReward unique.
+ * ✅ 2) Déclenche bonus (parrain + filleul) une seule fois
  */
 async function awardReferralBonus({ refereeId, triggerTxId, stats, requestId }) {
   if (!PRINCIPAL_URL || !INTERNAL_TOKEN) return { ok: false };
@@ -123,10 +113,19 @@ async function awardReferralBonus({ refereeId, triggerTxId, stats, requestId }) 
     return { ok: false };
   }
 
+  // ✅ Compat : accepte stats.firstTwoTotal (ancien) ou stats.confirmedTotal (nouveau)
+  const confirmedTotal =
+    (stats && typeof stats.confirmedTotal === 'number' && stats.confirmedTotal) ||
+    (stats && typeof stats.firstTwoTotal === 'number' && stats.firstTwoTotal) ||
+    undefined;
+
   const payload = {
     refereeId,
     triggerTxId,
-    stats, // { confirmedCount, confirmedTotal, currency, minConfirmedRequired, minTotalRequired, minTxAmountRequired }
+    stats: {
+      ...(stats || {}),
+      ...(typeof confirmedTotal === 'number' ? { confirmedTotal } : {}),
+    },
   };
 
   const result = await postWithFallback(
