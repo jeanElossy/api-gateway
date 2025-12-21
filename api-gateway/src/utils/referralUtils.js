@@ -1,9 +1,346 @@
+// // File: api-gateway/src/utils/referralUtils.js
+// "use strict";
+
+// const axios = require("axios");
+// const crypto = require("crypto");
+// const logger = require("../logger") || console;
+// const config = require("../config");
+// const Transaction = require("../models/Transaction");
+
+// const PRINCIPAL_URL = (config.principalUrl || process.env.PRINCIPAL_URL || "").replace(/\/+$/, "");
+// const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || config.internalToken || "";
+
+// const safeNumber = (v) => {
+//   const n = typeof v === "number" ? v : parseFloat(String(v ?? "").replace(",", "."));
+//   return Number.isFinite(n) ? n : 0;
+// };
+
+// const isConfirmedStatus = (s) => {
+//   const st = String(s || "").toLowerCase();
+//   return st === "confirmed" || st === "success" || st === "validated" || st === "completed";
+// };
+
+// const buildHeaders = (authToken) => ({
+//   ...(INTERNAL_TOKEN ? { "x-internal-token": INTERNAL_TOKEN } : {}),
+//   ...(authToken ? { Authorization: authToken } : {}),
+// });
+
+// async function postInternal(paths, payload, authToken) {
+//   if (!PRINCIPAL_URL) throw new Error("PRINCIPAL_URL manquant");
+
+//   // ✅ si tu utilises des routes internes protégées, le token est obligatoire
+//   if (!INTERNAL_TOKEN) return { ok: false, skipped: true, reason: "INTERNAL_TOKEN_MISSING" };
+
+//   let lastErr = null;
+//   for (const p of paths) {
+//     const url = `${PRINCIPAL_URL}${p}`;
+//     try {
+//       const res = await axios.post(url, payload, {
+//         headers: buildHeaders(authToken),
+//         timeout: 8000,
+//       });
+//       return { ok: true, data: res.data, path: p };
+//     } catch (e) {
+//       lastErr = e;
+//       const status = e?.response?.status;
+//       if (status === 404 || status === 401 || status === 403) continue;
+//       continue;
+//     }
+//   }
+//   return { ok: false, error: lastErr };
+// }
+
+// function cleanCountry(raw) {
+//   if (typeof raw !== "string") return "";
+//   const step1 = raw.replace(/&#x27;/g, "'");
+//   return step1.replace(/^[^\p{L}]*/u, "");
+// }
+
+// function normalizeCountry(str) {
+//   if (typeof str !== "string") return "";
+//   const noAccents = str.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+//   return noAccents.replace(/’/g, "'").trim().toLowerCase();
+// }
+
+// const AMERICA_COUNTRIES = ["canada", "usa", "united states", "united states of america"];
+// const EUROPE_COUNTRIES = ["france", "belgique", "belgium", "allemagne", "germany"];
+// const AFRICA_COUNTRIES = [
+//   "cote d'ivoire", "cote d ivoire", "cote divoire", "cote-d-ivoire",
+//   "mali", "burkina faso", "senegal", "cameroun", "cameroon",
+//   "benin", "togo", "ghana",
+// ];
+
+// function getRegionFromCountry(countryRaw) {
+//   const normalized = normalizeCountry(cleanCountry(countryRaw));
+//   if (!normalized) return null;
+//   if (AMERICA_COUNTRIES.includes(normalized)) return "AMERICA";
+//   if (EUROPE_COUNTRIES.includes(normalized)) return "EUROPE";
+//   if (AFRICA_COUNTRIES.includes(normalized)) return "AFRICA";
+//   return null;
+// }
+
+// const THRESHOLDS_BY_REGION = {
+//   AMERICA: { currency: "CAD", minTotal: 200 },
+//   EUROPE: { currency: "EUR", minTotal: 200 },
+//   AFRICA: { currency: "XOF", minTotal: 60000 },
+// };
+
+// const BONUSES_BY_REGION = {
+//   AMERICA: { currency: "CAD", parrain: 5, filleul: 3 },
+//   EUROPE: { currency: "EUR", parrain: 4, filleul: 2 },
+//   AFRICA: { currency: "XOF", parrain: 2000, filleul: 1000 },
+// };
+
+// function TransactionModel() {
+//   return Transaction;
+// }
+
+// async function fetchUserFromMain(userId, authToken) {
+//   if (!PRINCIPAL_URL) return null;
+//   const url = `${PRINCIPAL_URL}/users/${userId}`;
+//   try {
+//     const res = await axios.get(url, { headers: buildHeaders(authToken), timeout: 8000 });
+//     return res.data?.data || null;
+//   } catch (err) {
+//     if (err.response?.status === 404) return null;
+//     throw err;
+//   }
+// }
+
+// async function patchUserInMain(userId, updates, authToken) {
+//   if (!PRINCIPAL_URL) return;
+//   const url = `${PRINCIPAL_URL}/users/${userId}`;
+//   await axios.patch(url, updates, { headers: buildHeaders(authToken), timeout: 8000 });
+// }
+
+// async function creditBalanceInMain(userId, amount, currency, description, authToken) {
+//   if (!PRINCIPAL_URL) return;
+//   if (!INTERNAL_TOKEN) throw new Error("INTERNAL_TOKEN manquant");
+//   const url = `${PRINCIPAL_URL}/users/${userId}/credit-internal`;
+//   await axios.post(url, { amount, currency, description }, { headers: buildHeaders(authToken), timeout: 8000 });
+// }
+
+// async function sendNotificationToMain(userId, title, message, data = {}, authToken) {
+//   if (!PRINCIPAL_URL) return;
+//   const url = `${PRINCIPAL_URL}/notifications`;
+//   try {
+//     await axios.post(url, { recipient: userId, title, message, data }, { headers: buildHeaders(authToken), timeout: 8000 });
+//   } catch (err) {
+//     logger.warn("[Referral] Notification failed:", err?.response?.data || err.message);
+//   }
+// }
+
+// function generatePNVReferralCode() {
+//   const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+//   const digits = "0123456789";
+//   const all = letters + digits;
+
+//   const buf = crypto.randomBytes(4);
+//   let raw = "";
+//   for (let i = 0; i < 4; i++) raw += all[buf[i] % all.length];
+
+//   let arr = raw.split("");
+//   if (!/[0-9]/.test(raw)) arr[crypto.randomBytes(1)[0] % 4] = digits[crypto.randomBytes(1)[0] % digits.length];
+//   if (!/[A-Z]/.test(raw)) arr[crypto.randomBytes(1)[0] % 4] = letters[crypto.randomBytes(1)[0] % letters.length];
+
+//   return `PNV-${arr.join("")}`;
+// }
+
+// async function generateAndAssignReferralInMain(senderId, authToken) {
+//   for (let attempt = 0; attempt < 12; attempt++) {
+//     const newCode = generatePNVReferralCode();
+//     try {
+//       await patchUserInMain(
+//         senderId,
+//         {
+//           referralCode: newCode,
+//           hasGeneratedReferral: true,
+//           referralCodeGeneratedAt: new Date().toISOString(),
+//         },
+//         authToken
+//       );
+//       logger.info(`[Referral][legacy] Code "${newCode}" assigné pour ${senderId}`);
+//       return { ok: true, code: newCode };
+//     } catch (err) {
+//       const msg = String(err.response?.data?.error || err.response?.data?.message || err.message || "");
+//       if (err.response?.status === 409 || /duplicate|E11000|already exists|conflict/i.test(msg)) continue;
+//       throw err;
+//     }
+//   }
+//   throw new Error(`Impossible de générer un referralCode unique pour ${senderId}`);
+// }
+
+// async function getFirstTwoConfirmedTotal(userId) {
+//   const txs = await TransactionModel()
+//     .find({
+//       status: "confirmed",
+//       $or: [{ ownerUserId: userId }, { initiatorUserId: userId }, { userId: userId }],
+//     })
+//     .sort({ confirmedAt: 1, createdAt: 1 })
+//     .limit(2)
+//     .lean();
+
+//   const count = Array.isArray(txs) ? txs.length : 0;
+//   if (count < 2) return { count, total: 0 };
+
+//   const total = txs.reduce((sum, tx) => sum + safeNumber(tx?.amount), 0);
+//   return { count, total };
+// }
+
+// async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
+//   if (!senderId) return;
+//   if (tx && !isConfirmedStatus(tx.status)) return;
+
+//   const internal = await postInternal(
+//     ["/internal/referral/on-transaction-confirm", "/api/v1/internal/referral/on-transaction-confirm"],
+//     {
+//       userId: senderId,
+//       transaction: {
+//         id: String(tx?.id || tx?._id || tx?.reference || Date.now()),
+//         reference: tx?.reference ? String(tx.reference) : "",
+//         status: "confirmed",
+//         amount: safeNumber(tx?.amount),
+//         currency: tx?.currency,
+//         createdAt: tx?.createdAt || new Date().toISOString(),
+//       },
+//     },
+//     authToken
+//   );
+
+//   if (internal.ok) {
+//     logger.info(`[Referral] referralCode ensured for ${senderId}`);
+//     return;
+//   }
+
+//   // fallback legacy
+//   try {
+//     const count = await TransactionModel().countDocuments({
+//       status: "confirmed",
+//       $or: [{ ownerUserId: senderId }, { initiatorUserId: senderId }, { userId: senderId }],
+//     });
+//     if (count < 1) return;
+
+//     const userMain = await fetchUserFromMain(senderId, authToken);
+//     if (!userMain) return;
+
+//     if (userMain.hasGeneratedReferral || userMain.referralCode) return;
+
+//     await generateAndAssignReferralInMain(senderId, authToken);
+//   } catch (e) {
+//     logger.error("[Referral] checkAndGenerateReferralCodeInMain error:", e?.response?.data || e.message);
+//   }
+// }
+
+// async function processReferralBonusIfEligible(userId, authToken) {
+//   if (!userId) return;
+
+//   const { count, total } = await getFirstTwoConfirmedTotal(userId);
+//   if (count < 2) return;
+
+//   const internal = await postInternal(
+//     ["/internal/referral/award-bonus", "/api/v1/internal/referral/award-bonus"],
+//     {
+//       refereeId: userId,
+//       triggerTxId: `first2_${userId}_${Date.now()}`,
+//       stats: {
+//         confirmedCount: count,
+//         firstTwoTotal: total,
+//       },
+//     },
+//     authToken
+//   );
+
+//   if (internal.ok) {
+//     logger.info(`[Referral] award-bonus requested for referee=${userId}`);
+//     return;
+//   }
+
+//   // fallback legacy (inchangé)
+//   try {
+//     const filleul = await fetchUserFromMain(userId, authToken);
+//     if (!filleul) return;
+//     if (!filleul.referredBy) return;
+//     if (filleul.referralBonusCredited) return;
+
+//     const parrainId = filleul.referredBy;
+//     const parrain = await fetchUserFromMain(parrainId, authToken);
+//     if (!parrain) return;
+
+//     const regionF = getRegionFromCountry(filleul.country);
+//     const regionP = getRegionFromCountry(parrain.country);
+//     if (!regionF || !regionP) return;
+
+//     const seuilCfg = THRESHOLDS_BY_REGION[regionF];
+//     const bonusCfg = BONUSES_BY_REGION[regionP];
+//     if (!seuilCfg || !bonusCfg) return;
+
+//     if (total < seuilCfg.minTotal) return;
+
+//     const { currency: bonusCurrency, parrain: bonusParrain, filleul: bonusFilleul } = bonusCfg;
+
+//     if (bonusFilleul > 0) {
+//       await creditBalanceInMain(userId, bonusFilleul, bonusCurrency, "Bonus de bienvenue (filleul - programme de parrainage PayNoval)", authToken);
+//     }
+//     if (bonusParrain > 0) {
+//       await creditBalanceInMain(parrainId, bonusParrain, bonusCurrency, `Bonus de parrainage pour ${filleul.fullName || filleul.email || userId}`, authToken);
+//     }
+
+//     await patchUserInMain(
+//       userId,
+//       {
+//         referralBonusCredited: true,
+//         referralBonusCurrency: bonusCurrency,
+//         referralBonusParrainAmount: bonusParrain,
+//         referralBonusFilleulAmount: bonusFilleul,
+//         referralBonusCreditedAt: new Date().toISOString(),
+//       },
+      
+//       authToken
+//     );
+
+//     await sendNotificationToMain(
+//       parrainId,
+//       "Bonus parrain PayNoval crédité",
+//       `Vous avez reçu ${bonusParrain} ${bonusCurrency} grâce à l’activité de votre filleul.`,
+//       { type: "referral_bonus", role: "parrain", amount: bonusParrain, currency: bonusCurrency, childUserId: userId },
+//       authToken
+//     );
+
+//     await sendNotificationToMain(
+//       userId,
+//       "Bonus de bienvenue PayNoval crédité",
+//       `Vous avez reçu ${bonusFilleul} ${bonusCurrency} grâce à vos premiers transferts sur PayNoval.`,
+//       { type: "referral_bonus", role: "filleul", amount: bonusFilleul, currency: bonusCurrency, parentUserId: parrainId },
+//       authToken
+//     );
+
+//     logger.info(`[Referral][legacy] Bonus crédité (parrain=${parrainId}, filleul=${userId}, ${bonusParrain}/${bonusFilleul} ${bonusCurrency})`);
+//   } catch (err) {
+//     logger.error("[Referral] Erreur bonus legacy:", err?.response?.data || err.message);
+//   }
+// }
+
+// module.exports = {
+//   checkAndGenerateReferralCodeInMain,
+//   processReferralBonusIfEligible,
+// };
+
+
+
+
+
+
 // File: api-gateway/src/utils/referralUtils.js
 "use strict";
 
 const axios = require("axios");
 const crypto = require("crypto");
-const logger = require("../logger") || console;
+
+let logger = console;
+try {
+  logger = require("../logger");
+} catch {}
+
 const config = require("../config");
 const Transaction = require("../models/Transaction");
 
@@ -187,14 +524,34 @@ async function getFirstTwoConfirmedTotal(userId) {
   return { count, total };
 }
 
+/**
+ * ✅ Assure le referralCode pour le BON user (expéditeur).
+ * - SenderId reste la source principale
+ * - Mais si tx.ownerUserId/tx.initiatorUserId existent, on les préfère
+ *   (utile si un appel se trompe de userId ailleurs).
+ */
 async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
-  if (!senderId) return;
+  if (!senderId && !tx) return;
+
+  // ✅ si tx est fournie et pas confirmée => stop
   if (tx && !isConfirmedStatus(tx.status)) return;
+
+  const targetUserId = String(tx?.ownerUserId || tx?.initiatorUserId || senderId || "").trim();
+  if (!targetUserId) return;
+
+  // ✅ garde-fou: si on sait qui a confirmé et que target==confirmCaller => on skip (anti mauvais utilisateur)
+  if (tx?.confirmCallerUserId && String(tx.confirmCallerUserId) === targetUserId) {
+    logger.warn("[Referral] Guard: targetUserId == confirmCallerUserId => SKIP (évite attribution au destinataire)", {
+      targetUserId,
+      confirmCallerUserId: String(tx.confirmCallerUserId),
+    });
+    return;
+  }
 
   const internal = await postInternal(
     ["/internal/referral/on-transaction-confirm", "/api/v1/internal/referral/on-transaction-confirm"],
     {
-      userId: senderId,
+      userId: targetUserId,
       transaction: {
         id: String(tx?.id || tx?._id || tx?.reference || Date.now()),
         reference: tx?.reference ? String(tx.reference) : "",
@@ -208,7 +565,7 @@ async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
   );
 
   if (internal.ok) {
-    logger.info(`[Referral] referralCode ensured for ${senderId}`);
+    logger.info(`[Referral] referralCode ensured for ${targetUserId}`);
     return;
   }
 
@@ -216,26 +573,51 @@ async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
   try {
     const count = await TransactionModel().countDocuments({
       status: "confirmed",
-      $or: [{ ownerUserId: senderId }, { initiatorUserId: senderId }, { userId: senderId }],
+      $or: [{ ownerUserId: targetUserId }, { initiatorUserId: targetUserId }, { userId: targetUserId }],
     });
     if (count < 1) return;
 
-    const userMain = await fetchUserFromMain(senderId, authToken);
+    const userMain = await fetchUserFromMain(targetUserId, authToken);
     if (!userMain) return;
 
     if (userMain.hasGeneratedReferral || userMain.referralCode) return;
 
-    await generateAndAssignReferralInMain(senderId, authToken);
+    await generateAndAssignReferralInMain(targetUserId, authToken);
   } catch (e) {
     logger.error("[Referral] checkAndGenerateReferralCodeInMain error:", e?.response?.data || e.message);
   }
 }
 
+/**
+ * ✅ Déclenche bonus si éligible
+ * ✅ FIX IMPORTANT:
+ * - l’endpoint principal attend stats.confirmedTotal (pas firstTwoTotal)
+ * - on passe aussi minTotalRequired et currency selon la région du FILLEUL
+ */
 async function processReferralBonusIfEligible(userId, authToken) {
   if (!userId) return;
 
   const { count, total } = await getFirstTwoConfirmedTotal(userId);
   if (count < 2) return;
+
+  let minTotalRequired = 0;
+  let currency = "XOF";
+
+  try {
+    const filleul = await fetchUserFromMain(userId, authToken);
+    const regionF = getRegionFromCountry(filleul?.country);
+    const seuilCfg = regionF ? THRESHOLDS_BY_REGION[regionF] : null;
+
+    if (seuilCfg) {
+      minTotalRequired = safeNumber(seuilCfg.minTotal);
+      currency = String(seuilCfg.currency || currency);
+    } else if (filleul?.country) {
+      // si pays non mappé, on ne bloque pas
+      currency = String(filleul.currency || currency);
+    }
+  } catch {
+    // best effort
+  }
 
   const internal = await postInternal(
     ["/internal/referral/award-bonus", "/api/v1/internal/referral/award-bonus"],
@@ -244,7 +626,10 @@ async function processReferralBonusIfEligible(userId, authToken) {
       triggerTxId: `first2_${userId}_${Date.now()}`,
       stats: {
         confirmedCount: count,
-        firstTwoTotal: total,
+        confirmedTotal: total,     // ✅ FIX
+        currency,                 // ✅ utile côté principal
+        minConfirmedRequired: 2,   // règle métier
+        minTotalRequired,         // ✅ seuil par région du filleul
       },
     },
     authToken
@@ -279,10 +664,22 @@ async function processReferralBonusIfEligible(userId, authToken) {
     const { currency: bonusCurrency, parrain: bonusParrain, filleul: bonusFilleul } = bonusCfg;
 
     if (bonusFilleul > 0) {
-      await creditBalanceInMain(userId, bonusFilleul, bonusCurrency, "Bonus de bienvenue (filleul - programme de parrainage PayNoval)", authToken);
+      await creditBalanceInMain(
+        userId,
+        bonusFilleul,
+        bonusCurrency,
+        "Bonus de bienvenue (filleul - programme de parrainage PayNoval)",
+        authToken
+      );
     }
     if (bonusParrain > 0) {
-      await creditBalanceInMain(parrainId, bonusParrain, bonusCurrency, `Bonus de parrainage pour ${filleul.fullName || filleul.email || userId}`, authToken);
+      await creditBalanceInMain(
+        parrainId,
+        bonusParrain,
+        bonusCurrency,
+        `Bonus de parrainage pour ${filleul.fullName || filleul.email || userId}`,
+        authToken
+      );
     }
 
     await patchUserInMain(
@@ -294,7 +691,6 @@ async function processReferralBonusIfEligible(userId, authToken) {
         referralBonusFilleulAmount: bonusFilleul,
         referralBonusCreditedAt: new Date().toISOString(),
       },
-      
       authToken
     );
 
@@ -314,7 +710,9 @@ async function processReferralBonusIfEligible(userId, authToken) {
       authToken
     );
 
-    logger.info(`[Referral][legacy] Bonus crédité (parrain=${parrainId}, filleul=${userId}, ${bonusParrain}/${bonusFilleul} ${bonusCurrency})`);
+    logger.info(
+      `[Referral][legacy] Bonus crédité (parrain=${parrainId}, filleul=${userId}, ${bonusParrain}/${bonusFilleul} ${bonusCurrency})`
+    );
   } catch (err) {
     logger.error("[Referral] Erreur bonus legacy:", err?.response?.data || err.message);
   }

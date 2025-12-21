@@ -10,11 +10,9 @@ const TransactionSchema = new mongoose.Schema({
     required: true,
   },
 
-  // ✅ IMPORTANT: expéditeur réel (owner/initiator)
   ownerUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   initiatorUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 
-  // 🔥 Ajout pour l'app mobile (filtrage historique / rôles)
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   receiver: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 
@@ -36,7 +34,6 @@ const TransactionSchema = new mongoose.Schema({
 
   amount: { type: Number, required: true },
 
-  // 💸 Frais et netAmount (optionnels)
   fees: { type: Number },
   netAmount: { type: Number },
 
@@ -46,7 +43,6 @@ const TransactionSchema = new mongoose.Schema({
     default: 'pending',
   },
 
-  // Champs fréquemment utilisés
   toEmail: { type: String },
   toIBAN: { type: String },
   toPhone: { type: String },
@@ -54,20 +50,15 @@ const TransactionSchema = new mongoose.Schema({
   operator: { type: String },
   country: { type: String },
 
-  // ✅ Référence "humaine" (PNV-xxxx) ou fallback
   reference: { type: String },
-
-  // ✅ ID provider (Mongo id provider, etc.)
   providerTxId: { type: String },
 
-  // 🔐 Sécurité
   requiresSecurityValidation: { type: Boolean, default: true },
   securityQuestion: { type: String },
   securityCodeHash: { type: String },
   securityAttempts: { type: Number, default: 0 },
   securityLockedUntil: { type: Date, default: null },
 
-  // Historisation
   confirmedAt: { type: Date },
   cancelledAt: { type: Date },
   cancelReason: { type: String },
@@ -84,6 +75,10 @@ TransactionSchema.index({ userId: 1, provider: 1, reference: 1 });
 
 // ✅ match rapide confirm/cancel via providerTxId
 TransactionSchema.index({ provider: 1, providerTxId: 1 }, { sparse: true });
+
+// ✅ utile pour retrouver rapidement “l’expéditeur” réel
+TransactionSchema.index({ ownerUserId: 1, createdAt: -1 }, { sparse: true });
+TransactionSchema.index({ initiatorUserId: 1, createdAt: -1 }, { sparse: true });
 
 // 🔍 Pour historique mobile par rôles
 TransactionSchema.index({ createdBy: 1, createdAt: -1 });
