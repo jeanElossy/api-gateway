@@ -1,4 +1,3 @@
-// File: api-gateway/src/utils/referralUtils.js
 "use strict";
 
 const axios = require("axios");
@@ -32,8 +31,6 @@ const buildHeaders = (authToken) => ({
 
 async function postInternal(paths, payload, authToken) {
   if (!PRINCIPAL_URL) throw new Error("PRINCIPAL_URL manquant");
-
-  // ✅ si tu utilises des routes internes protégées, le token est obligatoire
   if (!INTERNAL_TOKEN) return { ok: false, skipped: true, reason: "INTERNAL_TOKEN_MISSING" };
 
   let lastErr = null;
@@ -192,36 +189,16 @@ async function getFirstTwoConfirmedTotal(userId) {
   return { count, total };
 }
 
-/**
- * ✅ Assure le referralCode pour le BON user (expéditeur).
- * - SenderId reste la source principale
- * - Mais si tx.ownerUserId/tx.initiatorUserId existent, on les préfère
- *   (utile si un appel se trompe de userId ailleurs).
- */
 async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
   if (!senderId && !tx) return;
-
-  // ✅ si tx est fournie et pas confirmée => stop
   if (tx && !isConfirmedStatus(tx.status)) return;
 
   const targetUserId = String(tx?.ownerUserId || tx?.initiatorUserId || senderId || "").trim();
   if (!targetUserId) return;
 
-  // // ✅ garde-fou: si on sait qui a confirmé et que target==confirmCaller => on skip (anti mauvais utilisateur)
-  // if (tx?.confirmCallerUserId && String(tx.confirmCallerUserId) === targetUserId) {
-  //   logger.warn("[Referral] Guard: targetUserId == confirmCallerUserId => SKIP (évite attribution au destinataire)", {
-  //     targetUserId,
-  //     confirmCallerUserId: String(tx.confirmCallerUserId),
-  //   });
-  //   return;
-  // }
-
-  // ✅ Guard plus intelligent : on SKIP seulement si confirmCaller est clairement le RECEIVER.
-  // Sinon (self-confirm / sender-confirm), c'est normal que target == confirmCaller.
+  // Guard intelligent : skip seulement si confirmCaller est clairement le receiver
   if (tx?.confirmCallerUserId && String(tx.confirmCallerUserId) === targetUserId) {
     const receiverId = tx?.receiverUserId || tx?.receiverId || tx?.meta?.receiverId || null;
-
-    // si receiver == confirmCaller => le caller est le destinataire, donc target==caller est suspect
     if (receiverId && String(receiverId) === String(tx.confirmCallerUserId)) {
       logger.warn("[Referral] Guard: confirmCaller is receiver and equals target => SKIP", {
         targetUserId,
@@ -231,8 +208,6 @@ async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
       return;
     }
   }
-
-
 
   const internal = await postInternal(
     ["/internal/referral/on-transaction-confirm", "/api/v1/internal/referral/on-transaction-confirm"],
@@ -274,19 +249,6 @@ async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
   }
 }
 
-
-
-
-
-
-
-
-/**
- * ✅ Déclenche bonus si éligible
- * ✅ FIX IMPORTANT:
- * - l’endpoint principal attend stats.confirmedTotal (pas firstTwoTotal)
- * - on passe aussi minTotalRequired et currency selon la région du FILLEUL
- */
 async function processReferralBonusIfEligible(userId, authToken) {
   if (!userId) return;
 
@@ -305,12 +267,9 @@ async function processReferralBonusIfEligible(userId, authToken) {
       minTotalRequired = safeNumber(seuilCfg.minTotal);
       currency = String(seuilCfg.currency || currency);
     } else if (filleul?.country) {
-      // si pays non mappé, on ne bloque pas
       currency = String(filleul.currency || currency);
     }
-  } catch {
-    // best effort
-  }
+  } catch {}
 
   const internal = await postInternal(
     ["/internal/referral/award-bonus", "/api/v1/internal/referral/award-bonus"],
@@ -319,10 +278,10 @@ async function processReferralBonusIfEligible(userId, authToken) {
       triggerTxId: `first2_${userId}_${Date.now()}`,
       stats: {
         confirmedCount: count,
-        confirmedTotal: total,     // ✅ FIX
-        currency,                 // ✅ utile côté principal
-        minConfirmedRequired: 2,   // règle métier
-        minTotalRequired,         // ✅ seuil par région du filleul
+        confirmedTotal: total,
+        currency,
+        minConfirmedRequired: 2,
+        minTotalRequired,
       },
     },
     authToken
