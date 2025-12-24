@@ -21,6 +21,11 @@
 //  *  - NE JAMAIS utiliser createdBy/userId comme fallback pour le parrainage dans /confirm
 //  *    (ça peut être le destinataire / confirm caller).
 //  *  - Resolver STRICT : ownerUserId/initiatorUserId/meta.ownerUserId uniquement.
+//  *
+//  * ✅ HARDENING (PATCH MINIMAL) :
+//  *  - Vérification du code de sécurité en comparaison constante (timing-safe)
+//  *  - Nouveau hash PBKDF2 pour les nouvelles transactions
+//  *  - Compatibilité totale avec l’ancien SHA256 (legacy)
 //  */
 
 // const axios = require('axios');
@@ -115,38 +120,6 @@
 
 // /**
 //  * ✅ Resolver STRICT du propriétaire du referral.
-//  * ⚠️ Ne PAS utiliser createdBy/userId en fallback (peut être le destinataire).
-//  */
-// // function resolveReferralOwnerUserId(txDoc, confirmCallerUserId = null) {
-// //   if (!txDoc) return null;
-
-// //   const candidates = [
-// //     txDoc.ownerUserId,
-// //     txDoc.initiatorUserId,
-// //     txDoc.fromUserId,
-// //     txDoc.senderId,
-// //     txDoc?.meta?.ownerUserId,
-// //     txDoc?.meta?.initiatorUserId,
-// //     txDoc?.meta?.fromUserId,
-// //     txDoc?.meta?.senderId,
-// //   ].filter(Boolean);
-
-// //   // 1) prend le 1er candidat
-// //   const chosen = candidates.length ? candidates[0] : null;
-// //   if (!chosen) return null;
-
-// //   // 2) sécurité: si chosen == confirmCallerUserId (souvent destinataire), on préfère SKIP
-// //   //    plutôt que d'attribuer au mauvais user.
-// //   if (confirmCallerUserId && sameId(chosen, confirmCallerUserId)) {
-// //     return null;
-// //   }
-
-// //   return chosen;
-// // }
-
-
-// /**
-//  * ✅ Resolver STRICT du propriétaire du referral.
 //  * - On prend ownerUserId/initiator/... en priorité.
 //  * - ⚠️ Ne SKIP que si confirmCaller est clairement le RECEIVER et qu'on n'a pas d'autre candidat.
 //  * - ✅ Autorise les flows où confirmCaller = expéditeur (self-confirm).
@@ -183,13 +156,6 @@
 //   // ✅ Sinon chosen == confirmCaller est OK (self-confirm / sender-confirm)
 //   return chosen;
 // }
-
-
-
-
-
-
-
 
 // function auditForwardHeaders(req) {
 //   const incomingAuth = req.headers.authorization || req.headers.Authorization || null;
@@ -298,8 +264,68 @@
 //   }
 // }
 
-// function hashSecurityCode(code) {
+// /* -------------------------------------------------------------------
+//  *           ✅ SECURITY CODE HASHING (LEGACY + PBKDF2)
+//  * ------------------------------------------------------------------- */
+
+// // ✅ Legacy SHA256 (compat)
+// function hashSecurityCodeLegacy(code) {
 //   return crypto.createHash('sha256').update(String(code || '').trim()).digest('hex');
+// }
+// function isLegacySha256Hex(stored) {
+//   return /^[a-f0-9]{64}$/i.test(String(stored || ''));
+// }
+
+// // ✅ Nouveau format: pbkdf2$<iter>$<saltB64>$<hashB64>
+// function hashSecurityCodePBKDF2(code) {
+//   const iterations = 180000;
+//   const salt = crypto.randomBytes(16);
+//   const derived = crypto.pbkdf2Sync(String(code || '').trim(), salt, iterations, 32, 'sha256');
+//   return `pbkdf2$${iterations}$${salt.toString('base64')}$${derived.toString('base64')}`;
+// }
+
+// function verifyPBKDF2(code, stored) {
+//   try {
+//     const [alg, iterStr, saltB64, hashB64] = String(stored || '').split('$');
+//     if (alg !== 'pbkdf2') return false;
+//     const iterations = parseInt(iterStr, 10);
+//     if (!Number.isFinite(iterations) || iterations < 10000) return false;
+
+//     const salt = Buffer.from(saltB64, 'base64');
+//     const expected = Buffer.from(hashB64, 'base64');
+//     const computed = crypto.pbkdf2Sync(String(code || '').trim(), salt, iterations, expected.length, 'sha256');
+
+//     // ✅ comparaison constante
+//     return expected.length === computed.length && crypto.timingSafeEqual(computed, expected);
+//   } catch {
+//     return false;
+//   }
+// }
+
+// // ✅ Vérif universelle (PBKDF2 ou SHA256 legacy)
+// function verifySecurityCode(code, storedHash) {
+//   const stored = String(storedHash || '');
+//   if (!stored) return false;
+
+//   if (stored.startsWith('pbkdf2$')) {
+//     return verifyPBKDF2(code, stored);
+//   }
+
+//   // legacy sha256 hex
+//   if (isLegacySha256Hex(stored)) {
+//     const computed = hashSecurityCodeLegacy(code);
+//     return (
+//       Buffer.byteLength(computed) === Buffer.byteLength(stored.toLowerCase()) &&
+//       crypto.timingSafeEqual(Buffer.from(computed, 'utf8'), Buffer.from(stored.toLowerCase(), 'utf8'))
+//     );
+//   }
+
+//   return false;
+// }
+
+// // ✅ Pour stocker les NOUVELLES tx : pbkdf2 (sans casser l'existant)
+// function hashSecurityCode(code) {
+//   return hashSecurityCodePBKDF2(code);
 // }
 
 // /**
@@ -612,6 +638,8 @@
 //       error: 'Question et code de sécurité obligatoires pour initier une transaction.',
 //     });
 //   }
+
+//   // ✅ Stockage hash modernisé (PBKDF2), compat legacy assurée au confirm
 //   const securityCodeHash = hashSecurityCode(securityCode);
 
 //   try {
@@ -870,9 +898,8 @@
 //         });
 //       }
 
-//       const incomingHash = hashSecurityCode(securityCode);
-
-//       if (incomingHash !== txRecord.securityCodeHash) {
+//       // ✅ Vérification modernisée + compat legacy + timing-safe
+//       if (!verifySecurityCode(securityCode, txRecord.securityCodeHash)) {
 //         const attempts = (txRecord.securityAttempts || 0) + 1;
 
 //         const update = { securityAttempts: attempts, updatedAt: now };
@@ -1459,8 +1486,6 @@
 
 
 
-
-
 // File: api-gateway/controllers/transactionsController.js
 'use strict';
 
@@ -1492,11 +1517,11 @@
  */
 
 const axios = require('axios');
+const crypto = require('crypto');
 const config = require('../src/config');
 const logger = require('../src/logger');
 const Transaction = require('../src/models/Transaction');
 const AMLLog = require('../src/models/AMLLog');
-const crypto = require('crypto');
 
 // ⬇️ Service d’email transactionnel centralisé
 const { notifyTransactionEvent } = require('../src/services/transactionNotificationService');
@@ -2380,7 +2405,7 @@ exports.confirmTransaction = async (req, res) => {
             provider,
             req,
             result: {
-              ...txRecord.toObject(),
+              ...(txRecord.toObject ? txRecord.toObject() : txRecord),
               status: 'canceled',
               amount: txRecord.amount,
               toEmail: txRecord.toEmail,
@@ -2466,9 +2491,13 @@ exports.confirmTransaction = async (req, res) => {
       ],
     };
 
-    // ✅ résilience: si txRecord existe mais ownerUserId absent => owner = txRecord.userId (expéditeur)
+    // ✅ résilience: si txRecord existe mais ownerUserId absent => owner = txRecord.userId (expéditeur legacy)
     const resilientOwnerUserId =
-      txRecord?.ownerUserId || txRecord?.initiatorUserId || txRecord?.meta?.ownerUserId || txRecord?.userId || null;
+      txRecord?.ownerUserId ||
+      txRecord?.initiatorUserId ||
+      txRecord?.meta?.ownerUserId ||
+      txRecord?.userId ||
+      null;
 
     const patch = {
       status: newStatus,

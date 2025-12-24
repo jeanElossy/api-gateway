@@ -1,7 +1,10 @@
-// routes/fees.js
+// File: api-gateway/routes/fees.js
+'use strict';
 
 const express = require('express');
 const router = express.Router();
+
+const config = require('../src/config');
 
 // ✅ Middleware admin existant
 const requireAdmin = require('../src/middlewares/requireAdmin');
@@ -12,9 +15,6 @@ const feesCtrl = require('../controllers/feesController');
 /**
  * 🔓 Endpoint PUBLIC UNIQUE pour toute simulation de frais
  * GET /api/v1/fees/simulate
- *
- * - Accessible depuis le front (web/mobile) via l'API Gateway
- * - Accessible aussi depuis tes microservices (transactions, etc.)
  */
 router.get('/simulate', feesCtrl.simulateFee);
 
@@ -22,21 +22,21 @@ router.get('/simulate', feesCtrl.simulateFee);
  * 🔐 Middleware combiné :
  *  - Si l'appel vient d'un microservice interne avec le bon x-internal-token,
  *    on laisse passer sans exiger de JWT admin.
- *  - Sinon, on tombe sur le requireAdmin classique (JWT admin/superadmin).
+ *  - Sinon, requireAdmin.
  */
 const requireInternalOrAdmin = (req, res, next) => {
   const internalHeader = req.get('x-internal-token');
 
-  // Appel interne de microservice (ex: api-paynoval -> gateway)
-  if (
-    internalHeader &&
-    process.env.INTERNAL_TOKEN &&
-    internalHeader === process.env.INTERNAL_TOKEN
-  ) {
+  const expectedInternal =
+    process.env.GATEWAY_INTERNAL_TOKEN ||
+    process.env.INTERNAL_TOKEN ||
+    config.internalToken ||
+    '';
+
+  if (internalHeader && expectedInternal && internalHeader === expectedInternal) {
     return next();
   }
 
-  // Sinon, on applique la logique admin habituelle (JWT admin)
   return requireAdmin(req, res, next);
 };
 

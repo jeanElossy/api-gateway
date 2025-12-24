@@ -16,8 +16,12 @@ const router = express.Router();
 function verifyInternalToken(req, res, next) {
   const headerToken = req.headers['x-internal-token'] || '';
 
-  // ✅ clarifie: token interne du gateway
-  const expectedToken = process.env.GATEWAY_INTERNAL_TOKEN || config.internalToken || '';
+  // ✅ token interne attendu (unifié)
+  const expectedToken =
+    process.env.GATEWAY_INTERNAL_TOKEN ||
+    process.env.INTERNAL_TOKEN ||
+    config.internalToken ||
+    '';
 
   if (!expectedToken || headerToken !== expectedToken) {
     return res.status(401).json({

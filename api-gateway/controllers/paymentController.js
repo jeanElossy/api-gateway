@@ -7,8 +7,9 @@ const config = require('../src/config');
 const logger = require('../src/logger');
 
 /**
- * Nettoie les champs sensibles avant de forward vers les microservices
- * (on évite de logger/propager le numéro de carte brut, CVC, etc.)
+ * Nettoie les champs sensibles UNIQUEMENT pour les logs / meta.
+ * ⚠️ IMPORTANT: on ne doit PAS nettoyer le body AVANT de forward,
+ * sinon on casse les providers (cardNumber/cvc...) et/ou securityCode.
  */
 function cleanSensitiveMeta(meta = {}) {
   const clone = { ...meta };
@@ -50,7 +51,6 @@ function safeRequestId(req) {
 
 /**
  * Headers d’audit envoyés vers les microservices
- * (auth, user, session, etc.)
  */
 function auditHeaders(req) {
   const incomingAuth =
@@ -62,9 +62,10 @@ function auditHeaders(req) {
     String(incomingAuth).trim().toLowerCase() !== 'null';
 
   const headers = {
+    Accept: 'application/json',
     'x-internal-token': config.internalToken || '',
     'x-request-id': safeRequestId(req),
-    'x-user-id': req.user?._id || req.headers['x-user-id'] || '',
+    'x-user-id': req.user?._id || req.user?.id || req.headers['x-user-id'] || '',
     'x-session-id': req.headers['x-session-id'] || '',
   };
 
@@ -80,22 +81,26 @@ function auditHeaders(req) {
 }
 
 /**
- * Détection challenge Cloudflare sur les microservices de paiement
+ * Détection challenge Cloudflare (plus robuste)
  */
 function isCloudflareChallengeResponse(response) {
   if (!response) return false;
   const status = response.status;
   const data = response.data;
 
-  if (status !== 429 && status !== 403) return false;
+  const suspiciousStatus = status === 403 || status === 429 || status === 503;
   if (!data || typeof data !== 'string') return false;
 
   const lower = data.toLowerCase();
-  return (
+  const looksLikeHtml = lower.includes('<html') || lower.includes('<!doctype html');
+  const hasCfMarkers =
     lower.includes('just a moment') ||
+    lower.includes('attention required') ||
     lower.includes('cdn-cgi/challenge-platform') ||
-    lower.includes('__cf_chl_')
-  );
+    lower.includes('__cf_chl_') ||
+    lower.includes('cloudflare');
+
+  return suspiciousStatus && (hasCfMarkers || looksLikeHtml);
 }
 
 /**
@@ -112,7 +117,7 @@ function resolveProviderKey(body = {}) {
  */
 function getCagnottesBaseUrl() {
   const base = config.microservices.cagnottes || config.microservices.paynoval || '';
-  return base.replace(/\/+$/, '');
+  return String(base || '').replace(/\/+$/, '');
 }
 
 /**
@@ -148,7 +153,7 @@ function computeDynamicFees(body = {}) {
 }
 
 /**
- * 🧩 Side-effect : informer le backend Cagnottes qu’un paiement
+ * Side-effect : informer le backend Cagnottes qu’un paiement
  * externe pour une cagnotte a été confirmé côté Gateway.
  *
  * ⚠️ NE S’APPLIQUE PAS aux paiements internes PayNoval
@@ -227,8 +232,8 @@ exports.handlePayment = async (req, res) => {
 
   if (!targetUrl) {
     logger.error('[PAYMENT] Provider non supporté demandé', {
-      provider: req.body.provider,
-      destination: req.body.destination,
+      provider: req.body?.provider,
+      destination: req.body?.destination,
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
     });
     return res.status(400).json({ error: 'Provider non supporté.' });
@@ -237,9 +242,8 @@ exports.handlePayment = async (req, res) => {
   try {
     const dynamicFees = computeDynamicFees(req.body);
 
-    const forwardBody = {
-      ...cleanSensitiveMeta(req.body),
-    };
+    // ✅ IMPORTANT: on forward le body ORIGINAL (pas cleanSensitiveMeta)
+    const forwardBody = { ...(req.body || {}) };
 
     if (dynamicFees) {
       forwardBody.gatewayFee = dynamicFees.feeAmount;
@@ -260,30 +264,33 @@ exports.handlePayment = async (req, res) => {
 
     logger.info(`[PAYMENT→${providerKey}] Paiement réussi`, {
       provider: providerKey,
-      amount: req.body.amount,
-      context: req.body.context,
-      targetType: req.body.targetType,
-      targetId: req.body.targetId,
+      amount: req.body?.amount,
+      context: req.body?.context,
+      targetType: req.body?.targetType,
+      targetId: req.body?.targetId,
       status: response.status,
       user: req.user?.email || null,
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
       ref: response.data?.reference || response.data?.id || null,
       dynamicFees,
       timeoutMs,
+      bodyPreview: cleanSensitiveMeta(req.body || {}),
     });
 
-    try {
-      await notifyCagnotteExternalContribution(req, providerKey, response);
-    } catch (err) {
-      logger.error('[PAYMENT] Erreur side-effect cagnotte', {
-        provider: providerKey,
-        error: err.message,
-      });
-    }
+    // ✅ On répond AU CLIENT immédiatement (ne pas bloquer sur le side-effect)
+    res.status(response.status).json(response.data);
 
-    return res.status(response.status).json(response.data);
+    // fire-and-forget (sans casser la réponse)
+    void notifyCagnotteExternalContribution(req, providerKey, response).catch((e) => {
+      logger.error('[PAYMENT] Erreur side-effect cagnotte (async)', {
+        provider: providerKey,
+        error: e?.message,
+      });
+    });
+
+    return;
   } catch (err) {
-    // ✅ Timeout axios (souvent la cause du "vérifier la connexion")
+    // ✅ Timeout axios
     if (err.code === 'ECONNABORTED' || String(err.message || '').toLowerCase().includes('timeout')) {
       logger.error(`[PAYMENT→${providerKey}] Timeout vers microservice`, {
         provider: providerKey,
@@ -327,6 +334,7 @@ exports.handlePayment = async (req, res) => {
             ? err.response.data.slice(0, 300)
             : err.response.data,
         ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+        bodyPreview: cleanSensitiveMeta(req.body || {}),
       });
 
       return res.status(status).json({ error: errorMsg });
@@ -336,6 +344,7 @@ exports.handlePayment = async (req, res) => {
       provider: providerKey,
       targetUrl,
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+      bodyPreview: cleanSensitiveMeta(req.body || {}),
     });
 
     return res.status(502).json({
