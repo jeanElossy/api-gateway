@@ -1,3 +1,4 @@
+// File: api-gateway/src/utils/referralUtils.js
 "use strict";
 
 const axios = require("axios");
@@ -12,7 +13,29 @@ const config = require("../config");
 const Transaction = require("../models/Transaction");
 
 const PRINCIPAL_URL = (config.principalUrl || process.env.PRINCIPAL_URL || "").replace(/\/+$/, "");
-const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || config.internalToken || "";
+
+// ✅ IMPORTANT: token interne du principal séparé
+const PRINCIPAL_INTERNAL_TOKEN =
+  process.env.PRINCIPAL_INTERNAL_TOKEN ||
+  config.principalInternalToken ||
+  process.env.INTERNAL_TOKEN || // fallback legacy
+  config.internalToken || // fallback legacy (à éviter si différent)
+  "";
+
+if (!PRINCIPAL_URL) {
+  logger.warn("[Referral] PRINCIPAL_URL manquant (config.principalUrl / ENV PRINCIPAL_URL).");
+}
+if (!PRINCIPAL_INTERNAL_TOKEN) {
+  logger.warn(
+    "[Referral] PRINCIPAL_INTERNAL_TOKEN manquant (ENV PRINCIPAL_INTERNAL_TOKEN). Les endpoints /internal/referral/* seront ignorés."
+  );
+} else {
+  if (!process.env.PRINCIPAL_INTERNAL_TOKEN && !config.principalInternalToken) {
+    logger.warn(
+      "[Referral] PRINCIPAL_INTERNAL_TOKEN non défini explicitement. Fallback utilisé (INTERNAL_TOKEN/config.internalToken). Recommandé: définir ENV PRINCIPAL_INTERNAL_TOKEN."
+    );
+  }
+}
 
 const safeNumber = (v) => {
   const n = typeof v === "number" ? v : parseFloat(String(v ?? "").replace(",", "."));
@@ -24,16 +47,31 @@ const isConfirmedStatus = (s) => {
   return st === "confirmed" || st === "success" || st === "validated" || st === "completed";
 };
 
+function safeErrMessage(err) {
+  const status = err?.response?.status;
+  const data = err?.response?.data;
+
+  let msg =
+    (typeof data === "string" && data) ||
+    (data && typeof data === "object" && (data.error || data.message || JSON.stringify(data))) ||
+    err?.message ||
+    String(err);
+
+  if (typeof msg === "string" && msg.length > 450) msg = msg.slice(0, 450) + "…";
+  return { status, msg };
+}
+
 const buildHeaders = (authToken) => ({
-  ...(INTERNAL_TOKEN ? { "x-internal-token": INTERNAL_TOKEN } : {}),
+  ...(PRINCIPAL_INTERNAL_TOKEN ? { "x-internal-token": PRINCIPAL_INTERNAL_TOKEN } : {}),
   ...(authToken ? { Authorization: authToken } : {}),
 });
 
 async function postInternal(paths, payload, authToken) {
   if (!PRINCIPAL_URL) throw new Error("PRINCIPAL_URL manquant");
-  if (!INTERNAL_TOKEN) return { ok: false, skipped: true, reason: "INTERNAL_TOKEN_MISSING" };
+  if (!PRINCIPAL_INTERNAL_TOKEN) return { ok: false, skipped: true, reason: "PRINCIPAL_INTERNAL_TOKEN_MISSING" };
 
   let lastErr = null;
+
   for (const p of paths) {
     const url = `${PRINCIPAL_URL}${p}`;
     try {
@@ -44,11 +82,13 @@ async function postInternal(paths, payload, authToken) {
       return { ok: true, data: res.data, path: p };
     } catch (e) {
       lastErr = e;
-      const status = e?.response?.status;
-      if (status === 404 || status === 401 || status === 403) continue;
+      const { status, msg } = safeErrMessage(e);
+      logger.warn("[Referral] postInternal failed", { url, status, message: msg });
+      // 404/401/403 => on tente le prochain path
       continue;
     }
   }
+
   return { ok: false, error: lastErr };
 }
 
@@ -100,6 +140,13 @@ function TransactionModel() {
 async function fetchUserFromMain(userId, authToken) {
   if (!PRINCIPAL_URL) return null;
   const url = `${PRINCIPAL_URL}/users/${userId}`;
+
+  // ⚠️ Endpoints publics -> nécessitent souvent un Bearer token user
+  if (!authToken) {
+    logger.warn("[Referral] fetchUserFromMain skipped (authToken manquant) pour /users/:id", { userId });
+    return null;
+  }
+
   try {
     const res = await axios.get(url, { headers: buildHeaders(authToken), timeout: 8000 });
     return res.data?.data || null;
@@ -111,19 +158,35 @@ async function fetchUserFromMain(userId, authToken) {
 
 async function patchUserInMain(userId, updates, authToken) {
   if (!PRINCIPAL_URL) return;
+
+  // ⚠️ Endpoints publics -> nécessitent souvent un Bearer token user/admin
+  if (!authToken) {
+    logger.warn("[Referral] patchUserInMain skipped (authToken manquant) pour /users/:id", { userId });
+    return;
+  }
+
   const url = `${PRINCIPAL_URL}/users/${userId}`;
   await axios.patch(url, updates, { headers: buildHeaders(authToken), timeout: 8000 });
 }
 
 async function creditBalanceInMain(userId, amount, currency, description, authToken) {
   if (!PRINCIPAL_URL) return;
-  if (!INTERNAL_TOKEN) throw new Error("INTERNAL_TOKEN manquant");
+  if (!PRINCIPAL_INTERNAL_TOKEN) throw new Error("PRINCIPAL_INTERNAL_TOKEN manquant");
+
   const url = `${PRINCIPAL_URL}/users/${userId}/credit-internal`;
   await axios.post(url, { amount, currency, description }, { headers: buildHeaders(authToken), timeout: 8000 });
 }
 
 async function sendNotificationToMain(userId, title, message, data = {}, authToken) {
   if (!PRINCIPAL_URL) return;
+
+  // Selon ton backend, /notifications peut exiger auth user.
+  // Si c'est interne-only, tu peux le migrer vers une route /internal/notifications.
+  if (!authToken) {
+    logger.warn("[Referral] sendNotificationToMain skipped (authToken manquant) pour /notifications", { userId, title });
+    return;
+  }
+
   const url = `${PRINCIPAL_URL}/notifications`;
   try {
     await axios.post(url, { recipient: userId, title, message, data }, { headers: buildHeaders(authToken), timeout: 8000 });
@@ -149,6 +212,12 @@ function generatePNVReferralCode() {
 }
 
 async function generateAndAssignReferralInMain(senderId, authToken) {
+  // ⚠️ Patch /users/:id => nécessite authToken
+  if (!authToken) {
+    logger.warn("[Referral][legacy] generateAndAssignReferralInMain skipped (authToken manquant)", { senderId });
+    return { ok: false, skipped: true };
+  }
+
   for (let attempt = 0; attempt < 12; attempt++) {
     const newCode = generatePNVReferralCode();
     try {
@@ -196,19 +265,6 @@ async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
   const targetUserId = String(tx?.ownerUserId || tx?.initiatorUserId || senderId || "").trim();
   if (!targetUserId) return;
 
-  // Guard intelligent : skip seulement si confirmCaller est clairement le receiver
-  if (tx?.confirmCallerUserId && String(tx.confirmCallerUserId) === targetUserId) {
-    const receiverId = tx?.receiverUserId || tx?.receiverId || tx?.meta?.receiverId || null;
-    if (receiverId && String(receiverId) === String(tx.confirmCallerUserId)) {
-      logger.warn("[Referral] Guard: confirmCaller is receiver and equals target => SKIP", {
-        targetUserId,
-        confirmCallerUserId: String(tx.confirmCallerUserId),
-        receiverId: String(receiverId),
-      });
-      return;
-    }
-  }
-
   const internal = await postInternal(
     ["/internal/referral/on-transaction-confirm", "/api/v1/internal/referral/on-transaction-confirm"],
     {
@@ -230,8 +286,13 @@ async function checkAndGenerateReferralCodeInMain(senderId, authToken, tx) {
     return;
   }
 
-  // fallback legacy
+  // fallback legacy: seulement si authToken (sinon ça va 401)
   try {
+    if (!authToken) {
+      logger.warn("[Referral][legacy] fallback skipped (authToken manquant)", { targetUserId });
+      return;
+    }
+
     const count = await TransactionModel().countDocuments({
       status: "confirmed",
       $or: [{ ownerUserId: targetUserId }, { initiatorUserId: targetUserId }, { userId: targetUserId }],
@@ -292,8 +353,13 @@ async function processReferralBonusIfEligible(userId, authToken) {
     return;
   }
 
-  // fallback legacy (inchangé)
+  // fallback legacy: nécessite authToken pour lire user/referredBy + notifications
   try {
+    if (!authToken) {
+      logger.warn("[Referral][legacy] bonus fallback skipped (authToken manquant)", { userId });
+      return;
+    }
+
     const filleul = await fetchUserFromMain(userId, authToken);
     if (!filleul) return;
     if (!filleul.referredBy) return;

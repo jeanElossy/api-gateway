@@ -9,14 +9,30 @@ try {
   logger = require('../logger');
 } catch {}
 
-const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || config.internalToken || '';
+// ✅ IMPORTANT: token interne du principal séparé
+const PRINCIPAL_INTERNAL_TOKEN =
+  process.env.PRINCIPAL_INTERNAL_TOKEN ||
+  config.principalInternalToken ||
+  process.env.INTERNAL_TOKEN || // fallback legacy
+  config.internalToken || // fallback legacy (à éviter si différent)
+  '';
+
 const PRINCIPAL_URL = (config.principalUrl || process.env.PRINCIPAL_URL || '').replace(/\/+$/, '');
 
 if (!PRINCIPAL_URL) {
   logger.warn('[Gateway][Referral] PRINCIPAL_URL manquant (config.principalUrl / ENV PRINCIPAL_URL).');
 }
-if (!INTERNAL_TOKEN) {
-  logger.warn('[Gateway][Referral] INTERNAL_TOKEN manquant, les actions referral internes seront ignorées.');
+if (!PRINCIPAL_INTERNAL_TOKEN) {
+  logger.warn(
+    '[Gateway][Referral] PRINCIPAL_INTERNAL_TOKEN manquant (ENV PRINCIPAL_INTERNAL_TOKEN). Les actions referral vers le principal seront ignorées.'
+  );
+} else {
+  // ⚠️ Avertit si on utilise un fallback “legacy”
+  if (!process.env.PRINCIPAL_INTERNAL_TOKEN && !config.principalInternalToken) {
+    logger.warn(
+      '[Gateway][Referral] PRINCIPAL_INTERNAL_TOKEN non défini explicitement. Fallback utilisé (INTERNAL_TOKEN/config.internalToken). Recommandé: définir ENV PRINCIPAL_INTERNAL_TOKEN.'
+    );
+  }
 }
 
 /** Petit helper pour éviter logs trop gros/sensibles */
@@ -41,15 +57,15 @@ function buildHeaders(extra = {}) {
   };
 
   // ✅ n’envoie pas un token vide
-  if (INTERNAL_TOKEN) {
-    base['x-internal-token'] = INTERNAL_TOKEN;
+  if (PRINCIPAL_INTERNAL_TOKEN) {
+    base['x-internal-token'] = PRINCIPAL_INTERNAL_TOKEN;
   }
 
   return base;
 }
 
 async function postWithFallback(paths, payload, requestId) {
-  if (!PRINCIPAL_URL || !INTERNAL_TOKEN) return { ok: false, skipped: true };
+  if (!PRINCIPAL_URL || !PRINCIPAL_INTERNAL_TOKEN) return { ok: false, skipped: true };
 
   for (const p of paths) {
     const url = `${PRINCIPAL_URL}${p}`;
@@ -62,6 +78,7 @@ async function postWithFallback(paths, payload, requestId) {
     } catch (err) {
       const { status, msg } = safeErrMessage(err);
       logger.warn('[Gateway][Referral] call failed', { url, status, message: msg });
+      // Continue fallback path
     }
   }
 
@@ -73,7 +90,7 @@ async function postWithFallback(paths, payload, requestId) {
  * Le principal doit être idempotent (ne pas régénérer si déjà présent).
  */
 async function notifyReferralOnConfirm({ userId, provider, transaction, requestId }) {
-  if (!PRINCIPAL_URL || !INTERNAL_TOKEN) return;
+  if (!PRINCIPAL_URL || !PRINCIPAL_INTERNAL_TOKEN) return;
 
   const txId = transaction?.id ? String(transaction.id) : '';
   const txRef = transaction?.reference ? String(transaction.reference) : '';
@@ -106,7 +123,7 @@ async function notifyReferralOnConfirm({ userId, provider, transaction, requestI
  * ✅ 2) Déclenche bonus (parrain + filleul) une seule fois (idempotence principale côté backend)
  */
 async function awardReferralBonus({ refereeId, triggerTxId, stats, requestId }) {
-  if (!PRINCIPAL_URL || !INTERNAL_TOKEN) return { ok: false, skipped: true };
+  if (!PRINCIPAL_URL || !PRINCIPAL_INTERNAL_TOKEN) return { ok: false, skipped: true };
 
   if (!refereeId || !triggerTxId) {
     logger.warn('[Gateway][Referral] awardReferralBonus payload incomplet', { refereeId, triggerTxId });
