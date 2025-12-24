@@ -1,4 +1,5 @@
 // File: api-gateway/controllers/paymentController.js
+'use strict';
 
 const axios = require('axios');
 const crypto = require('crypto');
@@ -42,6 +43,7 @@ const PROVIDER_TO_ENDPOINT = {
 function safeRequestId(req) {
   return (
     req.headers['x-request-id'] ||
+    req.headers['x-correlation-id'] ||
     (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()))
   );
 }
@@ -53,6 +55,7 @@ function safeRequestId(req) {
 function auditHeaders(req) {
   const incomingAuth =
     req.headers.authorization || req.headers.Authorization || null;
+
   const hasAuth =
     !!incomingAuth &&
     String(incomingAuth).toLowerCase() !== 'bearer null' &&
@@ -99,10 +102,8 @@ function isCloudflareChallengeResponse(response) {
  * Détection du provider à partir du body
  */
 function resolveProviderKey(body = {}) {
-  if (body.provider && PROVIDER_TO_ENDPOINT[body.provider])
-    return body.provider;
-  if (body.destination && PROVIDER_TO_ENDPOINT[body.destination])
-    return body.destination;
+  if (body.provider && PROVIDER_TO_ENDPOINT[body.provider]) return body.provider;
+  if (body.destination && PROVIDER_TO_ENDPOINT[body.destination]) return body.destination;
   return null;
 }
 
@@ -110,22 +111,12 @@ function resolveProviderKey(body = {}) {
  * 🔗 URL de base du backend qui gère les cagnottes
  */
 function getCagnottesBaseUrl() {
-  const base =
-    config.microservices.cagnottes ||
-    config.microservices.paynoval ||
-    '';
+  const base = config.microservices.cagnottes || config.microservices.paynoval || '';
   return base.replace(/\/+$/, '');
 }
 
 /**
  * 🧮 Calcul dynamique des frais côté Gateway
- *
- * - Participation interne cagnotte PayNoval :
- *   provider = "paynoval" && context = "cagnotte"
- *   → 0.5% (0.005) de fee, quelle que soit la devise
- *
- * On ne modifie PAS amount ici, on ajoute juste des champs de fee.
- * Le microservice (api-paynoval) décidera comment répartir (coffre / fee / admin).
  */
 function computeDynamicFees(body = {}) {
   const provider = body.provider || body.destination || null;
@@ -137,7 +128,7 @@ function computeDynamicFees(body = {}) {
   // 🎯 Participation interne cagnotte PayNoval (wallet user → coffre)
   if (provider === 'paynoval' && context === 'cagnotte') {
     const rate = 0.005; // 0.5 %
-    const feeAmount = Math.round(rawAmount * rate * 100) / 100; // 2 décimales
+    const feeAmount = Math.round(rawAmount * rate * 100) / 100;
 
     const currency =
       body.currency ||
@@ -153,7 +144,6 @@ function computeDynamicFees(body = {}) {
     };
   }
 
-  // 👉 Autres cas : pour l’instant pas de fee calculée ici
   return null;
 }
 
@@ -161,31 +151,19 @@ function computeDynamicFees(body = {}) {
  * 🧩 Side-effect : informer le backend Cagnottes qu’un paiement
  * externe pour une cagnotte a été confirmé côté Gateway.
  *
- * ⚠️ NE S’APPLIQUE PAS aux paiements internes PayNoval:
- *    - providerKey === 'paynoval' → ignoré
- *    (c’est api-paynoval qui gère la participation interne + log)
+ * ⚠️ NE S’APPLIQUE PAS aux paiements internes PayNoval
  */
-async function notifyCagnotteExternalContribution(
-  req,
-  providerKey,
-  providerResponse
-) {
+async function notifyCagnotteExternalContribution(req, providerKey, providerResponse) {
   const { context, cagnotteId, cagnotteCode, donorName } = req.body || {};
 
-  // ❌ On ne traite QUE les providers externes (carte, mobilemoney, etc.)
-  if (providerKey === 'paynoval') {
-    return;
-  }
-
-  if (context !== 'cagnotte' || !cagnotteId) {
-    return;
-  }
+  if (providerKey === 'paynoval') return;
+  if (context !== 'cagnotte' || !cagnotteId) return;
 
   const baseUrl = getCagnottesBaseUrl();
   if (!baseUrl) {
-    logger.warn(
-      '[PAYMENT→CAGNOTTE] URL backend cagnottes non configurée (config.microservices.cagnottes ou paynoval)'
-    );
+    logger.warn('[PAYMENT→CAGNOTTE] URL backend cagnottes non configurée', {
+      providerKey,
+    });
     return;
   }
 
@@ -207,7 +185,9 @@ async function notifyCagnotteExternalContribution(
     'Contributeur externe';
 
   const externalRef =
-    providerResponse?.data?.reference || providerResponse?.data?.id || null;
+    providerResponse?.data?.reference ||
+    providerResponse?.data?.id ||
+    null;
 
   const payload = {
     amount,
@@ -225,6 +205,7 @@ async function notifyCagnotteExternalContribution(
         'x-gateway-token': process.env.CAGNOTTE_GATEWAY_TOKEN || '',
       },
     });
+
     logger.info('[PAYMENT→CAGNOTTE] Participation externe notifiée', {
       cagnotteId,
       amount,
@@ -237,7 +218,6 @@ async function notifyCagnotteExternalContribution(
       provider: providerKey,
       error: err.response?.data || err.message,
     });
-    // On NE jette PAS l’erreur : la réponse au client doit rester OK
   }
 }
 
@@ -255,10 +235,8 @@ exports.handlePayment = async (req, res) => {
   }
 
   try {
-    // 🔢 Calcul dynamique des frais côté Gateway (si applicable)
     const dynamicFees = computeDynamicFees(req.body);
 
-    // Body forward → meta nettoyée + éventuels champs de fee
     const forwardBody = {
       ...cleanSensitiveMeta(req.body),
     };
@@ -270,27 +248,30 @@ exports.handlePayment = async (req, res) => {
       forwardBody.gatewayFeeKind = dynamicFees.feeKind;
     }
 
+    // ✅ Timeout dynamique: PayNoval/cagnotte prennent plus de temps (cold start + DB)
+    const isPaynoval = providerKey === 'paynoval';
+    const isCagnotte = String(req.body?.context || '') === 'cagnotte';
+    const timeoutMs = (isPaynoval || isCagnotte) ? 60_000 : 15_000;
+
     const response = await axios.post(targetUrl, forwardBody, {
       headers: auditHeaders(req),
-      timeout: 15000,
+      timeout: timeoutMs,
     });
 
     logger.info(`[PAYMENT→${providerKey}] Paiement réussi`, {
       provider: providerKey,
       amount: req.body.amount,
-      to:
-        req.body.toEmail ||
-        req.body.phoneNumber ||
-        req.body.iban ||
-        req.body.cardNumber,
+      context: req.body.context,
+      targetType: req.body.targetType,
+      targetId: req.body.targetId,
       status: response.status,
       user: req.user?.email || null,
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
       ref: response.data?.reference || response.data?.id || null,
       dynamicFees,
+      timeoutMs,
     });
 
-    // Side-effect cagnotte externe (non bloquant, providers ≠ paynoval)
     try {
       await notifyCagnotteExternalContribution(req, providerKey, response);
     } catch (err) {
@@ -302,13 +283,23 @@ exports.handlePayment = async (req, res) => {
 
     return res.status(response.status).json(response.data);
   } catch (err) {
+    // ✅ Timeout axios (souvent la cause du "vérifier la connexion")
+    if (err.code === 'ECONNABORTED' || String(err.message || '').toLowerCase().includes('timeout')) {
+      logger.error(`[PAYMENT→${providerKey}] Timeout vers microservice`, {
+        provider: providerKey,
+        targetUrl,
+        message: err.message,
+      });
+      return res.status(504).json({
+        error: `Timeout vers le service ${providerKey}. Merci de réessayer.`,
+        details: 'timeout',
+      });
+    }
+
     if (err.response && isCloudflareChallengeResponse(err.response)) {
-      logger.error(
-        `[PAYMENT→${providerKey}] Cloudflare challenge détecté`,
-        {
-          status: err.response.status,
-        }
-      );
+      logger.error(`[PAYMENT→${providerKey}] Cloudflare challenge détecté`, {
+        status: err.response.status,
+      });
       return res.status(503).json({
         error:
           'Service de paiement temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
@@ -337,13 +328,16 @@ exports.handlePayment = async (req, res) => {
             : err.response.data,
         ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
       });
+
       return res.status(status).json({ error: errorMsg });
     }
 
     logger.error(`[PAYMENT→${providerKey}] Axios error: ${err.message}`, {
       provider: providerKey,
+      targetUrl,
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
     });
+
     return res.status(502).json({
       error: `Service ${providerKey} temporairement indisponible.`,
     });
