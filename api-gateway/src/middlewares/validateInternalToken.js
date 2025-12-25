@@ -4,25 +4,34 @@
 const config = require('../config');
 const logger = require('../logger');
 
-// Token partagé entre tes microservices (Gateway, api-paynoval, etc.)
-const INTERNAL_TOKEN = config.internalToken || process.env.INTERNAL_TOKEN;
+// ✅ Supporte plusieurs noms d'env pour éviter les mismatchs entre services
+// - INTERNAL_TOKEN : standard
+// - GATEWAY_INTERNAL_TOKEN : pratique côté services appelants
+const INTERNAL_TOKEN =
+  config.internalToken ||
+  process.env.INTERNAL_TOKEN ||
+  process.env.GATEWAY_INTERNAL_TOKEN;
 
 module.exports = function validateInternalToken(req, res, next) {
   const ip =
     req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
 
   if (!INTERNAL_TOKEN) {
-    logger.warn('[validateInternalToken] INTERNAL_TOKEN non défini dans la config/env', {
-      ip,
-      path: req.originalUrl,
-      method: req.method,
-    });
+    logger.warn(
+      '[validateInternalToken] Token interne manquant (INTERNAL_TOKEN/GATEWAY_INTERNAL_TOKEN)',
+      {
+        ip,
+        path: req.originalUrl,
+        method: req.method,
+      }
+    );
     return res.status(500).json({
       success: false,
       error: 'Configuration interne manquante (INTERNAL_TOKEN).',
     });
   }
 
+  // ✅ Header en minuscules (Node normalise en lower-case)
   const headerToken = req.headers['x-internal-token'];
 
   if (!headerToken) {
@@ -37,7 +46,7 @@ module.exports = function validateInternalToken(req, res, next) {
     });
   }
 
-  if (headerToken !== INTERNAL_TOKEN) {
+  if (String(headerToken) !== String(INTERNAL_TOKEN)) {
     logger.warn('[validateInternalToken] x-internal-token invalide', {
       ip,
       path: req.originalUrl,
@@ -49,6 +58,5 @@ module.exports = function validateInternalToken(req, res, next) {
     });
   }
 
-  // OK, on laisse passer
   return next();
 };
