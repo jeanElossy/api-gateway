@@ -1,4 +1,3 @@
-// File: api-gateway/routes/transactions.js
 'use strict';
 
 const express = require('express');
@@ -32,11 +31,11 @@ function verifyInternalToken(req, res, next) {
   return next();
 }
 
-// GET une transaction
-router.get('/:id', controller.getTransaction);
-
 // LIST toutes les transactions
 router.get('/', controller.listTransactions);
+
+// GET une transaction
+router.get('/:id', controller.getTransaction);
 
 // INITIATE : Validation + AML + proxy
 router.post('/initiate', validateTransaction('initiate'), amlMiddleware, controller.initiateTransaction);

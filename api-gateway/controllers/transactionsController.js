@@ -1,3 +1,9 @@
+
+
+
+
+
+
 // // File: api-gateway/controllers/transactionsController.js
 // 'use strict';
 
@@ -29,11 +35,11 @@
 //  */
 
 // const axios = require('axios');
+// const crypto = require('crypto');
 // const config = require('../src/config');
 // const logger = require('../src/logger');
 // const Transaction = require('../src/models/Transaction');
 // const AMLLog = require('../src/models/AMLLog');
-// const crypto = require('crypto');
 
 // // ⬇️ Service d’email transactionnel centralisé
 // const { notifyTransactionEvent } = require('../src/services/transactionNotificationService');
@@ -917,7 +923,7 @@
 //             provider,
 //             req,
 //             result: {
-//               ...txRecord.toObject(),
+//               ...(txRecord.toObject ? txRecord.toObject() : txRecord),
 //               status: 'canceled',
 //               amount: txRecord.amount,
 //               toEmail: txRecord.toEmail,
@@ -1003,9 +1009,13 @@
 //       ],
 //     };
 
-//     // ✅ résilience: si txRecord existe mais ownerUserId absent => owner = txRecord.userId (expéditeur)
+//     // ✅ résilience: si txRecord existe mais ownerUserId absent => owner = txRecord.userId (expéditeur legacy)
 //     const resilientOwnerUserId =
-//       txRecord?.ownerUserId || txRecord?.initiatorUserId || txRecord?.meta?.ownerUserId || txRecord?.userId || null;
+//       txRecord?.ownerUserId ||
+//       txRecord?.initiatorUserId ||
+//       txRecord?.meta?.ownerUserId ||
+//       txRecord?.userId ||
+//       null;
 
 //     const patch = {
 //       status: newStatus,
@@ -1485,8 +1495,6 @@
 
 
 
-
-// File: api-gateway/controllers/transactionsController.js
 'use strict';
 
 /**
@@ -1656,10 +1664,16 @@ function auditForwardHeaders(req) {
   const reqId = req.headers['x-request-id'] || req.id || safeUUID();
   const userId = getUserId(req) || req.headers['x-user-id'] || '';
 
+  // ✅ IMPORTANT: même fallback token que routes/transactions.js (verifyInternalToken)
+  const internalToken =
+    process.env.GATEWAY_INTERNAL_TOKEN ||
+    process.env.INTERNAL_TOKEN ||
+    config.internalToken ||
+    '';
+
   const headers = {
     Accept: 'application/json',
-    // ⚠️ ok d’envoyer vide aux microservices internes; la route internal côté principal vérifie son token à elle.
-    'x-internal-token': config.internalToken || '',
+    'x-internal-token': internalToken,
     'x-request-id': reqId,
     'x-user-id': userId,
     'x-session-id': req.headers['x-session-id'] || '',
@@ -2000,6 +2014,85 @@ async function triggerGatewayTxEmail(type, { provider, req, result, reference })
   }
 }
 
+// ✅ Extract array de transactions depuis une réponse provider (formats variés)
+function extractTxArrayFromProviderPayload(payload) {
+  const candidates = [
+    payload?.data,
+    payload?.transactions,
+    payload?.data?.transactions,
+    payload?.data?.data,
+    payload?.result,
+    payload?.items,
+  ];
+  for (const c of candidates) {
+    if (Array.isArray(c)) return c;
+  }
+  return [];
+}
+
+// ✅ Ré-injecte la liste merged dans le même format que le provider
+function injectTxArrayIntoProviderPayload(payload, merged) {
+  if (!payload || typeof payload !== 'object') return { success: true, data: merged };
+
+  if (Array.isArray(payload.data)) {
+    payload.data = merged;
+    return payload;
+  }
+  if (Array.isArray(payload.transactions)) {
+    payload.transactions = merged;
+    return payload;
+  }
+  if (payload.data && Array.isArray(payload.data.transactions)) {
+    payload.data.transactions = merged;
+    return payload;
+  }
+  if (payload.data && Array.isArray(payload.data.data)) {
+    payload.data.data = merged;
+    return payload;
+  }
+
+  payload.data = merged;
+  payload.success = payload.success ?? true;
+  return payload;
+}
+
+// ✅ Tri date homogène + dédup (reference/providerTxId/_id)
+function txSortTime(tx) {
+  const d =
+    tx?.confirmedAt ||
+    tx?.completedAt ||
+    tx?.cancelledAt ||
+    tx?.createdAt ||
+    tx?.updatedAt ||
+    null;
+  const t = d ? new Date(d).getTime() : 0;
+  return Number.isFinite(t) ? t : 0;
+}
+
+function buildDedupKey(tx) {
+  const ref = tx?.reference ? String(tx.reference) : '';
+  const ptx = tx?.providerTxId ? String(tx.providerTxId) : '';
+  const id = tx?._id ? String(tx._id) : (tx?.id ? String(tx.id) : '');
+  return ref || ptx || id || JSON.stringify(tx).slice(0, 120);
+}
+
+function mergeAndDedupTx(providerList = [], gatewayList = []) {
+  const map = new Map();
+
+  // provider d'abord
+  for (const tx of providerList) {
+    map.set(buildDedupKey(tx), tx);
+  }
+  for (const tx of gatewayList) {
+    const k = buildDedupKey(tx);
+    if (!map.has(k)) map.set(k, tx);
+  }
+
+  const merged = Array.from(map.values());
+  merged.sort((a, b) => txSortTime(b) - txSortTime(a));
+  return merged;
+}
+
 /* -------------------------------------------------------------------
  *                       CONTROLLER ACTIONS
  * ------------------------------------------------------------------- */
@@ -2054,8 +2147,41 @@ exports.listTransactions = async (req, res) => {
   const provider = resolveProvider(req, 'paynoval');
   const targetService = PROVIDER_TO_SERVICE[provider];
 
+  const userId = getUserId(req);
+  if (!userId) {
+    return res.status(401).json({ success: false, error: 'Non autorisé.' });
+  }
+
+  const gatewayQuery = {
+    provider,
+    $or: [
+      { userId },
+      { ownerUserId: userId },
+      { initiatorUserId: userId },
+      { createdBy: userId },
+      { receiver: userId },
+    ],
+  };
+
+  let gatewayTx = [];
+  try {
+    gatewayTx = await Transaction.find(gatewayQuery)
+      .select('-securityCodeHash -securityQuestion')
+      .sort({ createdAt: -1 })
+      .limit(300)
+      .lean();
+
+    gatewayTx = (gatewayTx || []).map((t) => ({
+      ...t,
+      id: t?._id ? String(t._id) : t?.id,
+    }));
+  } catch (e) {
+    logger.warn('[Gateway][TX] listTransactions: failed to read gateway DB', { message: e?.message });
+    gatewayTx = [];
+  }
+
   if (!targetService) {
-    return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
+    return res.status(200).json({ success: true, data: gatewayTx });
   }
 
   const base = String(targetService).replace(/\/+$/, '');
@@ -2069,13 +2195,20 @@ exports.listTransactions = async (req, res) => {
       params: req.query,
       timeout: 15000,
     });
-    return res.status(response.status).json(response.data);
+
+    const payload = response.data || {};
+    const providerList = extractTxArrayFromProviderPayload(payload);
+
+    const merged = mergeAndDedupTx(providerList, gatewayTx);
+    const finalPayload = injectTxArrayIntoProviderPayload(payload, merged);
+
+    return res.status(response.status).json(finalPayload);
   } catch (err) {
     if (err.isCloudflareChallenge) {
-      return res.status(503).json({
-        success: false,
-        error: 'Service PayNoval temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
-        details: 'cloudflare_challenge',
+      return res.status(200).json({
+        success: true,
+        data: gatewayTx,
+        warning: 'provider_cloudflare_challenge',
       });
     }
 
@@ -2087,11 +2220,12 @@ exports.listTransactions = async (req, res) => {
       'Erreur lors du proxy GET transactions';
 
     if (status === 429) {
-      error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
+      error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants.';
     }
 
-    logger.error('[Gateway][TX] Erreur GET transactions:', { status, error, provider });
-    return res.status(status).json({ success: false, error });
+    logger.error('[Gateway][TX] Erreur GET transactions (fallback gateway DB)', { status, error, provider });
+
+    return res.status(200).json({ success: true, data: gatewayTx, warning: 'provider_unavailable' });
   }
 };
 
@@ -2127,7 +2261,6 @@ exports.initiateTransaction = async (req, res) => {
     });
   }
 
-  // ✅ Stockage hash modernisé (PBKDF2), compat legacy assurée au confirm
   const securityCodeHash = hashSecurityCode(securityCode);
 
   try {
@@ -2141,13 +2274,11 @@ exports.initiateTransaction = async (req, res) => {
 
     const result = response.data || {};
 
-    // ✅ IMPORTANT : capturer les 2 identifiants
     const reference = result.reference || result.transaction?.reference || null;
 
     const providerTxId =
       result.id || result.transactionId || result.transaction?.id || null;
 
-    // fallback si pas de reference
     const finalReference = reference || (providerTxId ? String(providerTxId) : null);
     const statusResult = result.status || 'pending';
 
@@ -2190,8 +2321,6 @@ exports.initiateTransaction = async (req, res) => {
         reference: finalReference || '',
         id: providerTxId ? String(providerTxId) : undefined,
         providerTxId: providerTxId ? String(providerTxId) : undefined,
-
-        // ✅ résilience: stocker le propriétaire ici aussi
         ownerUserId: toIdStr(userId),
         initiatorUserId: toIdStr(userId),
       },
@@ -2213,7 +2342,6 @@ exports.initiateTransaction = async (req, res) => {
       reference: finalReference,
     });
 
-    // Commission admin (providers ≠ paynoval)
     if (targetProvider !== 'paynoval') {
       try {
         const rawFee = (result && (result.fees || result.fee || result.transactionFees)) || null;
@@ -2267,7 +2395,6 @@ exports.initiateTransaction = async (req, res) => {
       error = 'Trop de requêtes vers le service de paiement PayNoval. Merci de patienter quelques instants avant de réessayer.';
     }
 
-    // Log AML + Gateway TX failed
     try {
       await AMLLog.create({
         userId,
@@ -2332,13 +2459,11 @@ exports.confirmTransaction = async (req, res) => {
     return res.status(400).json({ success: false, error: 'Provider (destination) inconnu.' });
   }
 
-  const confirmCallerUserId = getUserId(req); // ⚠️ souvent destinataire
+  const confirmCallerUserId = getUserId(req);
   const now = new Date();
 
-  // ✅ Pré-charge : essayer de retrouver la TX gateway
   let txRecord = await findGatewayTxForConfirm(provider, transactionId, req.body);
 
-  // ✅ Si introuvable, on tente un GET provider pour récupérer la reference et relancer un find
   if (!txRecord && base && transactionId) {
     const ids = await fetchProviderTxIdentifiers({ base, req, providerTxId: transactionId });
     if (ids?.reference || ids?.providerTxId) {
@@ -2359,9 +2484,6 @@ exports.confirmTransaction = async (req, res) => {
     return s || 'confirmed';
   };
 
-  /**
-   * 1) Sécurité côté Gateway (providers ≠ paynoval)
-   */
   if (provider !== 'paynoval') {
     if (!txRecord) {
       return res.status(404).json({ success: false, error: 'Transaction non trouvée dans le Gateway.' });
@@ -2386,7 +2508,6 @@ exports.confirmTransaction = async (req, res) => {
         });
       }
 
-      // ✅ Vérification modernisée + compat legacy + timing-safe
       if (!verifySecurityCode(securityCode, txRecord.securityCodeHash)) {
         const attempts = (txRecord.securityAttempts || 0) + 1;
 
@@ -2428,9 +2549,6 @@ exports.confirmTransaction = async (req, res) => {
     }
   }
 
-  /**
-   * 2) Appel provider + update gateway
-   */
   try {
     const response = await safeAxiosRequest({
       method: 'post',
@@ -2449,7 +2567,6 @@ exports.confirmTransaction = async (req, res) => {
     const idFromResult =
       result.id || result.transaction?.id || result.transactionId || transactionId || null;
 
-    // candidates + quelques valeurs du record si dispo
     const candidates = Array.from(
       new Set(
         [
@@ -2467,7 +2584,6 @@ exports.confirmTransaction = async (req, res) => {
       )
     );
 
-    // AML log confirm
     await AMLLog.create({
       userId: confirmCallerUserId,
       type: 'confirm',
@@ -2491,7 +2607,6 @@ exports.confirmTransaction = async (req, res) => {
       ],
     };
 
-    // ✅ résilience: si txRecord existe mais ownerUserId absent => owner = txRecord.userId (expéditeur legacy)
     const resilientOwnerUserId =
       txRecord?.ownerUserId ||
       txRecord?.initiatorUserId ||
@@ -2527,9 +2642,6 @@ exports.confirmTransaction = async (req, res) => {
       gatewayTx = await Transaction.findOneAndUpdate(query, { $set: patch }, { new: true });
     }
 
-    /**
-     * ✅ Si toujours introuvable, on fait un GET provider pour récupérer reference et re-tenter l’update
-     */
     if (!gatewayTx && base && idFromResult) {
       const ids = await fetchProviderTxIdentifiers({ base, req, providerTxId: idFromResult });
       if (ids?.reference) {
@@ -2556,7 +2668,6 @@ exports.confirmTransaction = async (req, res) => {
       }
     }
 
-    // Emails (si tu veux les garder pour providers ≠ paynoval)
     if (newStatus === 'confirmed') {
       await triggerGatewayTxEmail('confirmed', { provider, req, result, reference: refFromResult || transactionId });
     } else if (newStatus === 'canceled') {
@@ -2565,10 +2676,6 @@ exports.confirmTransaction = async (req, res) => {
       await triggerGatewayTxEmail('failed', { provider, req, result, reference: refFromResult || transactionId });
     }
 
-    /**
-     * 3) PARRAINAGE (SEULEMENT SI CONFIRMÉ)
-     * ✅ STRICTEMENT sur l’EXPÉDITEUR (ownerUserId) — jamais sur confirmCaller
-     */
     if (newStatus === 'confirmed') {
       const referralUserId = resolveReferralOwnerUserId(gatewayTx || txRecord, confirmCallerUserId);
 
@@ -2595,13 +2702,10 @@ exports.confirmTransaction = async (req, res) => {
               ? new Date(gatewayTx?.createdAt || txRecord?.createdAt).toISOString()
               : new Date().toISOString(),
             confirmedAt: new Date().toISOString(),
-
-            // ✅ contexte utile (si tu veux des guards côté utils)
             ownerUserId: toIdStr(referralUserId),
             confirmCallerUserId: confirmCallerUserId ? toIdStr(confirmCallerUserId) : null,
           };
 
-          // A) Best effort via utils (internal endpoints)
           await checkAndGenerateReferralCodeInMain(referralUserId, null, txForReferral);
           await processReferralBonusIfEligible(referralUserId, null);
         } catch (e) {
@@ -2611,7 +2715,6 @@ exports.confirmTransaction = async (req, res) => {
           });
         }
 
-        // B) Route interne principal: ensure code (idempotent)
         try {
           await notifyReferralOnConfirm({
             userId: referralUserId,
@@ -2754,7 +2857,6 @@ exports.cancelTransaction = async (req, res) => {
 
     await triggerGatewayTxEmail('cancelled', { provider, req, result, reference: transactionId });
 
-    // Commission admin (providers ≠ paynoval)
     if (provider !== 'paynoval') {
       try {
         const rawCancellationFee =
