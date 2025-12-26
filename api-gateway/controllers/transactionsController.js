@@ -580,6 +580,29 @@ function injectTxArrayIntoProviderPayload(payload, merged) {
   return payload;
 }
 
+
+function normalizeListMeta(payload, merged, reqQuery = {}) {
+  const out = payload && typeof payload === 'object' ? payload : { success: true };
+
+  const limit = Number(reqQuery.limit ?? out.limit ?? 25);
+  const skip = Number(reqQuery.skip ?? out.skip ?? 0);
+
+  // ✅ On force cohérence UI
+  out.success = out.success ?? true;
+  out.count = merged.length;
+  out.total = merged.length;
+  out.limit = Number.isFinite(limit) ? limit : 25;
+  out.skip = Number.isFinite(skip) ? skip : 0;
+
+  // compat: certains fronts lisent "items" ou "length"
+  out.items = merged.length;
+
+  return out;
+}
+
+
+
+
 // ✅ Tri date homogène + dédup (reference/providerTxId/_id)
 function txSortTime(tx) {
   const d =
@@ -667,14 +690,130 @@ exports.getTransaction = async (req, res) => {
   }
 };
 
+// exports.listTransactions = async (req, res) => {
+//   const provider = resolveProvider(req, 'paynoval');
+//   const targetService = PROVIDER_TO_SERVICE[provider];
+
+//   const userId = getUserId(req);
+//   if (!userId) {
+//     return res.status(401).json({ success: false, error: 'Non autorisé.' });
+//   }
+
+//   const gatewayQuery = {
+//     provider,
+//     $or: [
+//       { userId },
+//       { ownerUserId: userId },
+//       { initiatorUserId: userId },
+//       { createdBy: userId },
+//       { receiver: userId },
+//     ],
+//   };
+
+//   let gatewayTx = [];
+//   try {
+//     gatewayTx = await Transaction.find(gatewayQuery)
+//       .select('-securityCodeHash -securityQuestion')
+//       .sort({ createdAt: -1 })
+//       .limit(300)
+//       .lean();
+
+//     gatewayTx = (gatewayTx || []).map((t) => ({
+//       ...t,
+//       id: t?._id ? String(t._id) : t?.id,
+//     }));
+//   } catch (e) {
+//     logger.warn('[Gateway][TX] listTransactions: failed to read gateway DB', { message: e?.message });
+//     gatewayTx = [];
+//   }
+
+//   if (!targetService) {
+//     return res.status(200).json({ success: true, data: gatewayTx });
+//   }
+
+//   const base = String(targetService).replace(/\/+$/, '');
+//   const url = `${base}/transactions`;
+
+//   try {
+//     const response = await safeAxiosRequest({
+//       method: 'get',
+//       url,
+//       headers: auditForwardHeaders(req),
+//       params: req.query,
+//       timeout: 15000,
+//     });
+
+//     const payload = response.data || {};
+//     const providerList = extractTxArrayFromProviderPayload(payload);
+
+//     const merged = mergeAndDedupTx(providerList, gatewayTx);
+//     const finalPayload = injectTxArrayIntoProviderPayload(payload, merged);
+
+//     return res.status(response.status).json(finalPayload);
+//   } catch (err) {
+//     if (err.isCloudflareChallenge) {
+//       return res.status(200).json({
+//         success: true,
+//         data: gatewayTx,
+//         warning: 'provider_cloudflare_challenge',
+//       });
+//     }
+
+//     const status = err.response?.status || 502;
+//     let error =
+//       err.response?.data?.error ||
+//       err.response?.data?.message ||
+//       (typeof err.response?.data === 'string' ? err.response.data : null) ||
+//       'Erreur lors du proxy GET transactions';
+
+//     if (status === 429) {
+//       error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants.';
+//     }
+
+//     logger.error('[Gateway][TX] Erreur GET transactions (fallback gateway DB)', { status, error, provider });
+
+//     return res.status(200).json({ success: true, data: gatewayTx, warning: 'provider_unavailable' });
+//   }
+// };
+
+
 exports.listTransactions = async (req, res) => {
-  const provider = resolveProvider(req, 'paynoval');
+  const provider = resolveProvider(req, "paynoval");
   const targetService = PROVIDER_TO_SERVICE[provider];
 
   const userId = getUserId(req);
   if (!userId) {
-    return res.status(401).json({ success: false, error: 'Non autorisé.' });
+    return res.status(401).json({ success: false, error: "Non autorisé." });
   }
+
+  // ✅ helpers locaux (évite de toucher le reste du fichier)
+  const toNum = (v, fallback) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  };
+
+  // Normalise meta pagination après merge
+  const normalizeListMeta = (payloadObj, mergedList) => {
+    const out = payloadObj && typeof payloadObj === "object" ? payloadObj : { success: true };
+
+    const limit = toNum(req.query?.limit ?? out.limit, 25);
+    const skip = toNum(req.query?.skip ?? out.skip, 0);
+
+    out.success = out.success ?? true;
+
+    // ✅ cohérence UI
+    out.count = mergedList.length;
+    out.total = mergedList.length;
+
+    // ✅ pagination (approx car on merge)
+    out.limit = limit;
+    out.skip = skip;
+
+    // compat optionnelle si certains écrans lisent "items"
+    out.items = mergedList.length;
+
+    return out;
+  };
 
   const gatewayQuery = {
     provider,
@@ -690,7 +829,7 @@ exports.listTransactions = async (req, res) => {
   let gatewayTx = [];
   try {
     gatewayTx = await Transaction.find(gatewayQuery)
-      .select('-securityCodeHash -securityQuestion')
+      .select("-securityCodeHash -securityQuestion")
       .sort({ createdAt: -1 })
       .limit(300)
       .lean();
@@ -700,20 +839,30 @@ exports.listTransactions = async (req, res) => {
       id: t?._id ? String(t._id) : t?.id,
     }));
   } catch (e) {
-    logger.warn('[Gateway][TX] listTransactions: failed to read gateway DB', { message: e?.message });
+    logger.warn("[Gateway][TX] listTransactions: failed to read gateway DB", {
+      message: e?.message,
+    });
     gatewayTx = [];
   }
 
+  // ✅ si provider absent: on renvoie une forme cohérente
   if (!targetService) {
-    return res.status(200).json({ success: true, data: gatewayTx });
+    return res.status(200).json({
+      success: true,
+      data: gatewayTx,
+      count: gatewayTx.length,
+      total: gatewayTx.length,
+      limit: toNum(req.query?.limit, 25),
+      skip: toNum(req.query?.skip, 0),
+    });
   }
 
-  const base = String(targetService).replace(/\/+$/, '');
+  const base = String(targetService).replace(/\/+$/, "");
   const url = `${base}/transactions`;
 
   try {
     const response = await safeAxiosRequest({
-      method: 'get',
+      method: "get",
       url,
       headers: auditForwardHeaders(req),
       params: req.query,
@@ -724,7 +873,12 @@ exports.listTransactions = async (req, res) => {
     const providerList = extractTxArrayFromProviderPayload(payload);
 
     const merged = mergeAndDedupTx(providerList, gatewayTx);
-    const finalPayload = injectTxArrayIntoProviderPayload(payload, merged);
+
+    // ✅ inject liste merged dans le même format que le provider
+    let finalPayload = injectTxArrayIntoProviderPayload(payload, merged);
+
+    // ✅ FIX: count/total cohérents après merge (ton bug)
+    finalPayload = normalizeListMeta(finalPayload, merged);
 
     return res.status(response.status).json(finalPayload);
   } catch (err) {
@@ -732,7 +886,11 @@ exports.listTransactions = async (req, res) => {
       return res.status(200).json({
         success: true,
         data: gatewayTx,
-        warning: 'provider_cloudflare_challenge',
+        count: gatewayTx.length,
+        total: gatewayTx.length,
+        limit: toNum(req.query?.limit, 25),
+        skip: toNum(req.query?.skip, 0),
+        warning: "provider_cloudflare_challenge",
       });
     }
 
@@ -740,18 +898,35 @@ exports.listTransactions = async (req, res) => {
     let error =
       err.response?.data?.error ||
       err.response?.data?.message ||
-      (typeof err.response?.data === 'string' ? err.response.data : null) ||
-      'Erreur lors du proxy GET transactions';
+      (typeof err.response?.data === "string" ? err.response.data : null) ||
+      "Erreur lors du proxy GET transactions";
 
     if (status === 429) {
-      error = 'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants.';
+      error = "Trop de requêtes vers le service de paiement. Merci de patienter quelques instants.";
     }
 
-    logger.error('[Gateway][TX] Erreur GET transactions (fallback gateway DB)', { status, error, provider });
+    logger.error("[Gateway][TX] Erreur GET transactions (fallback gateway DB)", {
+      status,
+      error,
+      provider,
+    });
 
-    return res.status(200).json({ success: true, data: gatewayTx, warning: 'provider_unavailable' });
+    return res.status(200).json({
+      success: true,
+      data: gatewayTx,
+      count: gatewayTx.length,
+      total: gatewayTx.length,
+      limit: toNum(req.query?.limit, 25),
+      skip: toNum(req.query?.skip, 0),
+      warning: "provider_unavailable",
+    });
   }
 };
+
+
+
+
+
 
 /**
  * POST /transactions/initiate
