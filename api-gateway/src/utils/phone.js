@@ -6,6 +6,8 @@ const COUNTRY_CALLING = {
   ML: '223',
   SN: '221',
   CM: '237',
+  BJ: '229',
+  TG: '228',
 };
 
 const digitsOnly = (s) => String(s || '').replace(/[^\d]/g, '');
@@ -17,23 +19,24 @@ function toE164(phone, country) {
   // Déjà E.164
   if (raw.startsWith('+')) {
     const digits = digitsOnly(raw);
+    // E.164: 7 à 15 digits (hors +)
+    if (digits.length < 7 || digits.length > 15) return { e164: '', digits: '' };
     return { e164: `+${digits}`, digits };
   }
 
-  // Si on a le pays, on construit +<code><digits>
-  const key = String(country || '').toUpperCase();
+  const key = String(country || '').toUpperCase().trim();
   const cc = COUNTRY_CALLING[key];
   const d = digitsOnly(raw);
 
-  // CI: 10 digits (ex 0749490835) => +2250749490835
-  if (cc && d) {
-    const digits = `${cc}${d}`;
-    return { e164: `+${digits}`, digits };
-  }
+  if (!cc || !d) return { e164: '', digits: '' };
 
-  // fallback (pas idéal) : on retourne digits sans +
-  const digits = d;
-  return { e164: digits ? `+${digits}` : '', digits };
+  // Construction +<callingCode><digits>
+  const digits = `${cc}${d}`;
+
+  // E.164: 7 à 15 digits (hors +)
+  if (digits.length < 7 || digits.length > 15) return { e164: '', digits: '' };
+
+  return { e164: `+${digits}`, digits };
 }
 
-module.exports = { digitsOnly, toE164 };
+module.exports = { digitsOnly, toE164, COUNTRY_CALLING };

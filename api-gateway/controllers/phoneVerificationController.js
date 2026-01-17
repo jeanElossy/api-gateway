@@ -3,6 +3,7 @@
 const TrustedDepositNumber = require("../src/models/TrustedDepositNumber");
 const logger = require("../src/logger");
 const { startPhoneVerification, checkPhoneVerification } = require("../src/services/twilioVerify");
+const { toE164 } = require("../src/utils/phone");
 
 // Helpers
 function getUserId(req) {
@@ -13,45 +14,20 @@ function now() {
   return new Date();
 }
 
-function normalizePhoneToE164(rawPhone, country) {
-  const p = String(rawPhone || "").trim().replace(/\s+/g, "");
-  if (!p) return "";
-
-  // déjà E.164
-  if (p.startsWith("+")) return p;
-
-  // fallback simple (tu peux l’améliorer après avec libphonenumber)
-  // CI: +225
-  const c = String(country || "").toUpperCase().trim();
-  const digits = p.replace(/[^\d]/g, "");
-
-  if (c === "CI") {
-    // si l’utilisateur entre 0700000000 ou 700000000
-    if (digits.length === 10) return `+225${digits}`;
-    if (digits.length === 8) return `+2250${digits}`; // certains tapent 8 digits, on tente
-  }
-
-  // Si tu ne sais pas, impose E.164
-  return "";
-}
-
 function isBlocked(doc) {
   if (!doc?.blockedUntil) return false;
-  return doc.blockedUntil > now();
+  return new Date(doc.blockedUntil).getTime() > Date.now();
 }
 
 // Cooldown resend
-const RESEND_COOLDOWN_SECONDS = 30; // comme Djamo (ex: 25s)
+const RESEND_COOLDOWN_SECONDS = 30; // ex: 30s
 const MAX_SENDS_PER_WINDOW = 5;
 const WINDOW_MINUTES = 15;
 
 function canSendOtp(doc) {
   const t = now();
 
-  // bloqué ?
-  if (isBlocked(doc)) {
-    return { ok: false, reason: "blocked" };
-  }
+  if (isBlocked(doc)) return { ok: false, reason: "blocked" };
 
   // cooldown
   if (doc?.lastSentAt) {
@@ -61,9 +37,7 @@ function canSendOtp(doc) {
     }
   }
 
-  // window rate
-  // On fait simple: si doc.updatedAt dans la fenêtre, on limite sentCount
-  // (Tu peux raffiner avec une collection “Attempts” plus tard)
+  // window rate (simple)
   const updatedAt = doc?.updatedAt ? new Date(doc.updatedAt) : null;
   if (updatedAt) {
     const minutes = (t.getTime() - updatedAt.getTime()) / 60000;
@@ -75,27 +49,35 @@ function canSendOtp(doc) {
   return { ok: true };
 }
 
+function normalizePhoneInput(reqBody) {
+  const b = reqBody || {};
+  const phone = b.phoneNumber || b.phone || b.to || "";
+  const country = b.country || "";
+  const channel = b.channel || "sms";
+  return { phone, country, channel };
+}
+
 /**
- * POST /phone-verification/start
- * body: { phoneNumber, country, channel? }
+ * POST /api/v1/phone-verification/start
+ * body: { phoneNumber|phone, country, channel? }
  */
 exports.start = async (req, res) => {
   try {
     const userId = getUserId(req);
     if (!userId) return res.status(401).json({ success: false, error: "Non autorisé." });
 
-    const { phoneNumber, country, channel } = req.body || {};
-    const phoneE164 = normalizePhoneToE164(phoneNumber, country);
+    const { phone, country, channel } = normalizePhoneInput(req.body);
+    const norm = toE164(phone, country);
+    const phoneE164 = norm.e164;
 
     if (!phoneE164) {
       return res.status(400).json({
         success: false,
-        error: "Numéro invalide. Mets le numéro au format international (ex: +2250700000000).",
+        error: "Numéro invalide. Mets le numéro au format international (ex: +2250700000000) ou un numéro local + country.",
         code: "PHONE_INVALID",
       });
     }
 
-    // upsert doc
     let doc = await TrustedDepositNumber.findOne({ userId, phoneE164 });
 
     if (!doc) {
@@ -107,19 +89,13 @@ exports.start = async (req, res) => {
         sentCount: 0,
         blockedUntil: null,
         verifiedAt: null,
-        createdAt: now(),
-        updatedAt: now(),
       });
     }
 
     if (doc.status === "trusted") {
       return res.json({
         success: true,
-        data: {
-          phoneE164,
-          status: "trusted",
-          verifiedAt: doc.verifiedAt,
-        },
+        data: { phoneE164, status: "trusted", verifiedAt: doc.verifiedAt },
         message: "Numéro déjà vérifié.",
       });
     }
@@ -129,18 +105,19 @@ exports.start = async (req, res) => {
       if (okSend.reason === "cooldown") {
         return res.status(429).json({
           success: false,
-          error: `Veuillez patienter avant de renvoyer le code.`,
+          error: "Veuillez patienter avant de renvoyer le code.",
           code: "OTP_COOLDOWN",
           retryIn: okSend.retryIn,
         });
       }
+
       if (okSend.reason === "rate_limit") {
-        // block 15 minutes
-        const blockUntil = new Date(now().getTime() + 15 * 60 * 1000);
+        const blockUntil = new Date(Date.now() + 15 * 60 * 1000);
         await TrustedDepositNumber.updateOne(
           { _id: doc._id },
-          { $set: { status: "blocked", blockedUntil: blockUntil, updatedAt: now() } }
+          { $set: { status: "blocked", blockedUntil: blockUntil } }
         );
+
         return res.status(429).json({
           success: false,
           error: "Trop de tentatives. Réessayez plus tard.",
@@ -148,6 +125,7 @@ exports.start = async (req, res) => {
           blockedUntil: blockUntil.toISOString(),
         });
       }
+
       if (okSend.reason === "blocked") {
         return res.status(429).json({
           success: false,
@@ -158,22 +136,19 @@ exports.start = async (req, res) => {
       }
     }
 
-    // Twilio Verify
+    // ✅ Twilio Verify: envoi OTP
     await startPhoneVerification(phoneE164, channel || "sms");
 
     // update doc
     const t = now();
-    const newCount = (doc.sentCount || 0) + 1;
-
     await TrustedDepositNumber.updateOne(
       { _id: doc._id },
       {
         $set: {
           status: "pending",
           lastSentAt: t,
-          sentCount: newCount,
-          updatedAt: t,
         },
+        $inc: { sentCount: 1 },
       }
     );
 
@@ -184,7 +159,7 @@ exports.start = async (req, res) => {
         status: "pending",
         resendIn: RESEND_COOLDOWN_SECONDS,
       },
-      message: "Code envoyé par SMS.",
+      message: "Code envoyé.",
     });
   } catch (err) {
     logger?.error?.("[PhoneVerification] start error", { message: err?.message });
@@ -196,21 +171,23 @@ exports.start = async (req, res) => {
 };
 
 /**
- * POST /phone-verification/verify
- * body: { phoneNumber, country, code }
+ * POST /api/v1/phone-verification/verify
+ * body: { phoneNumber|phone, country, code }
  */
 exports.verify = async (req, res) => {
   try {
     const userId = getUserId(req);
     if (!userId) return res.status(401).json({ success: false, error: "Non autorisé." });
 
-    const { phoneNumber, country, code } = req.body || {};
-    const phoneE164 = normalizePhoneToE164(phoneNumber, country);
+    const { phone, country } = normalizePhoneInput(req.body);
+    const code = String(req.body?.code || "").trim();
+
+    const phoneE164 = toE164(phone, country).e164;
 
     if (!phoneE164) {
       return res.status(400).json({
         success: false,
-        error: "Numéro invalide. Mets le numéro au format international (ex: +2250700000000).",
+        error: "Numéro invalide. Mets le numéro au format international (ex: +2250700000000) ou un numéro local + country.",
         code: "PHONE_INVALID",
       });
     }
@@ -236,7 +213,7 @@ exports.verify = async (req, res) => {
       });
     }
 
-    const check = await checkPhoneVerification(phoneE164, String(code).trim());
+    const check = await checkPhoneVerification(phoneE164, code);
     const status = String(check?.status || "").toLowerCase(); // approved / pending / canceled...
 
     if (status !== "approved") {
@@ -256,18 +233,13 @@ exports.verify = async (req, res) => {
           status: "trusted",
           verifiedAt: t,
           blockedUntil: null,
-          updatedAt: t,
         },
       }
     );
 
     return res.json({
       success: true,
-      data: {
-        phoneE164,
-        status: "trusted",
-        verifiedAt: t.toISOString(),
-      },
+      data: { phoneE164, status: "trusted", verifiedAt: t.toISOString() },
       message: "Numéro vérifié.",
     });
   } catch (err) {
@@ -280,7 +252,7 @@ exports.verify = async (req, res) => {
 };
 
 /**
- * GET /phone-verification/list
+ * GET /api/v1/phone-verification/list
  * Optionnel : liste des numéros trusted
  */
 exports.list = async (req, res) => {

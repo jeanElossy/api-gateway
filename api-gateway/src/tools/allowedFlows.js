@@ -8,6 +8,8 @@
 //  * - provider : provider technique à router dans le backend (ex : "mobilemoney", "bank"…)
 //  */
 
+
+
 // module.exports = [
 //   // Wallet PayNoval → Mobile Money (envoi)
 //   { funds: 'paynoval', destination: 'mobilemoney', action: 'send', provider: 'mobilemoney' },

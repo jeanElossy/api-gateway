@@ -17,7 +17,7 @@ const PhoneVerificationSchema = new mongoose.Schema({
 
   channel: { type: String, enum: ['sms', 'whatsapp', 'call', 'email'], default: 'sms' },
 
-  // Twilio Verify info
+  // Twilio Verify info (optionnel)
   verificationSid: { type: String },
   status: { type: String, enum: ['pending', 'verified', 'expired'], default: 'pending', index: true },
 
