@@ -1,8 +1,8 @@
 "use strict";
 
-const TrustedDepositNumber = require("../models/TrustedDepositNumber");
+const TrustedDepositNumber = require("../src/models/TrustedDepositNumber");
 const logger = require("../logger");
-const { startPhoneVerification, checkPhoneVerification } = require("../services/twilioVerify");
+const { startPhoneVerification, checkPhoneVerification } = require("../src/services/twilioVerify");
 
 // Helpers
 function getUserId(req) {

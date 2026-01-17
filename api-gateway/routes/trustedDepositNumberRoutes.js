@@ -3,9 +3,9 @@
 const express = require('express');
 const router = express.Router();
 
-const TrustedDepositNumber = require('../models/TrustedDepositNumber');
+const TrustedDepositNumber = require('../src/models/TrustedDepositNumber');
 
-const requireAuth = require('../middlewares/requireAuth'); // adapte
+const requireAuth = require('../src/middlewares/requireAuth'); // adapte
 
 function getUserId(req) {
   return req?.user?.id || req?.user?._id || req?.auth?.userId || null;
