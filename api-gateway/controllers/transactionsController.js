@@ -2144,7 +2144,8 @@
 const axios = require("axios");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
-const { LRUCache } = require("lru-cache");
+
+const LRU = require("lru-cache");
 
 /* ------------------------ Safe require (paths robustes) ------------------------ */
 function reqAny(paths) {
@@ -2914,12 +2915,29 @@ function mergeAndDedupTx(providerList = [], gatewayList = []) {
 // -------------------------------------------------------------------
 
 
+
+
+// TTL cache list transactions (anti-spam)
 const LIST_TX_CACHE_TTL_MS = (() => {
   const n = Number(process.env.LIST_TX_CACHE_TTL_MS || 8000); // 8s défaut
   return Number.isFinite(n) && n >= 1000 ? n : 8000;
 })();
 
-const _listTxCache = new Map(); // key -> { expiresAt, value? {status, body}, promise? }
+const LIST_TX_CACHE_MAX = (() => {
+  const n = Number(process.env.LIST_TX_CACHE_MAX || 500); // 500 clés max
+  return Number.isFinite(n) && n >= 50 ? n : 500;
+})();
+
+// ✅ 2 caches: 1 pour résultat, 1 pour in-flight promise (dédup)
+const listTxCache = new LRU({
+  max: LIST_TX_CACHE_MAX,
+  ttl: LIST_TX_CACHE_TTL_MS,
+});
+
+const listTxInflight = new LRU({
+  max: LIST_TX_CACHE_MAX,
+  ttl: LIST_TX_CACHE_TTL_MS,
+});
 
 function _stableQueryString(obj = {}) {
   try {
@@ -2943,24 +2961,6 @@ function _stableQueryString(obj = {}) {
 function _listTxCacheKey({ userId, provider, query }) {
   const qs = _stableQueryString(query || {});
   return `u:${String(userId)}|p:${String(provider)}|q:${qs}`;
-}
-
-function _cacheGet(key) {
-  const e = _listTxCache.get(key);
-  if (!e) return null;
-  if (!e.expiresAt || e.expiresAt <= Date.now()) {
-    _listTxCache.delete(key);
-    return null;
-  }
-  return e;
-}
-
-function _cacheSetPromise(key, promise) {
-  _listTxCache.set(key, { expiresAt: Date.now() + LIST_TX_CACHE_TTL_MS, promise });
-}
-
-function _cacheSetValue(key, value) {
-  _listTxCache.set(key, { expiresAt: Date.now() + LIST_TX_CACHE_TTL_MS, value });
 }
 
 
@@ -3016,151 +3016,6 @@ exports.getTransaction = async (req, res) => {
 
 
 
-
-// exports.listTransactions = async (req, res) => {
-//   const provider = resolveProvider(req, "paynoval");
-//   const targetService = PROVIDER_TO_SERVICE[provider];
-
-//   const userId = getUserId(req);
-//   if (!userId) {
-//     return res.status(401).json({ success: false, error: "Non autorisé." });
-//   }
-
-//   const toNum = (v, fallback) => {
-//     const n = Number(v);
-//     return Number.isFinite(n) ? n : fallback;
-//   };
-
-//   const normalizeListMeta = (payloadObj, mergedList) => {
-//     const out = payloadObj && typeof payloadObj === "object" ? payloadObj : { success: true };
-//     const limit = toNum(req.query?.limit ?? out.limit, 25);
-//     const skip = toNum(req.query?.skip ?? out.skip, 0);
-
-//     out.success = out.success ?? true;
-//     out.count = mergedList.length;
-//     out.total = mergedList.length;
-//     out.limit = limit;
-//     out.skip = skip;
-//     out.items = mergedList.length;
-
-//     return out;
-//   };
-
-//   // ✅ Gateway DB always available
-//   const gatewayQuery = {
-//     provider,
-//     $or: [{ userId }, { ownerUserId: userId }, { initiatorUserId: userId }, { createdBy: userId }, { receiver: userId }],
-//   };
-
-//   let gatewayTx = [];
-//   try {
-//     gatewayTx = await Transaction.find(gatewayQuery)
-//       .select("-securityCodeHash -securityQuestion")
-//       .sort({ createdAt: -1 })
-//       .limit(300)
-//       .lean();
-
-//     gatewayTx = (gatewayTx || []).map((t) => ({
-//       ...t,
-//       id: t?._id ? String(t._id) : t?.id,
-//     }));
-//   } catch (e) {
-//     logger.warn("[Gateway][TX] listTransactions: failed to read gateway DB", { message: e?.message });
-//     gatewayTx = [];
-//   }
-
-//   // Pas de provider service => return DB only
-//   if (!targetService) {
-//     return res.status(200).json({
-//       success: true,
-//       data: gatewayTx,
-//       count: gatewayTx.length,
-//       total: gatewayTx.length,
-//       limit: toNum(req.query?.limit, 25),
-//       skip: toNum(req.query?.skip, 0),
-//       warning: "no_provider_service",
-//     });
-//   }
-
-//   const base = String(targetService).replace(/\/+$/, "");
-//   const url = `${base}/transactions`;
-
-//   // ✅ Si cooldown actif => on skip provider direct
-//   const cdBefore = getProviderCooldown(url);
-//   if (cdBefore) {
-//     return res.status(200).json({
-//       success: true,
-//       data: gatewayTx,
-//       count: gatewayTx.length,
-//       total: gatewayTx.length,
-//       limit: toNum(req.query?.limit, 25),
-//       skip: toNum(req.query?.skip, 0),
-//       warning: "provider_cooldown",
-//       retryAfterSec: cdBefore.retryAfterSec,
-//     });
-//   }
-
-//   try {
-//     const response = await safeAxiosRequest({
-//       method: "get",
-//       url,
-//       headers: auditForwardHeaders(req),
-//       params: req.query,
-//       timeout: 15000,
-//     });
-
-//     const payload = response.data || {};
-//     const providerList = extractTxArrayFromProviderPayload(payload);
-
-//     const merged = mergeAndDedupTx(providerList, gatewayTx);
-
-//     let finalPayload = injectTxArrayIntoProviderPayload(payload, merged);
-//     finalPayload = normalizeListMeta(finalPayload, merged);
-
-//     return res.status(response.status).json(finalPayload);
-//   } catch (err) {
-//     if (err.isProviderCooldown || err.isCloudflareChallenge) {
-//       const cd = err.cooldown || getProviderCooldown(url);
-//       return res.status(200).json({
-//         success: true,
-//         data: gatewayTx,
-//         count: gatewayTx.length,
-//         total: gatewayTx.length,
-//         limit: toNum(req.query?.limit, 25),
-//         skip: toNum(req.query?.skip, 0),
-//         warning: err.isCloudflareChallenge ? "provider_cloudflare_challenge" : "provider_cooldown",
-//         retryAfterSec: cd?.retryAfterSec,
-//       });
-//     }
-
-//     const status = err.response?.status || 502;
-//     let error =
-//       err.response?.data?.error ||
-//       err.response?.data?.message ||
-//       (typeof err.response?.data === "string" ? err.response.data : null) ||
-//       "Erreur lors du proxy GET transactions";
-
-//     if (status === 429) {
-//       error = "Trop de requêtes vers le service de paiement. Merci de patienter quelques instants.";
-//     }
-
-//     logger.error("[Gateway][TX] Erreur GET transactions (fallback gateway DB)", { status, error, provider });
-
-//     return res.status(200).json({
-//       success: true,
-//       data: gatewayTx,
-//       count: gatewayTx.length,
-//       total: gatewayTx.length,
-//       limit: toNum(req.query?.limit, 25),
-//       skip: toNum(req.query?.skip, 0),
-//       warning: "provider_unavailable",
-//     });
-//   }
-// };
-
-
-
-
 exports.listTransactions = async (req, res) => {
   const provider = resolveProvider(req, "paynoval");
   const targetService = PROVIDER_TO_SERVICE[provider];
@@ -3170,23 +3025,30 @@ exports.listTransactions = async (req, res) => {
     return res.status(401).json({ success: false, error: "Non autorisé." });
   }
 
-  // ✅ clé cache par user + provider + query
+  // ✅ évite 304 et cache HTTP côté client
+  try {
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, private");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
+  } catch {}
+
   const cacheKey = _listTxCacheKey({ userId, provider, query: req.query });
 
-  // 1) cache HIT (value)
-  const hit = _cacheGet(cacheKey);
-  if (hit?.value) {
-    return res.status(hit.value.status).json(hit.value.body);
+  // 1) cache HIT (valeur)
+  const cached = listTxCache.get(cacheKey);
+  if (cached && cached.body) {
+    return res.status(cached.status || 200).json(cached.body);
   }
 
-  // 2) in-flight (promise) -> attendre le même résultat
-  if (hit?.promise) {
+  // 2) in-flight (promise) => dédup (une seule requête réelle)
+  const inflight = listTxInflight.get(cacheKey);
+  if (inflight && typeof inflight.then === "function") {
     try {
-      const out = await hit.promise;
-      return res.status(out.status).json(out.body);
+      const out = await inflight;
+      return res.status(out.status || 200).json(out.body);
     } catch {
-      // si promise a crash, on continue en recalcul
-      _listTxCache.delete(cacheKey);
+      listTxInflight.delete(cacheKey);
+      // continue
     }
   }
 
@@ -3214,7 +3076,13 @@ exports.listTransactions = async (req, res) => {
     // ✅ Gateway DB always available
     const gatewayQuery = {
       provider,
-      $or: [{ userId }, { ownerUserId: userId }, { initiatorUserId: userId }, { createdBy: userId }, { receiver: userId }],
+      $or: [
+        { userId },
+        { ownerUserId: userId },
+        { initiatorUserId: userId },
+        { createdBy: userId },
+        { receiver: userId },
+      ],
     };
 
     let gatewayTx = [];
@@ -3282,13 +3150,13 @@ exports.listTransactions = async (req, res) => {
 
       const payload = response.data || {};
       const providerList = extractTxArrayFromProviderPayload(payload);
-
       const merged = mergeAndDedupTx(providerList, gatewayTx);
 
       let finalPayload = injectTxArrayIntoProviderPayload(payload, merged);
       finalPayload = normalizeListMeta(finalPayload, merged);
 
-      return { status: response.status, body: finalPayload };
+      // ✅ force 200 pour éviter 304 body vide (mobile)
+      return { status: 200, body: finalPayload };
     } catch (err) {
       if (err.isProviderCooldown || err.isCloudflareChallenge) {
         const cd = err.cooldown || getProviderCooldown(url);
@@ -3335,23 +3203,28 @@ exports.listTransactions = async (req, res) => {
     }
   };
 
-  // ✅ Anti-spam : une seule exécution pour les requêtes identiques (in-flight)
+  // ✅ dédup in-flight
   const promise = (async () => {
-    try {
-      const out = await compute();
-      _cacheSetValue(cacheKey, out); // cache résultat
-      return out;
-    } catch (e) {
-      _listTxCache.delete(cacheKey); // pas de cache en cas de crash inattendu
-      throw e;
-    }
+    const out = await compute();
+    listTxCache.set(cacheKey, out);
+    return out;
   })();
 
-  _cacheSetPromise(cacheKey, promise);
+  listTxInflight.set(cacheKey, promise);
 
-  const out = await promise;
-  return res.status(out.status).json(out.body);
+  try {
+    const out = await promise;
+    return res.status(out.status || 200).json(out.body);
+  } catch (e) {
+    listTxCache.delete(cacheKey);
+    return res.status(500).json({ success: false, error: "Erreur interne (listTransactions)." });
+  } finally {
+    listTxInflight.delete(cacheKey);
+  }
 };
+
+
+
 
 
 
