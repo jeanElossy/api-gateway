@@ -2145,7 +2145,8 @@ const axios = require("axios");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 
-const LRU = require("lru-cache");
+const { LRUCache } = require("lru-cache");
+
 
 /* ------------------------ Safe require (paths robustes) ------------------------ */
 function reqAny(paths) {
@@ -2187,7 +2188,7 @@ const { notifyReferralOnConfirm } = reqAny([
  * ------------------------------------------------------------------- */
 const FAIL_COOLDOWN_MS = Number(process.env.PROVIDER_FAIL_COOLDOWN_MS || 5 * 60 * 1000); // 5min
 const FAIL_CACHE_MAX = Number(process.env.PROVIDER_FAIL_CACHE_MAX || 200);
-const providerFail = new LRU({ max: FAIL_CACHE_MAX, ttl: FAIL_COOLDOWN_MS });
+const providerFail = new LRUCache({ max: FAIL_CACHE_MAX, ttl: FAIL_COOLDOWN_MS });
 
 function getServiceKeyFromUrl(url) {
   try {
@@ -2929,15 +2930,8 @@ const LIST_TX_CACHE_MAX = (() => {
 })();
 
 // ✅ 2 caches: 1 pour résultat, 1 pour in-flight promise (dédup)
-const listTxCache = new LRU({
-  max: LIST_TX_CACHE_MAX,
-  ttl: LIST_TX_CACHE_TTL_MS,
-});
-
-const listTxInflight = new LRU({
-  max: LIST_TX_CACHE_MAX,
-  ttl: LIST_TX_CACHE_TTL_MS,
-});
+const listTxCache = new LRUCache({ max: LIST_TX_CACHE_MAX, ttl: LIST_TX_CACHE_TTL_MS });
+const listTxInflight = new LRUCache({ max: LIST_TX_CACHE_MAX, ttl: LIST_TX_CACHE_TTL_MS });
 
 function _stableQueryString(obj = {}) {
   try {
