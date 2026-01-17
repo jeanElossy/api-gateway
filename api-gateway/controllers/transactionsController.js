@@ -2187,7 +2187,7 @@ const { notifyReferralOnConfirm } = reqAny([
  * ------------------------------------------------------------------- */
 const FAIL_COOLDOWN_MS = Number(process.env.PROVIDER_FAIL_COOLDOWN_MS || 5 * 60 * 1000); // 5min
 const FAIL_CACHE_MAX = Number(process.env.PROVIDER_FAIL_CACHE_MAX || 200);
-const providerFail = new LRUCache({ max: FAIL_CACHE_MAX, ttl: FAIL_COOLDOWN_MS });
+const providerFail = new LRU({ max: FAIL_CACHE_MAX, ttl: FAIL_COOLDOWN_MS });
 
 function getServiceKeyFromUrl(url) {
   try {
