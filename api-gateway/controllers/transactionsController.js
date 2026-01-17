@@ -1950,6 +1950,8 @@ const COUNTRY_DIAL = {
   TG: { dial: "+228", localMin: 8, localMax: 8 },
 };
 
+
+
 function digitsOnly(v) {
   return String(v || "").replace(/[^\d]/g, "");
 }
@@ -1958,41 +1960,33 @@ function normalizePhoneE164(rawPhone, country) {
   const raw = String(rawPhone || "").trim().replace(/\s+/g, "");
   if (!raw) return "";
 
-  // déjà E.164
   if (raw.startsWith("+")) {
     const d = "+" + digitsOnly(raw);
-    // E.164 typique 7-15 digits
     if (d.length < 8 || d.length > 16) return "";
     return d;
   }
 
-  // sinon: digits + dial selon pays
   const c = String(country || "").toUpperCase().trim();
   const cfg = COUNTRY_DIAL[c];
-  if (!cfg) return ""; // on force E.164 si pays non supporté
+  if (!cfg) return "";
 
   const d = digitsOnly(raw);
   if (!d) return "";
 
-  // Accept local lengths dans une plage raisonnable
   if (d.length < cfg.localMin || d.length > cfg.localMax) return "";
-
   return cfg.dial + d;
 }
 
 function pickUserPrimaryPhoneE164(user, countryFallback) {
   if (!user) return "";
 
-  // priorités: phone (dans ton User principal), phoneE164 si tu l’as, puis mobiles[].e164
   const direct =
     user.phoneE164 || user.phoneNumber || user.phone || user.mobile || "";
 
-  // si direct déjà E.164 → normalizePhoneE164 va le garder
   const ctry = user.country || countryFallback || "";
   let e164 = normalizePhoneE164(direct, ctry);
   if (e164) return e164;
 
-  // fallback: mobiles array (si présent)
   if (Array.isArray(user.mobiles)) {
     const mm = user.mobiles.find((m) => m && (m.e164 || m.numero));
     if (mm) {
@@ -2003,6 +1997,56 @@ function pickUserPrimaryPhoneE164(user, countryFallback) {
 
   return "";
 }
+
+// ---- helper: base url (pour appeler /api/v1/phone-verification/status)
+function getBaseUrlFromReq(req) {
+  const envBase =
+    process.env.GATEWAY_URL ||
+    process.env.APP_BASE_URL ||
+    process.env.GATEWAY_BASE_URL ||
+    "";
+  if (envBase) return String(envBase).replace(/\/+$/, "");
+
+  const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https")
+    .split(",")[0]
+    .trim();
+  const host = String(req.headers["x-forwarded-host"] || req.get("host") || "")
+    .split(",")[0]
+    .trim();
+  if (!host) return "";
+  return `${proto}://${host}`.replace(/\/+$/, "");
+}
+
+async function fetchOtpStatus({ req, phoneE164, country }) {
+  // ✅ On suit ta demande : utilise /api/v1/phone-verification/status
+  const base = getBaseUrlFromReq(req);
+  if (!base) return { ok: false, trusted: false, status: "unknown" };
+
+  const url = `${base}/api/v1/phone-verification/status`;
+
+  try {
+    const r = await safeAxiosRequest({
+      method: "get",
+      url,
+      params: { phoneNumber: phoneE164, country },
+      headers: auditForwardHeaders(req),
+      timeout: 8000,
+    });
+
+    const payload = r?.data || {};
+    const data = payload?.data || payload;
+
+    const status = String(data?.status || "none").toLowerCase();
+    const trusted = !!data?.trusted || status === "trusted";
+
+    return { ok: true, trusted, status, data };
+  } catch (e) {
+    logger?.warn?.("[Gateway][OTP] status call failed", { message: e?.message });
+    return { ok: false, trusted: false, status: "unknown" };
+  }
+}
+
+
 
 
 
@@ -2963,8 +3007,11 @@ exports.listTransactions = async (req, res) => {
  * OTP (PayNoval): dépôt MobileMoney -> PayNoval sur numéro différent
  * => autorisé uniquement si numéro "trusted" (OTP validé)
  */
+
+/**
+ * POST /transactions/initiate
+ */
 exports.initiateTransaction = async (req, res) => {
-  // ✅ ProviderSelected vient du middleware (sinon fallback compute)
   const actionTx = String(req.body?.action || "send").toLowerCase();
   const funds = req.body?.funds;
   const destination = req.body?.destination;
@@ -2991,8 +3038,7 @@ exports.initiateTransaction = async (req, res) => {
       .json({ success: false, error: "Non autorisé (utilisateur manquant)." });
   }
 
-  // ✅ Guard: dépôt MobileMoney -> PayNoval sur un numéro différent
-  // On autorise seulement si le numéro est "trusted" (OTP validé).
+  // ✅ Guard OTP : dépôt MobileMoney -> PayNoval sur un numéro différent
   try {
     const actionNorm = String(req.body?.action || "send").toLowerCase();
     const fundsNorm = String(req.body?.funds || "").toLowerCase();
@@ -3019,47 +3065,95 @@ exports.initiateTransaction = async (req, res) => {
         });
       }
 
-      // Si le user a le même numéro comme téléphone principal => on autorise sans trusted
+      // Même numéro que le user => OK sans trusted
       const userPhoneE164 = pickUserPrimaryPhoneE164(req.user, country);
       const isSameAsUser =
         userPhoneE164 && String(userPhoneE164) === String(phoneE164);
 
       if (!isSameAsUser) {
-        const trusted = await TrustedDepositNumber.findOne({
+        // 1) DB trusted
+        const trustedDoc = await TrustedDepositNumber.findOne({
           userId,
           phoneE164,
           status: "trusted",
         }).lean();
 
-        if (!trusted) {
-          return res.status(403).json({
-            success: false,
-            error:
-              "Ce numéro n’est pas vérifié. Vérifie d’abord le numéro par SMS avant de déposer.",
-            code: "PHONE_NOT_TRUSTED",
-            nextStep: {
-              start: "/api/v1/phone-verification/start",
-              verify: "/api/v1/phone-verification/verify",
-              phoneNumber: phoneE164,
-              country,
-            },
-          });
+        if (!trustedDoc) {
+          // 2) ✅ status API (ta demande)
+          const st = await fetchOtpStatus({ req, phoneE164, country });
+
+          // si status dit trusted => on laisse passer (optionnel: upsert)
+          if (st?.trusted) {
+            try {
+              await TrustedDepositNumber.updateOne(
+                { userId, phoneE164 },
+                {
+                  $set: {
+                    userId,
+                    phoneE164,
+                    status: "trusted",
+                    verifiedAt: new Date(),
+                    updatedAt: new Date(),
+                  },
+                  $setOnInsert: { createdAt: new Date() },
+                },
+                { upsert: true }
+              );
+            } catch {}
+          } else {
+            // ✅ pending => NE PAS relancer start
+            if (String(st?.status || "").toLowerCase() === "pending") {
+              return res.status(403).json({
+                success: false,
+                error:
+                  "Vérification SMS déjà en cours pour ce numéro. Entre le code reçu (ne relance pas l’OTP).",
+                code: "PHONE_VERIFICATION_PENDING",
+                otpStatus: { status: "pending", skipStart: true },
+                nextStep: {
+                  status: "/api/v1/phone-verification/status",
+                  start: "/api/v1/phone-verification/start",
+                  verify: "/api/v1/phone-verification/verify",
+                  phoneNumber: phoneE164,
+                  country,
+                  skipStart: true,
+                },
+              });
+            }
+
+            // none/unknown => il faut start
+            return res.status(403).json({
+              success: false,
+              error:
+                "Ce numéro n’est pas vérifié. Vérifie d’abord le numéro par SMS avant de déposer.",
+              code: "PHONE_NOT_TRUSTED",
+              otpStatus: { status: st?.status || "none", skipStart: false },
+              nextStep: {
+                status: "/api/v1/phone-verification/status",
+                start: "/api/v1/phone-verification/start",
+                verify: "/api/v1/phone-verification/verify",
+                phoneNumber: phoneE164,
+                country,
+                skipStart: false,
+              },
+            });
+          }
         }
       }
 
-      // ✅ on réécrit proprement le numéro vers le provider (E.164)
+      // ✅ réécriture E.164 vers provider
       req.body.phoneNumber = phoneE164;
     }
   } catch (e) {
-    logger.warn("[Gateway][OTP] trusted check failed", { message: e?.message });
-    return res
-      .status(500)
-      .json({ success: false, error: "Erreur vérification numéro." });
+    logger?.warn?.("[Gateway][OTP] trusted check failed", { message: e?.message });
+    return res.status(500).json({
+      success: false,
+      error: "Erreur vérification numéro.",
+    });
   }
 
   const now = new Date();
 
-  // ✅ sécurité (soft, sans casser deposit)
+  // ✅ sécurité
   const securityQuestion = (req.body.securityQuestion || req.body.question || "").trim();
   const securityCode = (req.body.securityCode || "").trim();
 
@@ -3069,12 +3163,9 @@ exports.initiateTransaction = async (req, res) => {
     !!securityCode;
 
   const requiresSecurityValidation = !!shouldUseSecurity;
-  const securityCodeHash = shouldUseSecurity
-    ? hashSecurityCode(securityCode)
-    : undefined;
+  const securityCodeHash = shouldUseSecurity ? hashSecurityCode(securityCode) : undefined;
 
   try {
-    // ✅ On forward le body normalisé
     const response = await safeAxiosRequest({
       method: "post",
       url: targetUrl,
@@ -3105,29 +3196,29 @@ exports.initiateTransaction = async (req, res) => {
     });
 
     await Transaction.create({
-      userId, // legacy
+      userId,
       ownerUserId: userId,
       initiatorUserId: userId,
-
       provider: providerSelected,
 
-      // ✅ stockage flow
       action: actionTx,
       funds: req.body.funds,
       destination: req.body.destination,
-      providerSelected: providerSelected,
+      providerSelected,
 
       amount: Number(req.body.amount),
-
       status: statusResult,
+
       toEmail: req.body.toEmail || undefined,
       toIBAN: req.body.iban || undefined,
       toPhone: req.body.phoneNumber || undefined,
+
       currency:
         req.body.currency ||
         req.body.senderCurrencySymbol ||
         req.body.localCurrencySymbol ||
         undefined,
+
       operator: req.body.operator || undefined,
       country: req.body.country || undefined,
 
@@ -3141,12 +3232,10 @@ exports.initiateTransaction = async (req, res) => {
         providerTxId: providerTxId ? String(providerTxId) : undefined,
         ownerUserId: toIdStr(userId),
         initiatorUserId: toIdStr(userId),
-
-        // ✅ traces flow
         action: actionTx,
         funds: req.body.funds,
         destination: req.body.destination,
-        providerSelected: providerSelected,
+        providerSelected,
       },
 
       createdAt: now,
@@ -3169,8 +3258,7 @@ exports.initiateTransaction = async (req, res) => {
     if (providerSelected !== "paynoval") {
       try {
         const rawFee =
-          (result && (result.fees || result.fee || result.transactionFees)) ||
-          null;
+          (result && (result.fees || result.fee || result.transactionFees)) || null;
         if (rawFee) {
           const feeAmount = parseFloat(rawFee);
           if (!Number.isNaN(feeAmount) && feeAmount > 0) {
@@ -3192,7 +3280,7 @@ exports.initiateTransaction = async (req, res) => {
           }
         }
       } catch (e) {
-        logger.error("[Gateway][Fees] Erreur crédit admin (initiate)", {
+        logger?.error?.("[Gateway][Fees] Erreur crédit admin (initiate)", {
           provider: providerSelected,
           message: e.message,
         });
@@ -3240,27 +3328,29 @@ exports.initiateTransaction = async (req, res) => {
         userId,
         ownerUserId: userId,
         initiatorUserId: userId,
-
         provider: providerSelected,
 
-        // flow traces
         action: actionTx,
         funds: req.body.funds,
         destination: req.body.destination,
-        providerSelected: providerSelected,
+        providerSelected,
 
         amount: req.body.amount,
         status: "failed",
+
         toEmail: req.body.toEmail || undefined,
         toIBAN: req.body.iban || undefined,
         toPhone: req.body.phoneNumber || undefined,
+
         currency:
           req.body.currency ||
           req.body.senderCurrencySymbol ||
           req.body.localCurrencySymbol ||
           undefined,
+
         operator: req.body.operator || undefined,
         country: req.body.country || undefined,
+
         reference: null,
         meta: {
           ...cleanSensitiveMeta({ ...req.body, error }),
@@ -3269,21 +3359,23 @@ exports.initiateTransaction = async (req, res) => {
           action: actionTx,
           funds: req.body.funds,
           destination: req.body.destination,
-          providerSelected: providerSelected,
+          providerSelected,
         },
         createdAt: now,
         updatedAt: now,
       });
     } catch {}
 
-    logger.error("[Gateway][TX] initiateTransaction failed", {
+    logger?.error?.("[Gateway][TX] initiateTransaction failed", {
       provider: providerSelected,
       error,
       status,
     });
+
     return res.status(status).json({ success: false, error });
   }
 };
+
 
 
 

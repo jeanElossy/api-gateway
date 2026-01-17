@@ -2,7 +2,10 @@
 
 const TrustedDepositNumber = require("../src/models/TrustedDepositNumber");
 const logger = require("../src/logger");
-const { startPhoneVerification, checkPhoneVerification } = require("../src/services/twilioVerify");
+const {
+  startPhoneVerification,
+  checkPhoneVerification,
+} = require("../src/services/twilioVerify");
 const { toE164 } = require("../src/utils/phone");
 
 // Helpers
@@ -31,9 +34,15 @@ function canSendOtp(doc) {
 
   // cooldown
   if (doc?.lastSentAt) {
-    const seconds = Math.floor((t.getTime() - new Date(doc.lastSentAt).getTime()) / 1000);
+    const seconds = Math.floor(
+      (t.getTime() - new Date(doc.lastSentAt).getTime()) / 1000
+    );
     if (seconds < RESEND_COOLDOWN_SECONDS) {
-      return { ok: false, reason: "cooldown", retryIn: RESEND_COOLDOWN_SECONDS - seconds };
+      return {
+        ok: false,
+        reason: "cooldown",
+        retryIn: RESEND_COOLDOWN_SECONDS - seconds,
+      };
     }
   }
 
@@ -57,6 +66,71 @@ function normalizePhoneInput(reqBody) {
   return { phone, country, channel };
 }
 
+function normalizePhoneQuery(reqQuery) {
+  const q = reqQuery || {};
+  const phone = q.phoneNumber || q.phone || q.to || "";
+  const country = q.country || "";
+  return { phone, country };
+}
+
+/**
+ * GET /api/v1/phone-verification/status?phoneNumber=...&country=...
+ * ✅ renvoie { trusted:true/false } pour UX fluide
+ */
+exports.status = async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ success: false, error: "Non autorisé." });
+
+    const { phone, country } = normalizePhoneQuery(req.query);
+    const norm = toE164(phone, country);
+    const phoneE164 = norm?.e164;
+
+    if (!phoneE164) {
+      return res.status(400).json({
+        success: false,
+        error:
+          "Numéro invalide. Format attendu: E.164 (ex: +2250700000000) ou numéro local + country.",
+        code: "PHONE_INVALID",
+      });
+    }
+
+    const doc = await TrustedDepositNumber.findOne({ userId, phoneE164 }).lean();
+
+    if (!doc) {
+      return res.json({
+        success: true,
+        data: {
+          phoneE164,
+          trusted: false,
+          status: "none",
+          verifiedAt: null,
+        },
+      });
+    }
+
+    const status = String(doc.status || "").toLowerCase();
+    const trusted = status === "trusted";
+
+    return res.json({
+      success: true,
+      data: {
+        phoneE164,
+        trusted,
+        status: status || "pending",
+        verifiedAt: doc.verifiedAt ? new Date(doc.verifiedAt).toISOString() : null,
+        blockedUntil: doc.blockedUntil ? new Date(doc.blockedUntil).toISOString() : null,
+      },
+    });
+  } catch (err) {
+    logger?.error?.("[PhoneVerification] status error", { message: err?.message });
+    return res.status(500).json({
+      success: false,
+      error: err?.message || "Erreur interne (status).",
+    });
+  }
+};
+
 /**
  * POST /api/v1/phone-verification/start
  * body: { phoneNumber|phone, country, channel? }
@@ -68,12 +142,13 @@ exports.start = async (req, res) => {
 
     const { phone, country, channel } = normalizePhoneInput(req.body);
     const norm = toE164(phone, country);
-    const phoneE164 = norm.e164;
+    const phoneE164 = norm?.e164;
 
     if (!phoneE164) {
       return res.status(400).json({
         success: false,
-        error: "Numéro invalide. Mets le numéro au format international (ex: +2250700000000) ou un numéro local + country.",
+        error:
+          "Numéro invalide. Mets le numéro au format international (ex: +2250700000000) ou un numéro local + country.",
         code: "PHONE_INVALID",
       });
     }
@@ -182,12 +257,13 @@ exports.verify = async (req, res) => {
     const { phone, country } = normalizePhoneInput(req.body);
     const code = String(req.body?.code || "").trim();
 
-    const phoneE164 = toE164(phone, country).e164;
+    const phoneE164 = toE164(phone, country)?.e164;
 
     if (!phoneE164) {
       return res.status(400).json({
         success: false,
-        error: "Numéro invalide. Mets le numéro au format international (ex: +2250700000000) ou un numéro local + country.",
+        error:
+          "Numéro invalide. Mets le numéro au format international (ex: +2250700000000) ou un numéro local + country.",
         code: "PHONE_INVALID",
       });
     }
