@@ -23,6 +23,7 @@
     "nanoid": "^3.3.11",
     "nodemailer": "^7.0.3",
     "swagger-ui-express": "^5.0.1",
+    "twilio": "^5.11.2",
     "uuid": "^11.1.0",
     "winston": "^3.17.0",
     "xml2js": "^0.6.2",

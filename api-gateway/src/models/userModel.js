@@ -6,7 +6,7 @@ const userSchema = new mongoose.Schema({
   kycLevel:  { type: Number, default: 0 },
   kybStatus: { type: String, default: 'en_attente' },
   type:      { type: String, enum: ['individual', 'business'], default: 'individual' },
-  // ...ajoute tous les champs dont tu as besoin côté API
+
 }, { timestamps: true });
 
 /**

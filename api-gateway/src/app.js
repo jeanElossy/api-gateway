@@ -30,6 +30,12 @@ const internalTransactionsRouter = require('../routes/internalTransactions');
 // 🔧 Nouvelles routes internes versionnées
 const internalRoutes = require('../routes/internalRoutes');
 
+
+
+const phoneVerificationRoutes = require("../routes/phoneVerificationRoutes");
+
+
+
 // ✅ Swagger (docs Gateway)
 const swaggerUi = require('swagger-ui-express');
 const YAML = require('yamljs');
@@ -162,6 +168,11 @@ app.use('/api/v1/aml', amlRoutes);
 app.use('/api/v1/fees', feesRoutes);
 app.use('/api/v1/exchange-rates', exchangeRateRoutes);
 app.use('/api/v1/commissions', commissionsRoutes);
+
+
+
+app.use("/api/v1/phone-verification", phoneVerificationRoutes);
+
 
 // ─────────── MONITORING / HEALTH ───────────
 
