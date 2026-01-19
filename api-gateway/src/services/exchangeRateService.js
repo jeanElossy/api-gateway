@@ -1,17 +1,14 @@
-// File: src/services/exchangeRateService.js
 "use strict";
 
 const axios = require("axios");
 const { LRUCache } = require("lru-cache");
 
-const ExchangeRate = require("../models/ExchangeRate"); // ✅ gateway models/
-const { normalizeCurrency } = require("../utils/currency"); // ton helper existant
+const ExchangeRate = require("../models/ExchangeRate");
+const { normalizeCurrency } = require("../utils/currency");
 
-/**
- * ✅ Backend principal (recommandé)
- * - PAYNOVAL_BACKEND_URL peut être avec ou sans /api/v1
- * - on normalise pour toujours appeler .../api/v1/exchange-rates/rate
- */
+// ─────────────────────────────────────────────
+// Principal URL normalization
+// ─────────────────────────────────────────────
 function normalizePrincipalBase(raw) {
   const base = String(raw || "").trim().replace(/\/+$/, "");
   if (!base) return "";
@@ -25,39 +22,28 @@ const PAYNOVAL_BACKEND_URL = normalizePrincipalBase(
     "https://paynoval-backend.onrender.com"
 );
 
-/**
- * ✅ Token interne pour appeler le backend principal
- * priorité: PRINCIPAL_INTERNAL_TOKEN > GATEWAY_INTERNAL_TOKEN > INTERNAL_TOKEN
- */
-const PRINCIPAL_INTERNAL_TOKEN =
+// ─────────────────────────────────────────────
+// Internal token normalization (IMPORTANT)
+// ─────────────────────────────────────────────
+const PRINCIPAL_INTERNAL_TOKEN = String(
   process.env.PRINCIPAL_INTERNAL_TOKEN ||
-  process.env.GATEWAY_INTERNAL_TOKEN ||
-  process.env.INTERNAL_TOKEN ||
-  "";
+    process.env.GATEWAY_INTERNAL_TOKEN ||
+    process.env.INTERNAL_TOKEN ||
+    ""
+).trim();
 
-/**
- * ✅ Provider externe (ultime secours)
- */
-const FX_API_BASE_URL = String(
-  process.env.FX_API_BASE_URL || "https://v6.exchangerate-api.com/v6"
-).replace(/\/+$/, "");
-
-const FX_API_KEY = process.env.FX_API_KEY || process.env.EXCHANGE_RATE_API_KEY || "";
+// ─────────────────────────────────────────────
+// External provider config
+// ─────────────────────────────────────────────
+const FX_API_BASE_URL = String(process.env.FX_API_BASE_URL || "https://v6.exchangerate-api.com/v6").replace(/\/+$/, "");
+const FX_API_KEY = String(process.env.FX_API_KEY || process.env.EXCHANGE_RATE_API_KEY || "").trim();
 const FX_CROSS = String(process.env.FX_CROSS || "USD").toUpperCase();
 
-/**
- * Cache pair (base->quote)
- */
-const FX_CACHE_TTL_MS = Number(process.env.FX_CACHE_TTL_MS || 10 * 60 * 1000); // 10 min
-const FX_FAIL_COOLDOWN_MS = Number(process.env.FX_FAIL_COOLDOWN_MS || 10 * 60 * 1000); // 10 min
-
-// ✅ snapshot DB : combien de temps on accepte un taux “stale” en fallback (par défaut 24h)
-const FX_DB_SNAPSHOT_MAX_AGE_MS = Number(
-  process.env.FX_DB_SNAPSHOT_MAX_AGE_MS || 24 * 60 * 60 * 1000
-);
+const FX_CACHE_TTL_MS = Number(process.env.FX_CACHE_TTL_MS || 10 * 60 * 1000);
+const FX_FAIL_COOLDOWN_MS = Number(process.env.FX_FAIL_COOLDOWN_MS || 10 * 60 * 1000);
+const FX_DB_SNAPSHOT_MAX_AGE_MS = Number(process.env.FX_DB_SNAPSHOT_MAX_AGE_MS || 24 * 60 * 60 * 1000);
 
 const pairCache = new LRUCache({ max: 1000, ttl: FX_CACHE_TTL_MS });
-// Cooldown par pair (évite spam provider / backend)
 const failCache = new LRUCache({ max: 1000, ttl: FX_FAIL_COOLDOWN_MS });
 
 console.log("[FX] exchangeRateService initialisé", {
@@ -68,6 +54,7 @@ console.log("[FX] exchangeRateService initialisé", {
   FX_CACHE_TTL_MS,
   FX_FAIL_COOLDOWN_MS,
   hasPrincipalToken: !!PRINCIPAL_INTERNAL_TOKEN,
+  principalTokenLen: PRINCIPAL_INTERNAL_TOKEN.length, // ✅ safe
   FX_DB_SNAPSHOT_MAX_AGE_MS,
 });
 
@@ -106,17 +93,11 @@ function getCooldown(key) {
   return null;
 }
 
-/**
- * ✅ Snapshot DB fallback (COMPAT modèle actuel)
- * On stocke un snapshot dans ExchangeRate avec :
- * - active:false
- * - updatedBy:"snapshot"
- *
- * ⚠️ IMPORTANT : on ne query PAS "source/provider/asOfDate" car ton schema ne les a pas.
- */
+// ─────────────────────────────────────────────
+// Snapshot DB fallback (schema compatible)
+// ─────────────────────────────────────────────
 async function getSnapshotFromDb(fromCur, toCur) {
   try {
-    // On privilégie le snapshot identifié
     const doc = await ExchangeRate.findOne({
       from: fromCur,
       to: toCur,
@@ -128,7 +109,6 @@ async function getSnapshotFromDb(fromCur, toCur) {
 
     if (doc) return doc;
 
-    // fallback : n'importe quel inactif (au cas où)
     const doc2 = await ExchangeRate.findOne({
       from: fromCur,
       to: toCur,
@@ -155,8 +135,6 @@ async function saveSnapshotToDb(fromCur, toCur, rate) {
     const r = Number(rate);
     if (!Number.isFinite(r) || r <= 0) return;
 
-    // ✅ On ne touche jamais aux custom active:true
-    // ✅ On ne stocke que dans le "slot" snapshot (active:false + updatedBy:snapshot)
     await ExchangeRate.updateOne(
       { from: fromCur, to: toCur, active: false, updatedBy: "snapshot" },
       {
@@ -175,7 +153,9 @@ async function saveSnapshotToDb(fromCur, toCur, rate) {
   }
 }
 
-// ✅ 1) Récupérer depuis backend principal
+// ─────────────────────────────────────────────
+// 1) Fetch from backend principal (internalProtect)
+// ─────────────────────────────────────────────
 async function fetchFromBackendPrincipal(fromCur, toCur, { requestId } = {}) {
   if (!PAYNOVAL_BACKEND_URL) {
     throw new Error("PAYNOVAL_BACKEND_URL manquant");
@@ -188,9 +168,10 @@ async function fetchFromBackendPrincipal(fromCur, toCur, { requestId } = {}) {
     "User-Agent": "PayNoval-Gateway/1.0",
   };
 
-  // ✅ IMPORTANT: token interne (sinon 401)
+  // ✅ BLINDAGE: on envoie les 2 formats
   if (PRINCIPAL_INTERNAL_TOKEN) {
     headers["x-internal-token"] = PRINCIPAL_INTERNAL_TOKEN;
+    headers["Authorization"] = `Bearer ${PRINCIPAL_INTERNAL_TOKEN}`;
   }
 
   if (requestId) headers["x-request-id"] = requestId;
@@ -199,26 +180,38 @@ async function fetchFromBackendPrincipal(fromCur, toCur, { requestId } = {}) {
     params: { from: fromCur, to: toCur },
     headers,
     timeout: 12000,
+    validateStatus: (s) => s >= 200 && s < 500, // on gère 401/403 proprement
   });
 
+  if (data?.success === false && (data?.error || data?.message)) {
+    const e = new Error(String(data.error || data.message));
+    e.status = 401;
+    e.backendData = data;
+    throw e;
+  }
+
+  // backend principal peut renvoyer rate à la racine OU dans data.rate
   const rate = Number(data?.data?.rate ?? data?.rate);
 
   if (!data?.success || !Number.isFinite(rate) || rate <= 0) {
     const e = new Error("Backend principal FX: taux invalide");
+    e.status = 502;
     e.backendData = data;
     throw e;
   }
 
   return {
     rate,
-    source: `backend:${data?.source || "fx"}`,
-    stale: !!data?.stale,
+    source: `backend:${data?.data?.source || data?.source || "fx"}`,
+    stale: !!(data?.data?.stale ?? data?.stale),
     provider: data?.data?.provider || data?.provider,
     asOfDate: data?.data?.asOfDate || data?.asOfDate,
   };
 }
 
-// ✅ 2) Provider externe (via pivot)
+// ─────────────────────────────────────────────
+// 2) Fetch from external provider (pivot)
+// ─────────────────────────────────────────────
 async function fetchFromExternalProvider(fromCur, toCur) {
   if (!FX_API_KEY || FX_API_KEY === "REPLACE_ME") {
     throw new Error("Configuration FX manquante (FX_API_KEY).");
@@ -250,35 +243,17 @@ async function fetchFromExternalProvider(fromCur, toCur) {
   };
 }
 
-/**
- * Récupère le taux :
- * 1) same currency => 1
- * 2) taux custom admin DB (gateway) active:true
- * 3) backend principal (recommandé) (avec x-internal-token)
- * 4) provider externe (secours)
- * 5) si quota/429 => fallback snapshot DB (stale) au lieu de 503
- */
+// ─────────────────────────────────────────────
+// Public API: getExchangeRate
+// ─────────────────────────────────────────────
 async function getExchangeRate(from, to, opts = {}) {
-  console.log("[FX] getExchangeRate() called with raw values =", { from, to });
-
-  if (!from || !to) {
-    console.warn("[FX] from/to manquant, retour 1");
-    return { rate: 1, source: "missing", stale: false };
-  }
+  if (!from || !to) return { rate: 1, source: "missing", stale: false };
 
   const fromCur = normalizeCcy(from);
   const toCur = normalizeCcy(to);
 
-  console.log("[FX] normalized currencies =", { fromCur, toCur });
-
-  if (!fromCur || !toCur) {
-    console.warn("[FX] devise vide après normalisation, retour 1");
-    return { rate: 1, source: "invalid", stale: false };
-  }
-
-  if (fromCur === toCur) {
-    return { rate: 1, source: "same", stale: false };
-  }
+  if (!fromCur || !toCur) return { rate: 1, source: "invalid", stale: false };
+  if (fromCur === toCur) return { rate: 1, source: "same", stale: false };
 
   const pairKey = `${fromCur}_${toCur}`;
 
@@ -289,7 +264,6 @@ async function getExchangeRate(from, to, opts = {}) {
   // cooldown pair
   const blocked = getCooldown(pairKey);
   if (blocked) {
-    // ✅ si cooldown, tente snapshot DB avant de throw
     const snap = await getSnapshotFromDb(fromCur, toCur);
     if (snap && typeof snap.rate === "number" && snap.rate > 0 && isSnapshotFreshEnough(snap)) {
       const out = {
@@ -310,56 +284,36 @@ async function getExchangeRate(from, to, opts = {}) {
     throw e;
   }
 
-  // 1️⃣ taux custom admin (DB gateway)
-  console.log("[FX] Searching custom admin rate in DB...", { from: fromCur, to: toCur });
-
-  const found = await ExchangeRate.findOne({
-    from: fromCur,
-    to: toCur,
-    active: true,
-  }).lean();
-
+  // 1) custom admin rate in DB (active:true)
+  const found = await ExchangeRate.findOne({ from: fromCur, to: toCur, active: true }).lean();
   if (found && typeof found.rate === "number" && found.rate > 0) {
-    const out = {
-      rate: Number(found.rate),
-      source: "db-custom",
-      stale: false,
-      id: String(found._id),
-    };
+    const out = { rate: Number(found.rate), source: "db-custom", stale: false, id: String(found._id) };
     pairCache.set(pairKey, out);
     return out;
   }
 
-  // 2️⃣ backend principal (prioritaire)
+  // 2) backend principal (priority)
   try {
     const out = await fetchFromBackendPrincipal(fromCur, toCur, { requestId: opts.requestId });
     pairCache.set(pairKey, out);
-
-    // ✅ snapshot DB utilisable si quota externe plus tard
     await saveSnapshotToDb(fromCur, toCur, out.rate);
-
     return out;
   } catch (err) {
     console.warn("[FX] backend principal failed, fallback provider", err?.message || String(err));
   }
 
-  // 3️⃣ provider externe (secours)
+  // 3) external provider (fallback)
   try {
     const out = await fetchFromExternalProvider(fromCur, toCur);
     pairCache.set(pairKey, out);
-
-    // ✅ snapshot DB aussi
     await saveSnapshotToDb(fromCur, toCur, out.rate);
-
     return out;
   } catch (err) {
     const status = err?.response?.status;
     const errorType = err?.response?.data?.["error-type"];
 
-    // ✅ si quota => cooldown + fallback snapshot DB au lieu de 503
     if (status === 429 || errorType === "quota-reached") {
       const cd = setCooldown(pairKey, err, "exchangerate-api");
-      console.warn("[FX] external quota -> cooldown set", cd);
 
       const snap = await getSnapshotFromDb(fromCur, toCur);
       if (snap && typeof snap.rate === "number" && snap.rate > 0 && isSnapshotFreshEnough(snap)) {
@@ -376,15 +330,9 @@ async function getExchangeRate(from, to, opts = {}) {
       }
     }
 
-    // dernier fallback: snapshot DB même si un peu ancien
     const snap2 = await getSnapshotFromDb(fromCur, toCur);
     if (snap2 && typeof snap2.rate === "number" && snap2.rate > 0) {
-      const out = {
-        rate: Number(snap2.rate),
-        source: "db-snapshot",
-        stale: true,
-        warning: "fx_fallback_snapshot_used",
-      };
+      const out = { rate: Number(snap2.rate), source: "db-snapshot", stale: true, warning: "fx_fallback_snapshot_used" };
       pairCache.set(pairKey, out);
       return out;
     }
@@ -403,6 +351,4 @@ async function getExchangeRate(from, to, opts = {}) {
   }
 }
 
-module.exports = {
-  getExchangeRate,
-};
+module.exports = { getExchangeRate };
