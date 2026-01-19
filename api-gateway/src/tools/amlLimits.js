@@ -1,11 +1,11 @@
 // File: tools/amlLimits.js
+"use strict";
 
-// On importe le mapping symbole
-const { getCurrencySymbolByCode } = require('./currency');
+const { getCurrencySymbolByCode, getCurrencyCodeByCountry } = require("./currency");
 
 /**
  * Plafonds AML _journaliers_ (cumul 24h)
- * Par provider et devise.
+ * Par provider et devise (clé = symbole dans la table).
  */
 const AML_DAILY_LIMITS = {
   paynoval: {
@@ -42,7 +42,7 @@ const AML_DAILY_LIMITS = {
     "$": 100_000,
     "$USD": 100_000,
     "$CAD": 100_000,
-  }
+  },
 };
 
 /**
@@ -83,23 +83,89 @@ const AML_SINGLE_TX_LIMITS = {
     "$": 40_000,
     "$USD": 40_000,
     "$CAD": 40_000,
-  }
+  },
+};
+
+// ---------- Helpers robustes ----------
+const normalizeIso = (v) => {
+  const s0 = String(v || "").trim().toUpperCase();
+  if (!s0) return "";
+
+  // espaces insécables etc.
+  const s = s0.replace(/\u00A0/g, " ");
+
+  // CFA (large)
+  if (s.includes("CFA") || s === "FCFA" || s === "F CFA") return "XOF";
+  if (s === "XAF") return "XAF";
+  if (s === "XOF") return "XOF";
+
+  // Symboles directs
+  if (s === "€") return "EUR";
+  if (s === "£") return "GBP";
+  if (s === "$") return "USD";
+
+  // Cas $CAD, CAD$, US$, USD$, etc.
+  const letters = s.replace(/[^A-Z]/g, "");
+
+  // préférences explicites
+  if (letters === "CAD") return "CAD";
+  if (letters === "USD") return "USD";
+  if (letters === "EUR") return "EUR";
+  if (letters === "GBP") return "GBP";
+  if (letters === "XOF") return "XOF";
+  if (letters === "XAF") return "XAF";
+
+  // ISO général
+  if (/^[A-Z]{3}$/.test(letters)) return letters;
+  if (/^[A-Z]{3}$/.test(s)) return s;
+
+  return "";
 };
 
 /**
- * Helpers universels
+ * ✅ Résout la devise AML à partir du body.
+ * Priorité: currencySource > currency > selectedCurrency > currencyCode/senderCurrencyCode/currencySender > (country → currency)
  */
-function getSingleTxLimit(provider, currency) {
-  const limits = AML_SINGLE_TX_LIMITS[provider] || {};
-  // 💡 Correction: normalisation symbole (ex: XOF → "F CFA", USD → "$")
-  const symbol = getCurrencySymbolByCode(currency);
-  return limits[symbol] || limits["$"] || 1_000_000;
+function resolveAmlCurrency(body = {}) {
+  const iso =
+    normalizeIso(body.currencySource) ||
+    normalizeIso(body.currency) ||
+    normalizeIso(body.selectedCurrency) ||
+    normalizeIso(body.currencyCode) ||
+    normalizeIso(body.senderCurrencyCode) ||
+    normalizeIso(body.currencySender);
+
+  if (iso) return iso;
+
+  const byCountry = normalizeIso(getCurrencyCodeByCountry(body.country));
+  return byCountry || "USD";
 }
 
-function getDailyLimit(provider, currency) {
-  const limits = AML_DAILY_LIMITS[provider] || {};
-  const symbol = getCurrencySymbolByCode(currency);
-  return limits[symbol] || limits["$"] || 5_000_000;
+/**
+ * ✅ Résout le montant AML.
+ * Priorité: amountSource > amount
+ */
+function resolveAmlAmount(body = {}) {
+  const raw = body.amountSource ?? body.amount ?? 0;
+  const n =
+    typeof raw === "number"
+      ? raw
+      : parseFloat(String(raw).replace(/\s/g, "").replace(",", "."));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function getSingleTxLimit(provider, currencyISO) {
+  const limits = AML_SINGLE_TX_LIMITS[String(provider || "").toLowerCase()] || {};
+  const iso = normalizeIso(currencyISO) || "USD";
+  const symbol = getCurrencySymbolByCode(iso); // XOF -> "F CFA", EUR->"€", USD->"$", CAD->"$CAD"
+  return limits[symbol] ?? limits["$"] ?? 1_000_000;
+}
+
+function getDailyLimit(provider, currencyISO) {
+  const limits = AML_DAILY_LIMITS[String(provider || "").toLowerCase()] || {};
+  const iso = normalizeIso(currencyISO) || "USD";
+  const symbol = getCurrencySymbolByCode(iso);
+  return limits[symbol] ?? limits["$"] ?? 5_000_000;
 }
 
 module.exports = {
@@ -107,4 +173,7 @@ module.exports = {
   AML_DAILY_LIMITS,
   getSingleTxLimit,
   getDailyLimit,
+  resolveAmlCurrency,
+  resolveAmlAmount,
+  normalizeIso,
 };

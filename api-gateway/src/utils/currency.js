@@ -36,6 +36,7 @@ function normalizeCurrency(input, countryHint = '') {
   } catch {
     normCountry = String(countryHint || '').toLowerCase().trim();
   }
+  
 
   const isCentralAfrica =
     normCountry.includes('cameroun') ||

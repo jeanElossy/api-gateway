@@ -1783,7 +1783,6 @@ exports.initiateTransaction = async (req, res) => {
 
 
 
-
 /**
  * POST /transactions/confirm
  * (ton code conservé; juste profite du safeAxiosRequest cooldown)
@@ -2370,7 +2369,7 @@ exports.logInternalTransaction = async (req, res) => {
       });
     }
 
-    
+
 
     const {
       provider = "paynoval",
