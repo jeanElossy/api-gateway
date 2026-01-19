@@ -27,15 +27,13 @@ function computeProviderSelected(action, funds, destination) {
   if (a === "withdraw") return d;
   if (a === "send") return d;
 
-  // action inconnue -> si flow unique dans allowedFlows on prend son action
   const candidates = allowedFlows.filter((x) => x.funds === f && x.destination === d);
   if (candidates.length === 1 && candidates[0].action) {
     const inferredAction = String(candidates[0].action).toLowerCase().trim();
     if (inferredAction === "deposit") return f;
-    return d; // send/withdraw
+    return d;
   }
 
-  // fallback send
   return d;
 }
 
@@ -65,17 +63,77 @@ const PROVIDERS = [
   "flutterwave",
 ];
 
+/**
+ * ✅ Champs "meta" qu'on DOIT garder (sinon stripUnknown les supprime
+ * et AML retombe sur country/destination => mauvaise devise).
+ */
+const txMetaSchema = {
+  // Montants source/target + fees
+  amountSource: Joi.number().min(0).optional(),
+  amountTarget: Joi.number().min(0).optional(),
+  feeSource: Joi.number().min(0).optional(),
+  feeTarget: Joi.number().min(0).optional(),
+
+  // FX
+  exchangeRate: Joi.number().min(0).optional(),
+  fxRate: Joi.number().min(0).optional(),
+  fxRateSourceToTarget: Joi.number().min(0).optional(),
+
+  // Devise ISO / symboles
+  currencySource: Joi.string().max(8).optional(),
+  currencyTarget: Joi.string().max(8).optional(),
+  currency: Joi.string().max(8).optional(),
+  selectedCurrency: Joi.string().max(8).optional(),
+  currencySender: Joi.string().max(8).optional(),
+  currencyCode: Joi.string().max(8).optional(),
+  senderCurrencyCode: Joi.string().max(8).optional(),
+  senderCurrencySymbol: Joi.string().max(12).optional(),
+  localCurrencyCode: Joi.string().max(8).optional(),
+  localCurrencySymbol: Joi.string().max(12).optional(),
+
+  // Pays (destination vs sender)
+  country: Joi.string().max(64).optional(),
+  destinationCountry: Joi.string().max(64).optional(),
+  senderCountry: Joi.string().max(64).optional(),
+  originCountry: Joi.string().max(64).optional(),
+  fromCountry: Joi.string().max(64).optional(),
+
+  // Frais côté app
+  transactionFees: Joi.number().min(0).optional(),
+
+  // Divers compat front
+  recipientInfo: Joi.object().unknown(true).optional(),
+  toName: Joi.string().max(128).optional(),
+  toBank: Joi.string().max(128).optional(),
+  recipientName: Joi.string().max(128).optional(),
+};
+
 const baseSchema = {
   funds: Joi.string().valid(...PROVIDERS).required(),
   destination: Joi.string().valid(...PROVIDERS).required(),
+
+  // Le max sera injecté dynamiquement via .keys() plus bas
   amount: Joi.number().min(1).required(),
 
-  // provider est optionnel côté front, nous on va le normaliser avec providerSelected
   provider: Joi.string().optional(),
-
-  // action peut être optionnel pour compat front
   action: Joi.string().valid("send", "deposit", "withdraw").optional(),
+
+  // ✅ garder les meta partout (sinon stripUnknown les supprime)
+  ...txMetaSchema,
 };
+
+// ✅ Résout la devise pour les limites AML (priorité "source/sender")
+function resolveCurrencyForLimits(body = {}) {
+  const cand =
+    body.currencySource ||
+    body.senderCurrencyCode ||
+    body.currencyCode ||
+    body.currencySender ||
+    body.currency ||
+    body.selectedCurrency ||
+    "";
+  return cand || "USD";
+}
 
 const initiateSchemas = {
   paynoval: Joi.object({
@@ -83,24 +141,23 @@ const initiateSchemas = {
     toEmail: Joi.string().email().required(),
     message: Joi.string().max(256).optional(),
 
-    // ✅ IMPORTANT: microservice paynoval exige question + securityCode
-    // Compat: certains fronts envoyaient "securityQuestion"
+    // microservice paynoval exige question + securityCode
     question: Joi.string().max(128).required(),
     securityQuestion: Joi.string().max(128).optional(),
 
-    // ✅ IMPORTANT: microservice exige securityCode
     securityCode: Joi.string().max(32).required(),
 
-    // ✅ IMPORTANT: microservice exige country dans ses checks
-    country: Joi.string().max(32).required(),
+    /**
+     * ⚠️ IMPORTANT:
+     * Ton front envoie souvent country = "france" (destination).
+     * Ton microservice attend "country" (souvent destination).
+     * Donc on accepte country, MAIS on accepte aussi destinationCountry
+     * et on mappera destinationCountry -> country si besoin.
+     */
+    country: Joi.string().max(64).required(),
 
+    // ✅ garder ces champs (ils étaient déjà dans txMetaSchema, mais c'est OK de les laisser aussi)
     recipientInfo: Joi.object().unknown(true).optional(),
-    exchangeRate: Joi.number().min(0).optional(),
-    transactionFees: Joi.number().min(0).optional(),
-    localAmount: Joi.number().min(0).optional(),
-    localCurrencySymbol: Joi.string().max(8).optional(),
-    senderCurrencySymbol: Joi.string().max(8).optional(),
-    selectedCurrency: Joi.string().max(8).optional(),
   }),
 
   stripe: Joi.object({
@@ -115,7 +172,6 @@ const initiateSchemas = {
     cvc: Joi.string().pattern(/^\d{3,4}$/).required(),
     cardHolder: Joi.string().max(64).required(),
 
-    // compat: certains flows mettaient toEmail même si c'est un dépôt
     toEmail: Joi.string().email().optional(),
   }),
 
@@ -124,7 +180,9 @@ const initiateSchemas = {
     phoneNumber: Joi.string().pattern(/^[0-9+]{8,16}$/).required(),
     operator: Joi.string().valid("orange", "mtn", "moov", "wave").required(),
     recipientName: Joi.string().max(64).optional(),
-    country: Joi.string().max(32).required(),
+
+    // ici country = pays de destination momo
+    country: Joi.string().max(64).required(),
   }),
 
   bank: Joi.object({
@@ -132,7 +190,7 @@ const initiateSchemas = {
     iban: Joi.string().pattern(/^[A-Z0-9]{15,34}$/).required(),
     bankName: Joi.string().max(128).required(),
     accountHolder: Joi.string().max(128).required(),
-    country: Joi.string().max(32).required(),
+    country: Joi.string().max(64).required(),
     swift: Joi.string().pattern(/^[A-Z0-9]{8,11}$/).optional(),
   }),
 
@@ -148,14 +206,14 @@ const initiateSchemas = {
     cvc: Joi.string().pattern(/^\d{3,4}$/).required(),
     toName: Joi.string().max(128).required(),
     toBank: Joi.string().max(128).optional(),
-    country: Joi.string().max(32).optional(),
+    country: Joi.string().max(64).optional(),
   }),
 
   stripe2momo: Joi.object({
     ...baseSchema,
     phoneNumber: Joi.string().pattern(/^[0-9+]{8,16}$/).required(),
     operator: Joi.string().valid("orange", "mtn", "moov", "wave").required(),
-    country: Joi.string().max(32).required(),
+    country: Joi.string().max(64).required(),
     stripeRef: Joi.string().max(128).optional(),
   }),
 
@@ -165,7 +223,7 @@ const initiateSchemas = {
     phoneNumber: Joi.string().pattern(/^[0-9+]{8,16}$/).required(),
     operator: Joi.string().max(64).optional(),
     recipientName: Joi.string().max(128).optional(),
-    country: Joi.string().max(32).required(),
+    country: Joi.string().max(64).required(),
     bankCode: Joi.string().max(32).optional(),
     accountNumber: Joi.string().max(32).optional(),
   }),
@@ -175,18 +233,16 @@ const confirmSchema = Joi.object({
   provider: Joi.string().valid(...PROVIDERS).required(),
   transactionId: Joi.string().required(),
 
-  // ✅ compat: certains fronts envoient "code", microservice attend "securityCode"
   securityCode: Joi.string().max(32).allow("").optional(),
   code: Joi.string().max(32).allow("").optional(),
 
-  // optionnel au cas où (certains providers confirment par ref)
   reference: Joi.string().max(128).optional(),
-});
+}).unknown(false);
 
 const cancelSchema = Joi.object({
   provider: Joi.string().valid(...PROVIDERS).required(),
   transactionId: Joi.string().required(),
-});
+}).unknown(false);
 
 function validateTransaction(action) {
   return function (req, res, next) {
@@ -194,22 +250,22 @@ function validateTransaction(action) {
     const funds = body.funds;
     const destination = body.destination;
 
-    // ✅ action compat: si pas fourni
     const actionTx = inferActionIfMissing(body.action, funds, destination);
     const providerSelected = computeProviderSelected(actionTx, funds, destination);
 
     // Plafond single transaction dynamique
     let maxLimit = 10000000;
-    let currency = "F CFA";
+    let currencyForMsg = "F CFA";
 
     if (action === "initiate") {
       try {
-        currency = body.selectedCurrency || body.currencySender || body.currency || "F CFA";
-        maxLimit = getSingleTxLimit(providerSelected, currency);
+        // ✅ IMPORTANT: priorité aux devises "source/sender" pour plafonds
+        const cur = resolveCurrencyForLimits(body);
+        currencyForMsg = cur || currencyForMsg;
+        maxLimit = getSingleTxLimit(providerSelected, cur || currencyForMsg);
       } catch (e) {}
     }
 
-    // Préparation du schéma dynamique
     let schema;
     if (action === "initiate" && initiateSchemas[providerSelected]) {
       schema = initiateSchemas[providerSelected].keys({
@@ -237,10 +293,9 @@ function validateTransaction(action) {
       });
     }
 
-    // ✅ validate + normalise req.body avec value (stripUnknown/convert)
     const { error, value } = schema.validate(body, {
       abortEarly: false,
-      stripUnknown: true,
+      stripUnknown: true, // ✅ maintenant OK car on whitelist les champs meta
       convert: true,
     });
 
@@ -248,7 +303,7 @@ function validateTransaction(action) {
       let details = error.details.map((d) => d.message);
       details = details.map((msg) => {
         if (/less than or equal to (\d+)/i.test(msg)) {
-          return msg.replace(/less than or equal to (\d+)/i, (m, p1) => `less than or equal to ${p1} ${currency}`);
+          return msg.replace(/less than or equal to (\d+)/i, (m, p1) => `less than or equal to ${p1} ${currencyForMsg}`);
         }
         return msg;
       });
@@ -266,30 +321,28 @@ function validateTransaction(action) {
       });
     }
 
-    // ✅ apply normalized body back
     req.body = value;
 
-    // ✅ On force action normalisée si manquante (compat)
     req.body.action = inferActionIfMissing(req.body.action, req.body.funds, req.body.destination);
-
-    // ✅ providerSelected (routing)
     req.providerSelected = computeProviderSelected(req.body.action, req.body.funds, req.body.destination);
-
-    // ✅ harmonise provider
     req.body.provider = req.body.provider || req.providerSelected;
 
     // ---------------------------
     // ✅ Compat / alias mapping
     // ---------------------------
 
-    // ✅ Paynoval: securityQuestion -> question
     if (req.providerSelected === "paynoval") {
+      // securityQuestion -> question
       if (!req.body.question && req.body.securityQuestion) {
         req.body.question = req.body.securityQuestion;
       }
 
-      // ✅ Fallback country depuis user si front ne l'envoie pas (mais schema le requiert)
-      // (utile si un jour tu assouplis le schema, et évite des 400 inutiles)
+      // ✅ Si le front envoie destinationCountry, on le mappe vers country (requis microservice)
+      if (!req.body.country && req.body.destinationCountry) {
+        req.body.country = req.body.destinationCountry;
+      }
+
+      // fallback country depuis user si toujours vide (rare)
       if (!req.body.country) {
         req.body.country =
           req.user?.selectedCountry ||
@@ -297,9 +350,17 @@ function validateTransaction(action) {
           req.user?.countryCode ||
           "";
       }
+
+      // ✅ On garde aussi le pays émetteur pour AML si utile
+      if (!req.body.senderCountry) {
+        req.body.senderCountry =
+          req.user?.selectedCountry ||
+          req.user?.country ||
+          req.user?.countryCode ||
+          "";
+      }
     }
 
-    // ✅ Confirm: code -> securityCode
     if (action === "confirm") {
       if (!req.body.securityCode && req.body.code) {
         req.body.securityCode = req.body.code;
@@ -330,7 +391,6 @@ function validateTransaction(action) {
         });
       }
 
-      // ✅ important: le controller doit router vers providerSelected (pas destination)
       req.routedProvider = req.providerSelected;
 
       // ----- Daily limit UX-friendly check -----
@@ -338,38 +398,31 @@ function validateTransaction(action) {
         try {
           const userId = req.user && req.user._id;
           if (userId) {
-            currency =
-              req.body.selectedCurrency ||
-              req.body.currencySender ||
-              req.body.currency ||
-              "F CFA";
+            // ✅ IMPORTANT: devise pour limites = currencySource/senderCurrencyCode en priorité
+            const cur = resolveCurrencyForLimits(req.body);
+            const dailyLimit = getDailyLimit(req.providerSelected, cur);
 
-            const dailyLimit = getDailyLimit(req.providerSelected, currency);
-            const stats = await getUserTransactionsStats(userId, req.providerSelected, currency);
-            const dailyTotal =
-              (stats && stats.dailyTotal ? stats.dailyTotal : 0) +
-              (req.body.amount || 0);
+            const stats = await getUserTransactionsStats(userId, req.providerSelected, cur);
+            const dailyTotal = (stats && stats.dailyTotal ? stats.dailyTotal : 0) + (req.body.amountSource ?? req.body.amount ?? 0);
 
             if (dailyTotal > dailyLimit) {
               logger.warn("[validateTransaction] Plafond journalier dépassé", {
                 userId,
                 providerSelected: req.providerSelected,
-                currency,
-                try: req.body.amount,
+                currency: cur,
+                try: req.body.amountSource ?? req.body.amount,
                 already: stats?.dailyTotal,
                 max: dailyLimit,
               });
 
-              // ✅ évite d'appeler next() après avoir répondu
               return res.status(403).json({
                 success: false,
                 error: "Dépasse le plafond journalier autorisé",
-                details: [`Le plafond journalier autorisé est ${dailyLimit.toLocaleString("fr-FR")} ${currency}.`],
+                details: [`Le plafond journalier autorisé est ${dailyLimit.toLocaleString("fr-FR")} ${cur}.`],
               });
             }
           }
 
-          // ✅ si la réponse a déjà été envoyée, ne pas next()
           if (res.headersSent) return;
           next();
         } catch (e) {

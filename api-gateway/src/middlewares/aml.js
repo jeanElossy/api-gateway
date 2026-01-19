@@ -1,4 +1,4 @@
-// middlewares/aml.js
+// File: middlewares/aml.js
 "use strict";
 
 const logger = require("../logger");
@@ -15,8 +15,6 @@ const { getCurrencySymbolByCode, getCurrencyCodeByCountry } = require("../tools/
 const { getDailyLimit, getSingleTxLimit } = require("../tools/amlLimits");
 
 const RISKY_COUNTRIES_ISO = new Set(["IR", "KP", "SD", "SY", "CU", "RU", "AF", "SO", "YE", "VE", "LY"]);
-
-// Stripe: on compare sur code ISO plutôt que symbole
 const ALLOWED_STRIPE_CURRENCY_CODES = ["EUR", "USD", "CAD"];
 
 // --------------------------
@@ -28,18 +26,13 @@ function maskSensitive(obj) {
 
   const out = Array.isArray(obj) ? [] : {};
   for (const k of Object.keys(obj)) {
-    if (SENSITIVE_FIELDS.includes(k)) {
-      out[k] = "***";
-    } else if (obj[k] && typeof obj[k] === "object") {
-      out[k] = maskSensitive(obj[k]);
-    } else {
-      out[k] = obj[k];
-    }
+    if (SENSITIVE_FIELDS.includes(k)) out[k] = "***";
+    else if (obj[k] && typeof obj[k] === "object") out[k] = maskSensitive(obj[k]);
+    else out[k] = obj[k];
   }
   return out;
 }
 
-// ✅ parse amount robuste
 function parseAmount(v) {
   if (v == null) return 0;
   if (typeof v === "number") return Number.isFinite(v) ? v : 0;
@@ -48,13 +41,12 @@ function parseAmount(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-// ✅ normalize country input: "france" -> "FR", "cote d'ivoire" -> "CI", "FR" -> "FR"
+// "france" -> "FR", "cote d'ivoire" -> "CI", "FR" -> "FR"
 function normalizeCountryToISO(country) {
   if (!country) return "";
   const raw = String(country).trim();
   if (!raw) return "";
 
-  // déjà ISO2
   if (/^[A-Z]{2}$/.test(raw.toUpperCase())) return raw.toUpperCase();
 
   const n = raw
@@ -92,7 +84,6 @@ function normalizeCountryToISO(country) {
   return map[n] || "";
 }
 
-// ✅ provider resolver (plus stable)
 function resolveProvider(req) {
   const rp = String(req.routedProvider || "").trim().toLowerCase();
   if (rp) return rp;
@@ -106,22 +97,18 @@ function resolveProvider(req) {
   return p || "paynoval";
 }
 
-// ✅ normalize currency ISO (accepte symboles et variantes)
 function normalizeCurrencyISO(v) {
   const s0 = String(v || "").trim().toUpperCase();
   if (!s0) return "";
 
   const s = s0.replace(/\u00A0/g, " ");
 
-  // CFA
   if (s === "FCFA" || s === "CFA" || s === "F CFA" || s.includes("CFA")) return "XOF";
 
-  // symboles
   if (s === "€") return "EUR";
   if (s === "$") return "USD";
   if (s === "£") return "GBP";
 
-  // $CAD / CAD$ / $USD / USD$ / US$
   const letters = s.replace(/[^A-Z]/g, "");
   if (letters === "CAD") return "CAD";
   if (letters === "USD") return "USD";
@@ -136,32 +123,57 @@ function normalizeCurrencyISO(v) {
   return "";
 }
 
-// ✅ currency resolver: priorité ISO source -> currencyCode -> currency -> selectedCurrency -> country
+/**
+ * ✅ currency resolver (PRO)
+ * compare amountSource (ou amount) => devise source
+ */
 function resolveCurrencyCode(req) {
   const b = req.body || {};
+  const user = req.user || {};
 
-  // priorité aux nouveaux champs ISO
   const candidate =
     b.currencySource ||
-    b.currencyCode ||
     b.senderCurrencyCode ||
+    b.currencyCode ||
     b.currencySender ||
     b.currency ||
     b.selectedCurrency ||
-    // au cas où tu passes currencyTarget par erreur
-    b.currencyTarget ||
+    b.fromCurrency ||
     "";
 
   let iso = normalizeCurrencyISO(candidate);
 
-  // fallback: pays
   if (!iso) {
-    const country = b.country || req.user?.country || req.user?.selectedCountry || "";
-    iso = normalizeCurrencyISO(getCurrencyCodeByCountry(country)) || "USD";
+    const senderCountry =
+      user?.selectedCountry ||
+      user?.country ||
+      user?.countryCode ||
+      "";
+    iso = normalizeCurrencyISO(getCurrencyCodeByCountry(senderCountry));
+  }
+
+  if (!iso) {
+    const lastResortCountry = b.senderCountry || b.originCountry || b.fromCountry || b.country || "";
+    iso = normalizeCurrencyISO(getCurrencyCodeByCountry(lastResortCountry));
   }
 
   if (!/^[A-Z]{3}$/.test(iso)) iso = "USD";
   return iso;
+}
+
+// ✅ pays "destination" pour sanctions: on préfère destinationCountry si présent
+function resolveDestinationCountryISO(req) {
+  const b = req.body || {};
+  const user = req.user || {};
+
+  const raw =
+    b.destinationCountry || // ✅ si front le met
+    b.country ||            // sinon fallback (compat)
+    user?.country ||
+    user?.selectedCountry ||
+    "";
+
+  return normalizeCountryToISO(raw);
 }
 
 module.exports = async function amlMiddleware(req, res, next) {
@@ -173,18 +185,14 @@ module.exports = async function amlMiddleware(req, res, next) {
   const iban = body.iban || body.toIBAN || "";
   const phoneNumber = body.phoneNumber || body.toPhone || body.phone || "";
 
-  const countryRaw = body.country || user?.country || user?.selectedCountry || "";
-  const countryISO = normalizeCountryToISO(countryRaw);
+  const destinationCountryISO = resolveDestinationCountryISO(req);
 
-  // priorité amountSource puis amount
   const amount = parseAmount(body.amountSource ?? body.amount);
 
-  // ✅ ISO (XOF/EUR/USD/CAD...)
   const currencyCode = resolveCurrencyCode(req);
-  const currencySymbol = getCurrencySymbolByCode(currencyCode); // affichage seulement
+  const currencySymbol = getCurrencySymbolByCode(currencyCode);
 
   try {
-    // Auth
     if (!user || !user._id) {
       logger.warn("[AML] User manquant", { provider });
       await logTransaction({
@@ -197,7 +205,11 @@ module.exports = async function amlMiddleware(req, res, next) {
         flagged: true,
         flagReason: "User manquant",
       });
-      return res.status(401).json({ success: false, error: "Merci de vous connecter pour poursuivre.", code: "AUTH_REQUIRED" });
+      return res.status(401).json({
+        success: false,
+        error: "Merci de vous connecter pour poursuivre.",
+        code: "AUTH_REQUIRED",
+      });
     }
 
     // KYC/KYB checks
@@ -242,7 +254,8 @@ module.exports = async function amlMiddleware(req, res, next) {
         await sendFraudAlert({ user, type: "kyc_insuffisant", provider });
         return res.status(403).json({
           success: false,
-          error: "Votre vérification d’identité (KYC) n’est pas finalisée. Merci de compléter votre profil pour accéder aux transactions.",
+          error:
+            "Votre vérification d’identité (KYC) n’est pas finalisée. Merci de compléter votre profil pour accéder aux transactions.",
           code: "KYC_REQUIRED",
         });
       }
@@ -295,9 +308,15 @@ module.exports = async function amlMiddleware(req, res, next) {
       });
     }
 
-    // Pays à risque (ISO2)
-    if (countryISO && RISKY_COUNTRIES_ISO.has(countryISO)) {
-      logger.warn("[AML] Pays à risque/sanctionné détecté", { provider, user: user.email, countryRaw, countryISO });
+    // Pays à risque (ISO2) — destination
+    if (destinationCountryISO && RISKY_COUNTRIES_ISO.has(destinationCountryISO)) {
+      logger.warn("[AML] Pays à risque/sanctionné détecté", {
+        provider,
+        user: user.email,
+        destinationCountryISO,
+        destinationCountryRaw: body.destinationCountry || body.country || null,
+      });
+
       await logTransaction({
         userId: user._id,
         type: "initiate",
@@ -308,17 +327,18 @@ module.exports = async function amlMiddleware(req, res, next) {
         flagged: true,
         flagReason: "Pays à risque",
       });
-      await sendFraudAlert({ user, type: "pays_risque", provider, country: countryISO });
+
+      await sendFraudAlert({ user, type: "pays_risque", provider, country: destinationCountryISO });
+
       return res.status(403).json({
         success: false,
         error: "Transaction bloquée : pays de destination non autorisé.",
         code: "RISKY_COUNTRY",
-        details: { country: countryISO },
+        details: { country: destinationCountryISO },
       });
     }
 
     // --- LIMITES PAR ENVOI ET PAR JOUR ---
-    // ✅ IMPORTANT: on passe la devise ISO (pas le symbole)
     const singleTxLimit = getSingleTxLimit(provider, currencyCode);
 
     if (amount > singleTxLimit) {
@@ -352,17 +372,13 @@ module.exports = async function amlMiddleware(req, res, next) {
 
     const dailyLimit = getDailyLimit(provider, currencyCode);
 
-    // ✅ stats: on passe ISO (et fallback au symbole si ton service attend symbole)
     let stats = null;
     try {
       stats = await getUserTransactionsStats(user._id, provider, currencyCode);
-      // si ton service existant attend symbole, on fallback
       if (!stats || typeof stats !== "object") {
         stats = await getUserTransactionsStats(user._id, provider, currencySymbol);
       }
-    } catch {
-      // ignore, stats restera null
-    }
+    } catch {}
 
     const dailyTotal = stats && Number.isFinite(stats.dailyTotal) ? stats.dailyTotal : 0;
     const futureTotal = dailyTotal + (amount || 0);
@@ -397,7 +413,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       });
     }
 
-    // Challenge AML (montant proche du plafond)
+    // Challenge AML
     const userQuestions = user.securityQuestions || [];
     const needAmlChallenge = typeof amount === "number" && amount >= dailyLimit * 0.9 && userQuestions.length > 0;
 
@@ -444,7 +460,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       }
     }
 
-    // Limites de pattern (structuring, volume horaire, etc)
+    // Patterns
     if (stats && stats.lastHour > 10) {
       logger.warn("[AML] Volume suspect sur 1h", { provider, user: user.email, lastHour: stats.lastHour });
       await logTransaction({
@@ -495,7 +511,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       });
     }
 
-    // Stripe: devise autorisée (ISO)
+    // Stripe currency allowed
     if (provider === "stripe" && currencyCode && !ALLOWED_STRIPE_CURRENCY_CODES.includes(currencyCode)) {
       logger.warn("[AML] Devise non autorisée pour Stripe", { user: user.email, currencyCode });
       await logTransaction({
@@ -557,16 +573,22 @@ module.exports = async function amlMiddleware(req, res, next) {
       flagReason: "",
     });
 
+    // ✅ log debug propre (pour voir pourquoi XOF/EUR a été choisi)
     logger.info("[AML] AML OK", {
       provider,
       user: user.email,
       amount,
       currencyCode,
+      currencySymbol,
+      currencySource: body.currencySource || null,
+      senderCurrencyCode: body.senderCurrencyCode || null,
+      currencyCodeBody: body.currencyCode || null,
+      country: body.country || null,
+      destinationCountry: body.destinationCountry || null,
+      destinationCountryISO,
       toEmail,
       iban,
       phoneNumber,
-      countryRaw,
-      countryISO,
       stats,
     });
 

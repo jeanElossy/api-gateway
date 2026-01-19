@@ -10,7 +10,7 @@ const { getCurrencySymbolByCode } = require('../tools/currency');
  * ✅ IMPORTANT
  * - On travaille désormais en ISO (XOF/EUR/USD/CAD/...)
  * - Le middleware AML passe currencyCode ISO.
- * - Les stats filtrent sur plusieurs fields possibles (currencySource / currency / senderCurrencySymbol)
+ * - Les stats filtrent sur plusieurs fields possibles
  * - Et on supporte aussi les anciennes valeurs en "symbol" (ex: "F CFA", "$USD")
  */
 
@@ -69,7 +69,6 @@ function safeNumber(v) {
   if (v == null) return 0;
   if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
 
-  // Decimal128 / obj toString
   if (typeof v?.toString === 'function' && v?.toString !== Object.prototype.toString) {
     const n = parseFloat(String(v.toString()).replace(/\s/g, '').replace(',', '.'));
     return Number.isFinite(n) ? n : 0;
@@ -83,19 +82,20 @@ function safeNumber(v) {
  * ✅ currencyMatch robuste :
  * - compare ISO (XOF/EUR/USD/CAD)
  * - + accepte symbole correspondant ("F CFA", "€", "$", "$USD", "$CAD")
+ * - + match aussi currencyCode/senderCurrencyCode si tes tx stockent ces champs
  */
 function buildCurrencyOrMatch(currencyISO) {
   const iso = normalizeIso(currencyISO);
   if (!iso) return {};
 
   const symbol = getCurrencySymbolByCode(iso); // ex: XOF -> "F CFA"
-
   const compat = new Set([iso, symbol]);
 
   if (iso === 'USD') {
     compat.add('$');
     compat.add('$USD');
     compat.add('USD$');
+    compat.add('US$');
   }
   if (iso === 'CAD') {
     compat.add('$CAD');
@@ -115,8 +115,13 @@ function buildCurrencyOrMatch(currencyISO) {
   return {
     $or: [
       { currencySource: { $in: values } },
+      { currencyTarget: { $in: values } },
       { currency: { $in: values } },
+      { currencyCode: { $in: values } },
+      { senderCurrencyCode: { $in: values } },
       { senderCurrencySymbol: { $in: values } },
+      { localCurrencyCode: { $in: values } },
+      { localCurrencySymbol: { $in: values } },
     ],
   };
 }
@@ -125,7 +130,6 @@ async function getUserTransactionsStats(userId, provider, currencyISO = null) {
   const currency = normalizeIso(currencyISO);
   const currencyMatch = currency ? buildCurrencyOrMatch(currency) : {};
 
-  // Transactions sur la dernière heure (volume)
   const lastHour = await Transaction.countDocuments({
     userId,
     provider,
@@ -133,7 +137,6 @@ async function getUserTransactionsStats(userId, provider, currencyISO = null) {
     createdAt: { $gte: new Date(Date.now() - 60 * 60 * 1000) },
   });
 
-  // Montant total sur 24h (daily cap)
   const matchQuery = {
     userId,
     provider,
@@ -143,7 +146,6 @@ async function getUserTransactionsStats(userId, provider, currencyISO = null) {
 
   let dailyTotal = 0;
 
-  // ✅ sum robuste (Decimal128 safe)
   try {
     const dailyTotalAgg = await Transaction.aggregate([
       { $match: matchQuery },
@@ -156,12 +158,10 @@ async function getUserTransactionsStats(userId, provider, currencyISO = null) {
     ]);
     dailyTotal = dailyTotalAgg.length ? safeNumber(dailyTotalAgg[0].total) : 0;
   } catch {
-    // fallback JS
     const txs = await Transaction.find(matchQuery).select('amount').lean();
     dailyTotal = txs.reduce((acc, t) => acc + safeNumber(t?.amount), 0);
   }
 
-  // Structuring : nb vers même destinataire sur 10min
   const cutoff = new Date(Date.now() - 10 * 60 * 1000);
 
   const recentTx = await Transaction.find({

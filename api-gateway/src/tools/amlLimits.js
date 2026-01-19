@@ -91,23 +91,18 @@ const normalizeIso = (v) => {
   const s0 = String(v || "").trim().toUpperCase();
   if (!s0) return "";
 
-  // espaces insécables etc.
   const s = s0.replace(/\u00A0/g, " ");
 
-  // CFA (large)
   if (s.includes("CFA") || s === "FCFA" || s === "F CFA") return "XOF";
   if (s === "XAF") return "XAF";
   if (s === "XOF") return "XOF";
 
-  // Symboles directs
   if (s === "€") return "EUR";
   if (s === "£") return "GBP";
   if (s === "$") return "USD";
 
-  // Cas $CAD, CAD$, US$, USD$, etc.
   const letters = s.replace(/[^A-Z]/g, "");
 
-  // préférences explicites
   if (letters === "CAD") return "CAD";
   if (letters === "USD") return "USD";
   if (letters === "EUR") return "EUR";
@@ -115,7 +110,6 @@ const normalizeIso = (v) => {
   if (letters === "XOF") return "XOF";
   if (letters === "XAF") return "XAF";
 
-  // ISO général
   if (/^[A-Z]{3}$/.test(letters)) return letters;
   if (/^[A-Z]{3}$/.test(s)) return s;
 
@@ -124,20 +118,28 @@ const normalizeIso = (v) => {
 
 /**
  * ✅ Résout la devise AML à partir du body.
- * Priorité: currencySource > currency > selectedCurrency > currencyCode/senderCurrencyCode/currencySender > (country → currency)
+ * Priorité: currencySource/senderCurrencyCode > currencyCode > currency/selectedCurrency > (senderCountry/country → currency)
  */
 function resolveAmlCurrency(body = {}) {
   const iso =
     normalizeIso(body.currencySource) ||
-    normalizeIso(body.currency) ||
-    normalizeIso(body.selectedCurrency) ||
-    normalizeIso(body.currencyCode) ||
     normalizeIso(body.senderCurrencyCode) ||
-    normalizeIso(body.currencySender);
+    normalizeIso(body.currencyCode) ||
+    normalizeIso(body.currencySender) ||
+    normalizeIso(body.currency) ||
+    normalizeIso(body.selectedCurrency);
 
   if (iso) return iso;
 
-  const byCountry = normalizeIso(getCurrencyCodeByCountry(body.country));
+  // ✅ IMPORTANT: si tu as senderCountry/originCountry, on préfère ça
+  const ctry =
+    body.senderCountry ||
+    body.originCountry ||
+    body.fromCountry ||
+    body.country ||
+    "";
+
+  const byCountry = normalizeIso(getCurrencyCodeByCountry(ctry));
   return byCountry || "USD";
 }
 
