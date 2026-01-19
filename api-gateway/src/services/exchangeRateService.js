@@ -213,35 +213,58 @@ async function fetchFromBackendPrincipal(fromCur, toCur, { requestId } = {}) {
 // 2) Fetch from external provider (pivot)
 // ─────────────────────────────────────────────
 async function fetchFromExternalProvider(fromCur, toCur) {
-  if (!FX_API_KEY || FX_API_KEY === "REPLACE_ME") {
-    throw new Error("Configuration FX manquante (FX_API_KEY).");
+  // 1) provider avec clé (pivot)
+  const computeFromRates = (rates, providerName) => {
+    const rFrom = Number(rates?.[fromCur]);
+    const rTo = Number(rates?.[toCur]);
+    if (!Number.isFinite(rFrom) || !Number.isFinite(rTo) || rFrom <= 0 || rTo <= 0) {
+      throw new Error(`Taux introuvable via ${providerName} pour ${fromCur}→${toCur}`);
+    }
+    return {
+      rate: rTo / rFrom,
+      source: `external:${providerName}`,
+      stale: false,
+      provider: providerName,
+    };
+  };
+
+  // A) clé dispo → exchangerate-api
+  if (FX_API_KEY && FX_API_KEY !== "REPLACE_ME") {
+    const url = `${FX_API_BASE_URL}/${FX_API_KEY}/latest/${encodeURIComponent(FX_CROSS)}`;
+    try {
+      const { data } = await axios.get(url, { timeout: 15000 });
+      const rates = data?.conversion_rates || null;
+      if (!data || data.result !== "success" || !rates) {
+        const e = new Error(data?.["error-type"] || "Provider rates missing");
+        e.response = { status: 502, data };
+        throw e;
+      }
+      return computeFromRates(rates, "exchangerate-api");
+    } catch (err) {
+      const status = err?.response?.status;
+      const errorType = err?.response?.data?.["error-type"];
+      // si 429 -> on tombe sur fallback sans clé
+      if (!(status === 429 || errorType === "quota-reached")) {
+        // autres erreurs : on tente aussi fallback
+      }
+    }
   }
 
-  const url = `${FX_API_BASE_URL}/${FX_API_KEY}/latest/${encodeURIComponent(FX_CROSS)}`;
-  const { data } = await axios.get(url, { timeout: 15000 });
+  // B) fallback sans clé → open.er-api (pivot)
+  const fallbackUrl = `https://open.er-api.com/v6/latest/${encodeURIComponent(FX_CROSS)}`;
+  const { data: data2 } = await axios.get(fallbackUrl, { timeout: 15000 });
+  const rates2 = data2?.conversion_rates || data2?.rates || null;
 
-  const rates = data?.conversion_rates || null;
-  if (!data || data.result !== "success" || !rates) {
-    const e = new Error(data?.["error-type"] || "Provider rates missing");
-    e.response = { status: 502, data };
+  if (!rates2 || typeof rates2 !== "object") {
+    const e = new Error("Fallback provider rates missing");
+    e.response = { status: 502, data: data2 };
     throw e;
   }
 
-  const rFrom = Number(rates[fromCur]);
-  const rTo = Number(rates[toCur]);
-
-  if (!Number.isFinite(rFrom) || !Number.isFinite(rTo) || rFrom <= 0 || rTo <= 0) {
-    throw new Error(`Taux introuvable via provider pour ${fromCur}→${toCur}`);
-  }
-
-  const rate = rTo / rFrom;
-  return {
-    rate,
-    source: "external:exchangerate-api",
-    stale: false,
-    provider: "exchangerate-api",
-  };
+  return computeFromRates(rates2, "open.er-api");
 }
+
+
 
 // ─────────────────────────────────────────────
 // Public API: getExchangeRate
