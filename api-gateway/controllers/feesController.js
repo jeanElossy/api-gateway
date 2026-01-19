@@ -1,11 +1,9 @@
-// File: controllers/feesController.js
 'use strict';
 
 const Fee = require('../src/models/Fee'); // adapte le chemin si besoin
 const { getExchangeRate } = require('../src/services/exchangeRateService');
 const { normalizeCurrency } = require('../src/utils/currency');
 
-// Optionnel : logger central
 let logger = null;
 try {
   logger = require('../src/logger');
@@ -25,15 +23,10 @@ function computeFeeFromBareme(feeDoc, amountNum) {
     feePercent = 0;
   } else if (feeDoc.type === 'percent') {
     feePercent = feeDoc.amount; // ex: 1.5 => 1.5%
-
     let rawFee = (amountNum * feeDoc.amount) / 100;
 
-    if (typeof feeDoc.minFee === 'number') {
-      rawFee = Math.max(rawFee, feeDoc.minFee);
-    }
-    if (typeof feeDoc.maxFee === 'number') {
-      rawFee = Math.min(rawFee, feeDoc.maxFee);
-    }
+    if (typeof feeDoc.minFee === 'number') rawFee = Math.max(rawFee, feeDoc.minFee);
+    if (typeof feeDoc.maxFee === 'number') rawFee = Math.min(rawFee, feeDoc.maxFee);
 
     feeValue = parseFloat(rawFee.toFixed(2));
   }
@@ -42,25 +35,18 @@ function computeFeeFromBareme(feeDoc, amountNum) {
 }
 
 // ========== GET (CRUD) ==========
-
 exports.getFees = async (req, res) => {
   try {
     const query = {};
-
     ['provider', 'country', 'currency', 'type', 'active'].forEach((field) => {
       if (req.query[field] !== undefined && req.query[field] !== '') {
         query[field] = req.query[field];
       }
     });
 
-    if (req.query.minAmount) {
-      query.amount = { $gte: Number(req.query.minAmount) };
-    }
+    if (req.query.minAmount) query.amount = { $gte: Number(req.query.minAmount) };
     if (req.query.maxAmount) {
-      query.amount = {
-        ...(query.amount || {}),
-        $lte: Number(req.query.maxAmount),
-      };
+      query.amount = { ...(query.amount || {}), $lte: Number(req.query.maxAmount) };
     }
 
     const limit = parseInt(req.query.limit, 10) || 100;
@@ -79,15 +65,10 @@ exports.getFees = async (req, res) => {
 };
 
 // ========== GET BY ID ==========
-
 exports.getFeeById = async (req, res) => {
   try {
     const fee = await Fee.findById(req.params.id);
-    if (!fee) {
-      return res
-        .status(404)
-        .json({ success: false, message: 'Fee introuvable' });
-    }
+    if (!fee) return res.status(404).json({ success: false, message: 'Fee introuvable' });
     res.json({ success: true, data: fee });
   } catch (e) {
     logger.error?.('[Fees] getFeeById error', e);
@@ -96,7 +77,6 @@ exports.getFeeById = async (req, res) => {
 };
 
 // ========== CREATE ==========
-
 exports.createFee = async (req, res) => {
   try {
     const fee = new Fee(req.body);
@@ -109,18 +89,13 @@ exports.createFee = async (req, res) => {
 };
 
 // ========== UPDATE ==========
-
 exports.updateFee = async (req, res) => {
   try {
     const fee = await Fee.findByIdAndUpdate(req.params.id, req.body, {
       new: true,
       runValidators: true,
     });
-    if (!fee) {
-      return res
-        .status(404)
-        .json({ success: false, message: 'Fee introuvable' });
-    }
+    if (!fee) return res.status(404).json({ success: false, message: 'Fee introuvable' });
     res.json({ success: true, data: fee });
   } catch (e) {
     logger.error?.('[Fees] updateFee error', e);
@@ -129,15 +104,10 @@ exports.updateFee = async (req, res) => {
 };
 
 // ========== DELETE ==========
-
 exports.deleteFee = async (req, res) => {
   try {
     const fee = await Fee.findByIdAndDelete(req.params.id);
-    if (!fee) {
-      return res
-        .status(404)
-        .json({ success: false, message: 'Fee introuvable' });
-    }
+    if (!fee) return res.status(404).json({ success: false, message: 'Fee introuvable' });
     res.json({ success: true, message: 'Fee supprimée' });
   } catch (e) {
     logger.error?.('[Fees] deleteFee error', e);
@@ -145,12 +115,10 @@ exports.deleteFee = async (req, res) => {
   }
 };
 
-// ========== SIMULATE (UNIQUE, transaction & cancellation) ==========
-// GET /api/v1/fees/simulate?type=...&provider=...&amount=...&fromCurrency=...&toCurrency=...&country=...
-
+// ========== SIMULATE ==========
 exports.simulateFee = async (req, res) => {
   try {
-    const {
+    let {
       type = '', // "cancellation", "internal", etc.
       provider = '',
       amount,
@@ -160,7 +128,10 @@ exports.simulateFee = async (req, res) => {
       country = '',
     } = req.query;
 
-    // 1️⃣ Normalisation des devises (gère aussi F CFA / FCFA / symboles)
+    // ✅ normalisation provider/country (évite mismatch DB)
+    provider = String(provider || '').trim().toLowerCase();
+    country = String(country || '').trim().toLowerCase();
+
     const fromCur = normalizeCurrency(fromCurrency || currency || '');
     const toCur = normalizeCurrency(toCurrency || fromCur || '');
 
@@ -171,14 +142,12 @@ exports.simulateFee = async (req, res) => {
       });
     }
 
-    const amountNum = parseFloat(amount);
+    const amountNum = parseFloat(String(amount).replace(',', '.'));
     if (Number.isNaN(amountNum) || amountNum <= 0) {
-      return res
-        .status(400)
-        .json({ success: false, message: 'Montant invalide' });
+      return res.status(400).json({ success: false, message: 'Montant invalide' });
     }
 
-    // 2️⃣ CAS ANNULATION (barème dédié type "cancellation" ou "fixed" spécifique)
+    // 2️⃣ CAS ANNULATION
     if (type === 'cancellation') {
       let feeValue = 0;
       let feeType = 'fixed';
@@ -190,10 +159,7 @@ exports.simulateFee = async (req, res) => {
         active: true,
         currency: fromCur,
         minAmount: { $lte: amountNum },
-        $or: [
-          { maxAmount: { $gte: amountNum } },
-          { maxAmount: { $exists: false } },
-        ],
+        $or: [{ maxAmount: { $gte: amountNum } }, { maxAmount: { $exists: false } }],
       };
 
       if (provider) feeQuery.provider = provider;
@@ -207,18 +173,12 @@ exports.simulateFee = async (req, res) => {
         feeId = match._id;
         usedBareme = match;
 
-        // met à jour lastUsedAt
         match.lastUsedAt = new Date();
         await match.save();
       } else {
-        // Fallback : barème par devise (après normalisation)
-        if (['USD', 'CAD', 'EUR'].includes(fromCur)) {
-          feeValue = 2.99;
-        } else if (['XOF', 'XAF'].includes(fromCur)) {
-          feeValue = 300;
-        } else {
-          feeValue = 2;
-        }
+        if (['USD', 'CAD', 'EUR'].includes(fromCur)) feeValue = 2.99;
+        else if (['XOF', 'XAF'].includes(fromCur)) feeValue = 300;
+        else feeValue = 2;
       }
 
       return res.json({
@@ -237,22 +197,16 @@ exports.simulateFee = async (req, res) => {
     }
 
     // 3️⃣ CAS TRANSACTION NORMALE
-
-    // 3.1 – Essayer de trouver un barème dans la collection Fee
     const baseQuery = {
       active: true,
       currency: fromCur,
       minAmount: { $lte: amountNum },
-      $or: [
-        { maxAmount: { $gte: amountNum } },
-        { maxAmount: { $exists: false } },
-      ],
+      $or: [{ maxAmount: { $gte: amountNum } }, { maxAmount: { $exists: false } }],
     };
 
     if (provider) baseQuery.provider = provider;
     if (country) baseQuery.country = country;
 
-    // On ne filtre pas par type ici, on accepte "fixed" ou "percent"
     const bareme = await Fee.findOne(baseQuery).sort({ minAmount: -1 });
 
     let fees = 0;
@@ -268,22 +222,25 @@ exports.simulateFee = async (req, res) => {
       bareme.lastUsedAt = new Date();
       await bareme.save();
     } else {
-      // 3.2 – Fallback simple si aucun barème / pas encore de config
       let pct = 0.01; // 1% par défaut
-
-      const providerKey = (provider || '').toLowerCase();
-      if (providerKey === 'stripe' || providerKey === 'bank') {
-        pct = 0.015;
-      }
-
+      if (provider === 'stripe' || provider === 'bank') pct = 0.015;
       fees = parseFloat((amountNum * pct).toFixed(2));
-      feePercent = pct * 100; // ex: 0.01 -> 1
+      feePercent = pct * 100;
     }
 
     const netAfterFees = amountNum - fees;
 
-    // 4️⃣ Taux de change via service centralisé (déjà normalisé)
-    const rate = await getExchangeRate(fromCur, toCur);
+    // ✅ getExchangeRate retourne un objet { rate, source, stale, retryAfterSec... }
+    const fx = await getExchangeRate(fromCur, toCur);
+    const rate = Number(fx?.rate ?? fx);
+
+    if (fx?.retryAfterSec) {
+      res.setHeader('Retry-After', String(fx.retryAfterSec));
+    }
+
+    if (!Number.isFinite(rate) || rate <= 0) {
+      return res.status(503).json({ success: false, message: 'Taux de change indisponible' });
+    }
 
     const convertedAmount = parseFloat((amountNum * rate).toFixed(2));
     const convertedNet = parseFloat((netAfterFees * rate).toFixed(2));
@@ -294,8 +251,14 @@ exports.simulateFee = async (req, res) => {
         amount: amountNum,
         fromCurrency: fromCur,
         toCurrency: toCur,
+
+        // ✅ stable
         exchangeRate: rate,
-        feePercent, // % effectif si barème percent, ou fallback (1%, 1.5%, etc.)
+        fxSource: fx?.source,
+        fxStale: !!fx?.stale,
+        fxWarning: fx?.warning,
+
+        feePercent,
         fees,
         netAfterFees: parseFloat(netAfterFees.toFixed(2)),
         convertedAmount,
@@ -306,6 +269,17 @@ exports.simulateFee = async (req, res) => {
     });
   } catch (e) {
     logger.error?.('[Fees] simulateFee error', e);
-    res.status(500).json({ success: false, message: e.message });
+
+    // ✅ si c’est FX -> 503, sinon garder 500
+    const msg = String(e?.message || '');
+    const status =
+      e?.status ||
+      (msg.toLowerCase().includes('taux') || msg.toLowerCase().includes('fx') ? 503 : 500);
+
+    if (e?.debug?.blocked?.retryAfterSec) {
+      res.setHeader('Retry-After', String(e.debug.blocked.retryAfterSec));
+    }
+
+    return res.status(status).json({ success: false, message: e.message });
   }
 };
