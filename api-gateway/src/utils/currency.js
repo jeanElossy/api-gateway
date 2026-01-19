@@ -1,4 +1,3 @@
-// File: api-gateway/src/utils/currency.js
 'use strict';
 
 /**
@@ -7,25 +6,36 @@
  * - Gère "F CFA" / "FCFA" / "CFA" → XOF ou XAF (selon pays)
  * - Gère "$CAD", "CAD$", "USD$" → CAD / USD...
  *
+ * IMPORTANT:
+ * - Retourne soit un ISO propre (3 lettres), soit "".
+ * - N'envoie jamais du bruit ("FCFA", "CADUSD", etc.)
+ *
  * @param {string} input
  * @param {string} countryHint  (optionnel) ex: "Côte d'Ivoire", "cameroun"
  * @returns {string} code ISO upper-case ou chaîne vide
  */
 function normalizeCurrency(input, countryHint = '') {
-  if (!input) return '';
+  if (input == null) return '';
 
-  const raw = String(input).trim().toUpperCase(); // ex: "$CAD", "F CFA"
+  const raw = String(input).replace(/\u00A0/g, ' ').trim().toUpperCase();
+  if (!raw) return '';
+
   const compact = raw.replace(/\s+/g, '');        // ex: "FCFA"
   const lettersOnly = raw.replace(/[^A-Z]/g, ''); // ex: "CAD" pour "$CAD"
 
-  const KNOWN_ISO = ['EUR', 'USD', 'CAD', 'XOF', 'XAF', 'GBP'];
+  const KNOWN_ISO = new Set(['EUR', 'USD', 'CAD', 'XOF', 'XAF', 'GBP']);
 
   // ---- helper pays -> zone CFA
-  const normCountry = String(countryHint || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .trim();
+  let normCountry = '';
+  try {
+    normCountry = String(countryHint || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim();
+  } catch {
+    normCountry = String(countryHint || '').toLowerCase().trim();
+  }
 
   const isCentralAfrica =
     normCountry.includes('cameroun') ||
@@ -42,25 +52,33 @@ function normalizeCurrency(input, countryHint = '') {
     normCountry.includes('republique centrafricaine');
 
   // 1) CFA (avant tout)
-  const cfaKeywords = ['F CFA', 'FCFA', 'F.CFA', 'FRANC CFA', 'FRANCS CFA', 'CFA'];
-  if (cfaKeywords.includes(raw) || cfaKeywords.includes(compact)) {
+  // On détecte large: contient "CFA" ou "F CFA"
+  const hasCFA =
+    raw.includes('CFA') ||
+    compact.includes('CFA') ||
+    raw.includes('FRANC') && raw.includes('CFA');
+
+  if (hasCFA) {
     return isCentralAfrica ? 'XAF' : 'XOF';
   }
 
   // 2) Déjà ISO propre
-  if (KNOWN_ISO.includes(raw)) return raw;
+  if (KNOWN_ISO.has(raw)) return raw;
 
-  // 3) Récupération lettres ($CAD, CAD$, USD$)
-  if (lettersOnly.length === 3 && KNOWN_ISO.includes(lettersOnly)) return lettersOnly;
-
-  // 4) Symboles simples
+  // 3) Symboles directs
   if (raw === '€') return 'EUR';
   if (raw === '£') return 'GBP';
   if (raw === '$') return 'USD'; // par défaut
 
-  // 5) Fallback
+  // 4) "$CAD", "CAD$", "USD$", "US$" etc. -> on récupère 3 lettres si possibles
+  if (lettersOnly.length === 3 && KNOWN_ISO.has(lettersOnly)) return lettersOnly;
+
+  // 5) Fallback: si l'entrée est exactement 3 lettres (ISO inconnu), on renvoie quand même (option)
+  // Si tu veux être ultra strict: retourne '' au lieu de raw.
   if (/^[A-Z]{3}$/.test(raw)) return raw;
-  return lettersOnly || compact;
+
+  // ✅ sinon: on refuse le bruit
+  return '';
 }
 
 module.exports = {
