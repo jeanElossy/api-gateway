@@ -104,117 +104,190 @@ function getProviderCooldown(url) {
   return null;
 }
 
+
+
 /* -------------------------------------------------------------------
- *                    ✅ Multi-currency helpers (ISO stable)
+ *                    ✅ Multi-currency helpers (ISO stable + viewer)
  * ------------------------------------------------------------------- */
 
-// Convertit "€", "F CFA", "$CAD" en ISO: EUR, XOF, CAD...
-function normalizeCurrencyCode(v) {
-  const s = String(v || "").trim();
-  if (!s) return null;
+const { normalizeCurrency } = reqAny(["../src/utils/currency", "../utils/currency"]);
 
-  const up = s.toUpperCase();
-
-  // ISO direct
-  if (/^[A-Z]{3}$/.test(up)) return up;
-
-  // Labels / symboles fréquents
-  if (up === "€" || up.includes("EUR")) return "EUR";
-  if (up.includes("CAD") || up === "$CAD") return "CAD";
-  if (up === "$" || up.includes("USD")) return "USD";
-  if (up.includes("GBP") || up === "£") return "GBP";
-
-  // CFA (tes payloads: "F CFA")
-  if (up.includes("CFA")) return "XOF"; // si tu veux distinguer XAF/XOF: on pourra via pays/zone
-
-  return null;
-}
-
+// number safe
 function nNum(v) {
   const x = Number(v);
   return Number.isFinite(x) ? x : null;
 }
 
+function normalizeCurrencyCode(v, countryHint = "") {
+  const out = normalizeCurrency ? normalizeCurrency(v, countryHint) : "";
+  return out ? String(out).toUpperCase() : null;
+}
+
+function toIdStr(v) {
+  if (!v) return "";
+  try {
+    if (typeof v === "string") return v;
+    if (typeof v === "object" && v.toString) return v.toString();
+  } catch {}
+  return String(v);
+}
+
+function sameId(a, b) {
+  const as = toIdStr(a);
+  const bs = toIdStr(b);
+  return !!as && !!bs && as === bs;
+}
+
+function pickFirst(...vals) {
+  for (const v of vals) {
+    if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+  }
+  return null;
+}
+
+// Calcule direction relative au viewer (pour amountViewer)
+function computeDirectionForViewer(tx, viewerUserId) {
+  const me = viewerUserId ? String(viewerUserId) : "";
+
+  const owner =
+    tx?.ownerUserId ||
+    tx?.initiatorUserId ||
+    tx?.createdBy ||
+    tx?.userId ||
+    tx?.meta?.ownerUserId ||
+    tx?.meta?.initiatorUserId ||
+    tx?.meta?.createdBy;
+
+  const receiver =
+    tx?.receiver ||
+    tx?.receiverUserId ||
+    tx?.toUserId ||
+    tx?.meta?.receiver ||
+    tx?.meta?.receiverUserId;
+
+  if (me && receiver && sameId(receiver, me)) return "credit";
+  if (me && owner && sameId(owner, me)) return "debit";
+
+  // fallback: si tx.userId == me => debit
+  if (me && tx?.userId && sameId(tx.userId, me)) return "debit";
+
+  return "";
+}
+
 /**
- * Construit money.* de façon robuste à partir de tes champs:
- * - meta.selectedCurrency (ISO), meta.senderCurrencySymbol ("F CFA"/"$CAD"), meta.localCurrencySymbol ("€")
- * - meta.amount / amountPayer, meta.localAmount, meta.transactionFees, meta.exchangeRate
- * - amount / fees / netAmount / currency legacy
+ * Construit un "money" robuste depuis tx + meta.
+ * IMPORTANT:
+ * - targetCurrency doit venir de (currencyTarget/localCurrencySymbol), pas de viewerCurrencyCode.
  */
-function buildMoneyView(tx = {}) {
+function buildMoneyView(tx = {}, viewerUserId = null) {
   const m = tx.meta || {};
+  const r = m?.recipientInfo || {};
+
+  const countryHint =
+    tx.country ||
+    m.country ||
+    r.country ||
+    "";
 
   const sourceCurrency =
-    normalizeCurrencyCode(tx.currencySource) ||
-    normalizeCurrencyCode(m.selectedCurrency) ||
-    normalizeCurrencyCode(m.payerCurrencyCode) ||
-    normalizeCurrencyCode(m.baseCurrencyCode) ||
-    normalizeCurrencyCode(m.senderCurrencySymbol) ||
-    normalizeCurrencyCode(tx.currency);
+    normalizeCurrencyCode(tx.currencySource, countryHint) ||
+    normalizeCurrencyCode(m.currencySource, countryHint) ||
+    normalizeCurrencyCode(m.selectedCurrency, countryHint) ||
+    normalizeCurrencyCode(m.payerCurrencyCode, countryHint) ||
+    normalizeCurrencyCode(m.baseCurrencyCode, countryHint) ||
+    normalizeCurrencyCode(r.selectedCurrency, countryHint) ||
+    normalizeCurrencyCode(r.currencySender, countryHint) ||
+    normalizeCurrencyCode(r.senderCurrencySymbol, countryHint) ||
+    normalizeCurrencyCode(m.senderCurrencySymbol, countryHint) ||
+    normalizeCurrencyCode(tx.currency, countryHint);
 
   const targetCurrency =
-    normalizeCurrencyCode(tx.currencyTarget) ||
-    normalizeCurrencyCode(m.localCurrencySymbol) ||
-    normalizeCurrencyCode(m.viewerCurrencyCode) ||
+    normalizeCurrencyCode(tx.currencyTarget, countryHint) ||
+    normalizeCurrencyCode(m.currencyTarget, countryHint) ||
+    normalizeCurrencyCode(m.localCurrencyCode, countryHint) ||
+    normalizeCurrencyCode(r.localCurrencyCode, countryHint) ||
+    normalizeCurrencyCode(m.localCurrencySymbol, countryHint) ||
+    normalizeCurrencyCode(r.localCurrencySymbol, countryHint) ||
     null;
 
   const amountSource =
     nNum(tx.amountSource) ??
+    nNum(m.amountSource) ??
     nNum(m.amountPayer) ??
+    nNum(r.amountPayer) ??
     nNum(m.amount) ??
+    nNum(r.amount) ??
     nNum(tx.amount);
 
   const amountTarget =
     nNum(tx.amountTarget) ??
+    nNum(m.amountTarget) ??
     nNum(m.localAmount) ??
+    nNum(r.localAmount) ??
     nNum(m.amountCreator) ??
+    nNum(r.amountCreator) ??
     nNum(tx.netAmount) ??
     null;
 
   const feeSource =
     nNum(tx.feeSource) ??
+    nNum(m.feeSource) ??
     nNum(m.transactionFees) ??
+    nNum(r.transactionFees) ??
     nNum(m.feeAmount) ??
     nNum(tx.fees) ??
     null;
 
   const fx =
     nNum(tx.fxRateSourceToTarget) ??
+    nNum(m.fxRateSourceToTarget) ??
     nNum(m.exchangeRate) ??
+    nNum(r.exchangeRate) ??
     nNum(m.fxPayerToCreator) ??
+    nNum(m?.fxBaseToAdmin?.rate) ??
     null;
 
-  return {
+  const money = {
     source: amountSource != null && sourceCurrency ? { amount: amountSource, currency: sourceCurrency } : null,
     feeSource: feeSource != null && sourceCurrency ? { amount: feeSource, currency: sourceCurrency } : null,
     target: amountTarget != null && targetCurrency ? { amount: amountTarget, currency: targetCurrency } : null,
     fxRateSourceToTarget: fx != null ? fx : null,
   };
+
+  // ✅ viewer fields (comme cagnotte/vault)
+  const direction = computeDirectionForViewer(tx, viewerUserId);
+  const viewerAtom = direction === "credit" ? money.target : direction === "debit" ? money.source : null;
+
+  const viewerCurrencyCode = viewerAtom?.currency || money.source?.currency || money.target?.currency || null;
+  const amountViewer = viewerAtom?.amount ?? null;
+
+  return { money, viewerCurrencyCode, amountViewer, direction, countryHint };
 }
 
-function normalizeTxForResponse(tx) {
+function normalizeTxForResponse(tx, viewerUserId = null) {
   if (!tx || typeof tx !== "object") return tx;
 
   const out = { ...tx };
-
-  // uniformiser id (provider parfois "id", DB "_id")
   out.id = out.id || (out._id ? String(out._id) : undefined);
 
-  // normaliser legacy currency si possible (évite "$CAD"/"F CFA" qui traînent)
-  const isoLegacy = normalizeCurrencyCode(out.currency);
+  const { money, viewerCurrencyCode, amountViewer, direction, countryHint } = buildMoneyView(out, viewerUserId);
+
+  // ✅ normalise legacy currency: toujours ISO
+  const isoLegacy = normalizeCurrencyCode(out.currency, countryHint);
   if (isoLegacy) out.currency = isoLegacy;
 
-  // remplir les champs multi-devise si manquants (sans casser l’existant)
-  const money = buildMoneyView(out);
-
-  out.currencySource = out.currencySource || money.source?.currency || null;
+  // ✅ remplit les champs flat
+  out.currencySource = normalizeCurrencyCode(out.currencySource, countryHint) || money.source?.currency || null;
   out.amountSource = out.amountSource != null ? out.amountSource : (money.source?.amount ?? null);
   out.feeSource = out.feeSource != null ? out.feeSource : (money.feeSource?.amount ?? null);
-  out.currencyTarget = out.currencyTarget || money.target?.currency || null;
-  out.amountTarget = out.amountTarget != null ? out.amountTarget : (money.target?.amount ?? null);
-  out.fxRateSourceToTarget = out.fxRateSourceToTarget != null ? out.fxRateSourceToTarget : (money.fxRateSourceToTarget ?? null);
 
-  // objet money stable pour le frontend
+  out.currencyTarget = normalizeCurrencyCode(out.currencyTarget, countryHint) || money.target?.currency || null;
+  out.amountTarget = out.amountTarget != null ? out.amountTarget : (money.target?.amount ?? null);
+
+  out.fxRateSourceToTarget =
+    out.fxRateSourceToTarget != null ? out.fxRateSourceToTarget : (money.fxRateSourceToTarget ?? null);
+
+  // ✅ objet money stable
   out.money = {
     source: money.source,
     feeSource: money.feeSource,
@@ -222,12 +295,31 @@ function normalizeTxForResponse(tx) {
     fxRateSourceToTarget: money.fxRateSourceToTarget,
   };
 
+  // ✅ compat UI (comme cagnotte/vault)
+  out.viewerCurrencyCode = viewerCurrencyCode;
+  out.amountViewer = amountViewer;
+  out.directionForViewer = direction;
+
+  out.meta = { ...(out.meta || {}) };
+  if (viewerCurrencyCode) out.meta.viewerCurrencyCode = viewerCurrencyCode;
+  if (amountViewer != null) out.meta.amountViewer = amountViewer;
+
+  // sécurité: legacy currency suit source si possible
+  if (out.currencySource && (!out.currency || out.currency.length !== 3)) out.currency = out.currencySource;
+
   return out;
 }
 
-function normalizeTxArray(list = []) {
-  return (Array.isArray(list) ? list : []).map(normalizeTxForResponse);
+function normalizeTxArray(list = [], viewerUserId = null) {
+  return (Array.isArray(list) ? list : []).map((t) => normalizeTxForResponse(t, viewerUserId));
 }
+
+
+
+
+
+
+
 
 /* -------------------------------------------------------------------
  *                        Helpers phone OTP
@@ -368,6 +460,41 @@ function cleanSensitiveMeta(meta = {}) {
   if (clone.securityCode) delete clone.securityCode;
   return clone;
 }
+
+
+function normalizeRecipientInfoCurrencies(meta = {}, countryHint = "") {
+  const m = meta && typeof meta === "object" ? { ...meta } : {};
+  const ri = m.recipientInfo && typeof m.recipientInfo === "object" ? { ...m.recipientInfo } : null;
+
+  if (!ri) return m;
+
+  // On garde les valeurs originales (debug) mais on ajoute des ISO stables
+  const senderISO =
+    normalizeCurrencyCode(ri.selectedCurrency, countryHint) ||
+    normalizeCurrencyCode(ri.currencySender, countryHint) ||
+    normalizeCurrencyCode(ri.senderCurrencySymbol, countryHint) ||
+    null;
+
+  const targetISO =
+    normalizeCurrencyCode(ri.localCurrencySymbol, countryHint) ||
+    normalizeCurrencyCode(m.viewerCurrencyCode, countryHint) ||
+    null;
+
+  ri.senderCurrencyISO = senderISO || undefined;
+  ri.localCurrencyISO = targetISO || undefined;
+
+  // Optionnel: on peut aussi “nettoyer” les champs legacy pour éviter que l’UI lise un symbole
+  // (si tu as peur de casser, commente les 2 lignes ci-dessous)
+  if (senderISO) ri.senderCurrencySymbol = senderISO;
+  if (targetISO) ri.localCurrencySymbol = targetISO;
+
+  m.recipientInfo = ri;
+  return m;
+}
+
+
+
+
 
 function getUserId(req) {
   return req.user?._id || req.user?.id || null;
@@ -955,6 +1082,8 @@ function _listTxCacheKey({ userId, provider, query }) {
   return `u:${String(userId)}|p:${String(provider)}|q:${qs}`;
 }
 
+
+
 exports.getTransaction = async (req, res) => {
   const provider = resolveProvider(req, "paynoval");
   const targetService = PROVIDER_TO_SERVICE[provider];
@@ -962,6 +1091,8 @@ exports.getTransaction = async (req, res) => {
   if (!targetService) {
     return res.status(400).json({ success: false, error: `Provider inconnu: ${provider}` });
   }
+
+  const userId = getUserId(req);
 
   const { id } = req.params;
   const base = String(targetService).replace(/\/+$/, "");
@@ -976,18 +1107,15 @@ exports.getTransaction = async (req, res) => {
       timeout: 10000,
     });
 
-    // ✅ Normalisation multi-devise côté réponse
     const payload = response.data || {};
     const data = payload?.data || payload?.transaction || payload;
 
     if (data && typeof data === "object") {
-      const normalized = normalizeTxForResponse(data);
+      const normalized = normalizeTxForResponse(data, userId);
+
       if (payload?.data) payload.data = normalized;
       else if (payload?.transaction) payload.transaction = normalized;
-      else {
-        // payload = tx brut
-        return res.status(response.status).json(normalized);
-      }
+      else return res.status(response.status).json(normalized);
     }
 
     return res.status(response.status).json(payload);
@@ -1019,6 +1147,10 @@ exports.getTransaction = async (req, res) => {
   }
 };
 
+
+
+
+
 exports.listTransactions = async (req, res) => {
   const provider = resolveProvider(req, "paynoval");
   const targetService = PROVIDER_TO_SERVICE[provider];
@@ -1028,7 +1160,6 @@ exports.listTransactions = async (req, res) => {
     return res.status(401).json({ success: false, error: "Non autorisé." });
   }
 
-  // ✅ évite 304 et cache HTTP côté client
   try {
     res.set("Cache-Control", "no-store, no-cache, must-revalidate, private");
     res.set("Pragma", "no-cache");
@@ -1037,13 +1168,11 @@ exports.listTransactions = async (req, res) => {
 
   const cacheKey = _listTxCacheKey({ userId, provider, query: req.query });
 
-  // 1) cache HIT (valeur)
   const cached = listTxCache.get(cacheKey);
   if (cached && cached.body) {
     return res.status(cached.status || 200).json(cached.body);
   }
 
-  // 2) in-flight (promise) => dédup (une seule requête réelle)
   const inflight = listTxInflight.get(cacheKey);
   if (inflight && typeof inflight.then === "function") {
     try {
@@ -1051,7 +1180,6 @@ exports.listTransactions = async (req, res) => {
       return res.status(out.status || 200).json(out.body);
     } catch {
       listTxInflight.delete(cacheKey);
-      // continue
     }
   }
 
@@ -1076,7 +1204,6 @@ exports.listTransactions = async (req, res) => {
       return out;
     };
 
-    // ✅ Gateway DB always available
     const gatewayQuery = {
       provider,
       $or: [
@@ -1096,16 +1223,18 @@ exports.listTransactions = async (req, res) => {
         .limit(300)
         .lean();
 
-      gatewayTx = (gatewayTx || []).map((t) => normalizeTxForResponse({
-        ...t,
-        id: t?._id ? String(t._id) : t?.id,
-      }));
+      gatewayTx = normalizeTxArray(
+        (gatewayTx || []).map((t) => ({
+          ...t,
+          id: t?._id ? String(t._id) : t?.id,
+        })),
+        userId
+      );
     } catch (e) {
       logger.warn("[Gateway][TX] listTransactions: failed to read gateway DB", { message: e?.message });
       gatewayTx = [];
     }
 
-    // Pas de provider service => return DB only
     if (!targetService) {
       return {
         status: 200,
@@ -1124,7 +1253,6 @@ exports.listTransactions = async (req, res) => {
     const base = String(targetService).replace(/\/+$/, "");
     const url = `${base}/transactions`;
 
-    // ✅ Si cooldown actif => on skip provider direct
     const cdBefore = getProviderCooldown(url);
     if (cdBefore) {
       return {
@@ -1154,18 +1282,17 @@ exports.listTransactions = async (req, res) => {
       const payload = response.data || {};
       const providerListRaw = extractTxArrayFromProviderPayload(payload);
 
-      // ✅ Normalise provider list AVANT merge
-      const providerList = normalizeTxArray(providerListRaw);
+      // ✅ normalise provider list AVEC viewer
+      const providerList = normalizeTxArray(providerListRaw, userId);
 
       const mergedRaw = mergeAndDedupTx(providerList, gatewayTx);
 
-      // ✅ Normalise merged (sécurité)
-      const merged = normalizeTxArray(mergedRaw);
+      // ✅ normalise merged
+      const merged = normalizeTxArray(mergedRaw, userId);
 
       let finalPayload = injectTxArrayIntoProviderPayload(payload, merged);
       finalPayload = normalizeListMeta(finalPayload, merged);
 
-      // ✅ force 200 pour éviter 304 body vide (mobile)
       return { status: 200, body: finalPayload };
     } catch (err) {
       if (err.isProviderCooldown || err.isCloudflareChallenge) {
@@ -1213,7 +1340,6 @@ exports.listTransactions = async (req, res) => {
     }
   };
 
-  // ✅ dédup in-flight
   const promise = (async () => {
     const out = await compute();
     listTxCache.set(cacheKey, out);
@@ -1232,6 +1358,11 @@ exports.listTransactions = async (req, res) => {
     listTxInflight.delete(cacheKey);
   }
 };
+
+
+
+
+
 
 /**
  * POST /transactions/initiate
@@ -2223,6 +2354,7 @@ exports.cancelTransaction = async (req, res) => {
  * - on remplit aussi amountSource/currencySource/feeSource/amountTarget/currencyTarget/fxRateSourceToTarget
  * - on construit tx.money pour que le front affiche toujours juste
  */
+
 exports.logInternalTransaction = async (req, res) => {
   try {
     const now = new Date();
@@ -2242,7 +2374,7 @@ exports.logInternalTransaction = async (req, res) => {
       provider = "paynoval",
       amount,
       status = "confirmed",
-      currency, // peut arriver en symbol => normalisé
+      currency,
       operator = "paynoval",
       country,
       reference,
@@ -2255,7 +2387,7 @@ exports.logInternalTransaction = async (req, res) => {
       initiatorUserId,
       providerTxId,
 
-      // ✅ (optionnel) si tu veux envoyer déjà multi-devise depuis le caller
+      // optionnel multi-devise
       amountSource,
       currencySource,
       feeSource,
@@ -2266,9 +2398,7 @@ exports.logInternalTransaction = async (req, res) => {
 
     const numAmount = Number(amount);
     if (!numAmount || Number.isNaN(numAmount) || numAmount <= 0) {
-      return res
-        .status(400)
-        .json({ success: false, error: "amount invalide ou manquant pour loguer la transaction." });
+      return res.status(400).json({ success: false, error: "amount invalide ou manquant pour loguer la transaction." });
     }
 
     const createdById = asObjectIdOrNull(createdBy) || finalUserId;
@@ -2280,9 +2410,6 @@ exports.logInternalTransaction = async (req, res) => {
     const receiverRaw = receiver && !receiverId ? receiver : undefined;
     const createdByRaw = createdBy && !asObjectIdOrNull(createdBy) ? createdBy : undefined;
 
-    // ------------------------------------------------------------------
-    // ✅ Multi-devise: normalisation ISO + extraction depuis meta si besoin
-    // ------------------------------------------------------------------
     const countryHint =
       country ||
       meta?.country ||
@@ -2290,91 +2417,75 @@ exports.logInternalTransaction = async (req, res) => {
       meta?.recipientInfo?.pays ||
       "";
 
-    // Helpers locaux (si tu as déjà ceux du fichier, supprime-les ici et utilise les tiens)
-    const _num = (v) => {
-      const n = Number(v);
-      return Number.isFinite(n) ? n : null;
-    };
-    const _cur = (v) => normalizeCurrencyCode(v, countryHint) || null;
-
     const m = meta || {};
     const r = m?.recipientInfo || {};
 
-    // SOURCE (expéditeur)
     const finalAmountSource =
-      _num(amountSource) ??
-      _num(m.amountPayer) ??
-      _num(m.amountSender) ??
-      _num(m.amount) ??
+      nNum(amountSource) ??
+      nNum(m.amountPayer) ??
+      nNum(m.amountSender) ??
+      nNum(m.amount) ??
       numAmount;
 
     const finalCurrencySource =
-      _cur(currencySource) ||
-      _cur(m.selectedCurrency) ||
-      _cur(m.payerCurrencyCode) ||
-      _cur(m.baseCurrencyCode) ||
-      _cur(r.selectedCurrency) ||
-      _cur(r.currencySender) ||
-      _cur(r.senderCurrencySymbol) ||
-      _cur(m.senderCurrencySymbol) ||
-      _cur(currency) ||
+      normalizeCurrencyCode(currencySource, countryHint) ||
+      normalizeCurrencyCode(m.selectedCurrency, countryHint) ||
+      normalizeCurrencyCode(m.payerCurrencyCode, countryHint) ||
+      normalizeCurrencyCode(m.baseCurrencyCode, countryHint) ||
+      normalizeCurrencyCode(r.selectedCurrency, countryHint) ||
+      normalizeCurrencyCode(r.currencySender, countryHint) ||
+      normalizeCurrencyCode(r.senderCurrencySymbol, countryHint) ||
+      normalizeCurrencyCode(m.senderCurrencySymbol, countryHint) ||
+      normalizeCurrencyCode(currency, countryHint) ||
       null;
 
-    // FEES (côté source)
     const finalFeeSource =
-      _num(feeSource) ??
-      _num(m.transactionFees) ??
-      _num(r.transactionFees) ??
-      _num(m.feeAmount) ??
-      _num(fees) ??
+      nNum(feeSource) ??
+      nNum(m.transactionFees) ??
+      nNum(r.transactionFees) ??
+      nNum(m.feeAmount) ??
+      nNum(fees) ??
       null;
 
-    // TARGET (local reçu / viewer)
     const finalAmountTarget =
-      _num(amountTarget) ??
-      _num(m.localAmount) ??
-      _num(r.localAmount) ??
-      _num(m.amountCreator) ??
-      _num(netAmount) ??
+      nNum(amountTarget) ??
+      nNum(m.localAmount) ??
+      nNum(r.localAmount) ??
+      nNum(m.amountCreator) ??
+      nNum(netAmount) ??
       null;
 
     const finalCurrencyTarget =
-      _cur(currencyTarget) ||
-      _cur(m.localCurrencySymbol) ||
-      _cur(r.localCurrencySymbol) ||
-      _cur(m.viewerCurrencyCode) ||
+      normalizeCurrencyCode(currencyTarget, countryHint) ||
+      normalizeCurrencyCode(m.localCurrencySymbol, countryHint) ||
+      normalizeCurrencyCode(r.localCurrencySymbol, countryHint) ||
+      normalizeCurrencyCode(m.viewerCurrencyCode, countryHint) ||
       null;
 
-    // FX
     const finalFxRate =
-      _num(fxRateSourceToTarget) ??
-      _num(m.exchangeRate) ??
-      _num(r.exchangeRate) ??
-      _num(m.fxPayerToCreator) ??
-      _num(m?.fxBaseToAdmin?.rate) ??
+      nNum(fxRateSourceToTarget) ??
+      nNum(m.exchangeRate) ??
+      nNum(r.exchangeRate) ??
+      nNum(m.fxPayerToCreator) ??
+      nNum(m?.fxBaseToAdmin?.rate) ??
       null;
 
-    // Legacy currency: doit matcher la devise source (ISO)
-    const legacyCurrency = finalCurrencySource || _cur(currency) || null;
+    const legacyCurrency = finalCurrencySource || normalizeCurrencyCode(currency, countryHint) || null;
 
-    // ------------------------------------------------------------------
-    // ✅ Construction TX (DB)
-    // ------------------------------------------------------------------
     const tx = await Transaction.create({
       userId: finalUserId,
       ownerUserId: ownerId,
       initiatorUserId: initiatorId,
 
       provider,
-      amount: finalAmountSource != null ? finalAmountSource : numAmount, // legacy aligné source
+      amount: finalAmountSource != null ? finalAmountSource : numAmount,
       status,
-      currency: legacyCurrency || undefined, // ISO uniquement
+      currency: legacyCurrency || undefined,
       operator,
       country,
       reference,
       providerTxId: providerTxId ? String(providerTxId) : undefined,
 
-      // ✅ multi-devise flat
       amountSource: finalAmountSource != null ? finalAmountSource : undefined,
       currencySource: finalCurrencySource || undefined,
       feeSource: finalFeeSource != null ? finalFeeSource : undefined,
@@ -2382,7 +2493,6 @@ exports.logInternalTransaction = async (req, res) => {
       currencyTarget: finalCurrencyTarget || undefined,
       fxRateSourceToTarget: finalFxRate != null ? finalFxRate : undefined,
 
-      // ✅ money objet prêt pour le front
       money: {
         source:
           finalAmountSource != null && finalCurrencySource
@@ -2399,7 +2509,6 @@ exports.logInternalTransaction = async (req, res) => {
         fxRateSourceToTarget: finalFxRate != null ? finalFxRate : null,
       },
 
-      // Legacy fees/netAmount conservés (si tu veux)
       fees: typeof fees === "number" ? fees : fees != null ? Number(fees) : undefined,
       netAmount: typeof netAmount === "number" ? netAmount : netAmount != null ? Number(netAmount) : undefined,
 
@@ -2411,13 +2520,11 @@ exports.logInternalTransaction = async (req, res) => {
 
       meta: {
         ...cleanSensitiveMeta(meta),
-        // ✅ trace roles
         ownerUserId: toIdStr(ownerId),
         initiatorUserId: toIdStr(initiatorId),
         ...(receiverRaw ? { receiverRaw } : {}),
         ...(createdByRaw ? { createdByRaw } : {}),
 
-        // ✅ garde aussi les champs normalisés (utile debug)
         currencyISO: legacyCurrency || undefined,
         currencySourceISO: finalCurrencySource || undefined,
         currencyTargetISO: finalCurrencyTarget || undefined,
@@ -2430,22 +2537,14 @@ exports.logInternalTransaction = async (req, res) => {
       receiver: receiverId || undefined,
     });
 
-    // ✅ renvoie aussi la version normalisée (au cas où ton pre-save n'est pas encore en place)
-    const txOut = typeof normalizeTxMoney === "function" ? normalizeTxMoney(tx.toObject ? tx.toObject() : tx) : tx;
-
+    // ✅ retourne une version normalisée (viewer = finalUserId ici)
+    const txOut = normalizeTxForResponse(tx.toObject ? tx.toObject() : tx, finalUserId);
     return res.status(201).json({ success: true, data: txOut });
   } catch (err) {
-    logger.error("[Gateway][TX] logInternalTransaction error", {
-      message: err.message,
-      stack: err.stack,
-    });
-    return res.status(500).json({
-      success: false,
-      error: "Erreur lors de la création de la transaction interne.",
-    });
+    logger.error("[Gateway][TX] logInternalTransaction error", { message: err.message, stack: err.stack });
+    return res.status(500).json({ success: false, error: "Erreur lors de la création de la transaction interne." });
   }
 };
-
 
 
 

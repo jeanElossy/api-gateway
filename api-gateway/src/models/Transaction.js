@@ -3,10 +3,16 @@
 
 const mongoose = require("mongoose");
 
+const toISO = (v) => {
+  const s = String(v || "").trim();
+  if (!s) return undefined;
+  return s.toUpperCase();
+};
+
 const MoneyAtomSchema = new mongoose.Schema(
   {
     amount: { type: Number },
-    currency: { type: String }, // ISO: EUR, XOF, CAD...
+    currency: { type: String, set: toISO }, // ISO: EUR, XOF, CAD...
   },
   { _id: false }
 );
@@ -43,29 +49,29 @@ const TransactionSchema = new mongoose.Schema({
     enum: ["deposit", "withdraw", "send"],
     default: "send",
   },
-  funds: { type: String }, // ex: 'paynoval', 'stripe', 'mobilemoney'
-  destination: { type: String }, // ex: 'bank', 'mobilemoney', 'paynoval'
-  providerSelected: { type: String }, // provider routé réel (celui utilisé)
+  funds: { type: String },
+  destination: { type: String },
+  providerSelected: { type: String },
 
   // ------------------------------------------------------------------
-  // ✅ LEGACY (toujours présent pour compat) : NE PLUS AFFICHER EN UI
+  // ✅ LEGACY (compat) : NE PLUS UTILISER EN UI
   // ------------------------------------------------------------------
   amount: { type: Number, required: true },
   fees: { type: Number },
   netAmount: { type: Number },
-  currency: { type: String }, // legacy (peut avoir été symbole "€", "F CFA", "$CAD" => on normalise)
+  currency: { type: String, set: toISO }, // legacy (doit être ISO)
 
   // ------------------------------------------------------------------
   // ✅ NOUVEAU: multi-devise stable (ISO)
   // ------------------------------------------------------------------
-  amountSource: { type: Number },        // montant côté expéditeur/payer
-  currencySource: { type: String },      // ISO: XOF, CAD, EUR...
-  feeSource: { type: Number },           // frais côté expéditeur (si applicable)
-  amountTarget: { type: Number },        // montant côté destinataire (localAmount)
-  currencyTarget: { type: String },      // ISO: EUR, XOF, CAD...
-  fxRateSourceToTarget: { type: Number },// taux (source -> target)
+  amountSource: { type: Number },
+  currencySource: { type: String, set: toISO },
+  feeSource: { type: Number },
+  amountTarget: { type: Number },
+  currencyTarget: { type: String, set: toISO },
+  fxRateSourceToTarget: { type: Number },
 
-  // Vue “money” (optionnel en DB, utile si tu veux stocker, sinon on l’ajoute en réponse)
+  // Vue “money”
   money: {
     source: { type: MoneyAtomSchema, default: undefined },
     feeSource: { type: MoneyAtomSchema, default: undefined },
@@ -114,29 +120,17 @@ TransactionSchema.pre("findOneAndUpdate", function (next) {
   next();
 });
 
-// Index performants
+// Index
 TransactionSchema.index({ provider: 1, status: 1, createdAt: -1 });
 TransactionSchema.index({ userId: 1, provider: 1, reference: 1 });
-
-// ✅ match rapide confirm/cancel via providerTxId
 TransactionSchema.index({ provider: 1, providerTxId: 1 }, { sparse: true });
-
-// ✅ utile pour retrouver rapidement “l’expéditeur” réel
 TransactionSchema.index({ ownerUserId: 1, createdAt: -1 }, { sparse: true });
 TransactionSchema.index({ initiatorUserId: 1, createdAt: -1 }, { sparse: true });
-
-// 🔍 Pour historique mobile par rôles
 TransactionSchema.index({ createdBy: 1, createdAt: -1 });
 TransactionSchema.index({ receiver: 1, createdAt: -1 });
-
-// Unicité "souple" sur (provider, reference)
 TransactionSchema.index({ provider: 1, reference: 1 }, { sparse: true });
-
-// ✅ Flow debug
 TransactionSchema.index({ providerSelected: 1, createdAt: -1 }, { sparse: true });
 TransactionSchema.index({ action: 1, createdAt: -1 }, { sparse: true });
-
-// ✅ Multi-devise (utile pour analytics / debug)
 TransactionSchema.index({ currencySource: 1, createdAt: -1 }, { sparse: true });
 TransactionSchema.index({ currencyTarget: 1, createdAt: -1 }, { sparse: true });
 
