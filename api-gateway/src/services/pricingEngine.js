@@ -21,19 +21,16 @@ function stripAccents(s) {
 
 /**
  * ✅ Normalisation txType robuste
- * - accepte TRANSFER/DEPOSIT/WITHDRAW (officiel)
- * - accepte send/withdraw/deposit (mobile / legacy)
  */
 function normalizeTxType(v) {
   const raw = upper(v);
   if (!raw) return "";
 
-  // already valid
   if (raw === "TRANSFER" || raw === "DEPOSIT" || raw === "WITHDRAW") return raw;
 
-  // aliases
   const low = lower(v);
-  if (low === "send" || low === "p2p" || low === "transfer" || low === "transfert") return "TRANSFER";
+  if (low === "send" || low === "p2p" || low === "transfer" || low === "transfert")
+    return "TRANSFER";
   if (low === "deposit" || low === "topup" || low === "cashin") return "DEPOSIT";
   if (low === "withdraw" || low === "withdrawal" || low === "cashout") return "WITHDRAW";
 
@@ -42,14 +39,13 @@ function normalizeTxType(v) {
 
 /**
  * ✅ Country normalization (ISO2 preferred)
- * Ton app envoie parfois "france" ou "cote d'ivoire".
- * Tes rules utilisent souvent ["FR","CI",...]
+ * - accepte "france", "FR", "fr", "Côte d'Ivoire", etc.
  */
 const COUNTRY_ALIASES_TO_ISO2 = {
   // FR
-  "FRANCE": "FR",
-  "FRENCH": "FR",
-  "FR": "FR",
+  FRANCE: "FR",
+  FRENCH: "FR",
+  FR: "FR",
 
   // CI
   "COTE D'IVOIRE": "CI",
@@ -57,71 +53,72 @@ const COUNTRY_ALIASES_TO_ISO2 = {
   "CÔTE D'IVOIRE": "CI",
   "CÔTE D IVOIRE": "CI",
   "IVORY COAST": "CI",
-  "CIV": "CI",
-  "CI": "CI",
+  CIV: "CI",
+  CI: "CI",
 
   // BF
   "BURKINA FASO": "BF",
-  "BF": "BF",
+  BF: "BF",
 
   // ML
-  "MALI": "ML",
-  "ML": "ML",
+  MALI: "ML",
+  ML: "ML",
 
   // SN
-  "SENEGAL": "SN",
+  SENEGAL: "SN",
   "SÉNÉGAL": "SN",
-  "SN": "SN",
+  SN: "SN",
 
   // CM
-  "CAMEROUN": "CM",
-  "CAMEROON": "CM",
-  "CM": "CM",
+  CAMEROUN: "CM",
+  CAMEROON: "CM",
+  CM: "CM",
 
   // CA
-  "CANADA": "CA",
-  "CA": "CA",
+  CANADA: "CA",
+  CA: "CA",
 
   // US
-  "USA": "US",
+  USA: "US",
   "UNITED STATES": "US",
   "ETATS UNIS": "US",
   "ÉTATS UNIS": "US",
-  "US": "US",
+  US: "US",
 
   // BE
-  "BELGIQUE": "BE",
-  "BELGIUM": "BE",
-  "BE": "BE",
+  BELGIQUE: "BE",
+  BELGIUM: "BE",
+  BE: "BE",
 
   // DE
-  "ALLEMAGNE": "DE",
-  "GERMANY": "DE",
-  "DE": "DE",
+  ALLEMAGNE: "DE",
+  GERMANY: "DE",
+  DE: "DE",
 };
 
 function normalizeCountryISO2(v) {
-  const raw = upper(stripAccents(v));
+  const raw0 = stripAccents(v);
+  const raw = upper(raw0);
   if (!raw) return null;
 
-  // si déjà ISO2
+  // ISO2
   if (/^[A-Z]{2}$/.test(raw)) return raw;
 
-  // si ISO3 -> on essaie mapping minimal
+  // ISO3 minimal
   if (raw === "CIV") return "CI";
 
   const mapped = COUNTRY_ALIASES_TO_ISO2[raw];
   if (mapped) return mapped;
 
-  // tentative: enlever ponctuation
+  // nettoyage ponctuation
   const cleaned = raw.replace(/[^A-Z ]/g, " ").replace(/\s+/g, " ").trim();
-  return COUNTRY_ALIASES_TO_ISO2[cleaned] || cleaned || null;
+  return COUNTRY_ALIASES_TO_ISO2[cleaned] || null;
 }
 
 /**
- * Retourne une liste de tokens pays possibles pour matcher:
- * ex "france" => ["FR", "FRANCE"]
- * ex "CI" => ["CI", "COTE D'IVOIRE", ...] (on garde iso + raw)
+ * Tokens possibles pour matcher countries
+ * ex "france" => ["FR","FRANCE"]
+ * ex "fr" => ["FR","FR"]
  */
 function countryTokens(v) {
   const rawUp = upper(stripAccents(v));
@@ -131,7 +128,6 @@ function countryTokens(v) {
   if (iso2) tokens.push(iso2);
   if (rawUp) tokens.push(rawUp);
 
-  // unique
   return Array.from(new Set(tokens.filter(Boolean)));
 }
 
@@ -158,22 +154,20 @@ function inRange(amount, range) {
 }
 
 /**
- * ✅ match list optionnelle :
- * - si list vide => ok
- * - sinon, match si value == un des items (case-insensitive)
+ * ✅ match list optionnelle (case-insensitive + accents-safe)
  */
 function matchesOptionalList(value, list) {
   if (!Array.isArray(list) || list.length === 0) return true;
   if (!value) return false;
 
-  const v = String(value).trim().toUpperCase();
-  return list.some((x) => String(x).trim().toUpperCase() === v);
+  const v = upper(stripAccents(value));
+  return list.some((x) => upper(stripAccents(x)) === v);
 }
 
 /**
  * ✅ match countries robuste :
- * - la règle contient souvent ["FR","CI"]
- * - la requête peut contenir "france" => tokens ["FR","FRANCE"]
+ * - ruleCountries ex ["FR","CI"] (ou même ["fr"])
+ * - reqCountry peut être "france"
  */
 function matchesCountries(reqCountry, ruleCountries) {
   if (!Array.isArray(ruleCountries) || ruleCountries.length === 0) return true;
@@ -186,23 +180,27 @@ function matchesCountries(reqCountry, ruleCountries) {
 }
 
 /**
- * Sélectionne la meilleure règle parmi une liste déjà chargée (actives)
+ * Sélectionne la meilleure règle (priority desc puis updatedAt desc)
  */
 function pickBestRule(rules, req) {
   const txType = normalizeTxType(req.txType);
   const fromCurrency = upper(req.fromCurrency);
   const toCurrency = upper(req.toCurrency);
 
-  // ✅ country normalisé en ISO2, mais on garde raw tokens pour matcher
   const reqCountryRaw = req.country ? String(req.country) : null;
-  const operator = req.operator ? normStr(req.operator) : null;
+
+  // operator: on normalise pour matcher rule.scope.operators
+  const operator =
+    req.operator != null && String(req.operator).trim()
+      ? upper(stripAccents(req.operator))
+      : null;
 
   const amount = Number(req.amount);
 
   const candidates = (rules || []).filter((r) => {
     if (!r?.active) return false;
 
-    // txType strict (mais on normalise la req)
+    // txType strict
     if (upper(r?.scope?.txType) !== txType) return false;
 
     // currencies strict
@@ -219,7 +217,6 @@ function pickBestRule(rules, req) {
     return true;
   });
 
-  // tri: priority desc puis updatedAt desc
   candidates.sort((a, b) => {
     const pa = Number(a?.priority ?? 0);
     const pb = Number(b?.priority ?? 0);
@@ -278,8 +275,14 @@ async function computeQuote({ req, rules, getMarketRate }) {
   const toCurrency = upper(req.toCurrency);
 
   const txType = normalizeTxType(req.txType);
+
+  // ✅ important: on normalise en ISO2 pour matcher rules ["FR","CI"...]
   const countryISO2 = req.country ? normalizeCountryISO2(req.country) : null;
-  const operator = req.operator ? normStr(req.operator) : null;
+
+  const operator =
+    req.operator != null && String(req.operator).trim()
+      ? upper(stripAccents(req.operator))
+      : null;
 
   if (!Number.isFinite(amount) || amount <= 0) {
     const err = new Error("Invalid amount");
@@ -297,9 +300,14 @@ async function computeQuote({ req, rules, getMarketRate }) {
     throw err;
   }
 
-  const rule = pickBestRule(rules, { ...req, txType, country: countryISO2 || req.country, operator });
+  const rule = pickBestRule(rules, {
+    ...req,
+    txType,
+    country: countryISO2 || req.country,
+    operator,
+  });
+
   if (!rule) {
-    // ✅ debug utile : montre ce qui a été normalisé
     const err = new Error("No pricing rule matched");
     err.status = 404;
     err.details = {
@@ -308,11 +316,13 @@ async function computeQuote({ req, rules, getMarketRate }) {
         amount,
         fromCurrency,
         toCurrency,
-        country: countryISO2 || (req.country ? upper(req.country) : null),
+        // on renvoie iso2 si possible (sinon raw upper)
+        country: countryISO2 || (req.country ? upper(stripAccents(req.country)) : null),
         operator: operator || null,
       },
+      rulesLoaded: Array.isArray(rules) ? rules.length : 0,
       hint:
-        "Vérifie que tu as une PricingRule active pour ce corridor + txType, et que scope.countries contient ISO2 (FR/CI/...) ou laisse countries vide.",
+        "Crée une PricingRule ACTIVE pour (txType, fromCurrency, toCurrency) + range, et mets scope.countries vide (globale) OU contient FR/CI/... (ISO2).",
     };
     throw err;
   }
@@ -366,7 +376,7 @@ async function computeQuote({ req, rules, getMarketRate }) {
       amount: grossFrom,
       fromCurrency,
       toCurrency,
-      country: countryISO2 || (req.country ? upper(req.country) : null),
+      country: countryISO2 || (req.country ? upper(stripAccents(req.country)) : null),
       operator: operator || null,
     },
     result: {
@@ -390,4 +400,6 @@ module.exports = {
   computeQuote,
   roundMoney,
   decimalsForCurrency,
+  normalizeTxType,
+  normalizeCountryISO2,
 };
