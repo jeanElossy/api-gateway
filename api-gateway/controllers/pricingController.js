@@ -1,10 +1,10 @@
 "use strict";
 
 const { v4: uuidv4 } = require("uuid");
-const PricingRule = require("../models/PricingRule");
-const PricingQuote = require("../models/PricingQuote");
-const { computeQuote } = require("../services/pricingEngine");
-const { getMarketRate } = require("../services/fxService");
+const PricingRule = require("../src/models/PricingRule");
+const PricingQuote = require("../src/models/PricingQuote");
+const { computeQuote } = require("../src/services/pricingEngine");
+const { getMarketRate } = require("../src/services/fxService");
 const { getAdjustedRate } = require("../src/services/fxRulesService");
 
 const LOCK_TTL_MIN = Number(process.env.PRICING_LOCK_TTL_MIN || 10);
