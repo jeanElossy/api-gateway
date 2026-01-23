@@ -13,22 +13,46 @@ function pickBody(req) {
   return req.body && Object.keys(req.body).length ? req.body : req.query;
 }
 
+// mini normalizers (controller-level safety)
+const normStr = (v) => String(v ?? "").trim();
+const upper = (v) => normStr(v).toUpperCase();
+const lower = (v) => normStr(v).toLowerCase();
+
+function normalizeTxType(v) {
+  const raw = upper(v);
+  if (!raw) return "";
+
+  if (raw === "TRANSFER" || raw === "DEPOSIT" || raw === "WITHDRAW") return raw;
+
+  const low = lower(v);
+  if (low === "send" || low === "transfer" || low === "transfert") return "TRANSFER";
+  if (low === "deposit" || low === "cashin" || low === "topup") return "DEPOSIT";
+  if (low === "withdraw" || low === "withdrawal" || low === "cashout") return "WITHDRAW";
+
+  return raw;
+}
+
 exports.quote = async (req, res, next) => {
   try {
     const body = pickBody(req);
 
     const request = {
-      txType: body.txType,
+      txType: normalizeTxType(body.txType),
       amount: body.amount,
-      fromCurrency: body.fromCurrency,
-      toCurrency: body.toCurrency,
+      fromCurrency: upper(body.fromCurrency),
+      toCurrency: upper(body.toCurrency),
+
+      // IMPORTANT: on laisse le moteur gérer ISO2/noms
       country: body.country || null,
+
       operator: body.operator || null,
+
+      // optionnel (si tu veux plus tard filtrer par provider)
+      provider: body.provider || null,
     };
 
     const rules = await PricingRule.find({ active: true }).lean();
 
-    // 1) pricingRule calcule fees + rate (market + pricingRule.fx)
     const quote = await computeQuote({
       req: request,
       rules,
@@ -40,7 +64,7 @@ exports.quote = async (req, res, next) => {
       baseRate: quote.result.appliedRate,
       context: {
         txType: String(request.txType || "").toUpperCase(),
-        provider: "", // si tu veux provider ici, passe-le dans request
+        provider: String(request.provider || "").toLowerCase(),
         country: (request.country || "").toLowerCase(),
         fromCurrency: request.fromCurrency,
         toCurrency: request.toCurrency,
@@ -49,7 +73,6 @@ exports.quote = async (req, res, next) => {
     });
 
     if (adjusted?.rate) {
-      // recalcul netTo avec le taux ajusté
       const appliedRate = Number(adjusted.rate);
       quote.result.marketRate = quote.result.marketRate ?? null;
       quote.result.appliedRate = appliedRate;
@@ -62,6 +85,14 @@ exports.quote = async (req, res, next) => {
 
     return res.json({ ok: true, mode: "PREVIEW", ...quote });
   } catch (e) {
+    // ✅ Si computeQuote a mis e.details, on le renvoie pour debug (sans casser prod)
+    if (e && e.status === 404 && e.details) {
+      return res.status(404).json({
+        ok: false,
+        error: e.message || "No pricing rule matched",
+        details: e.details,
+      });
+    }
     return next(e);
   }
 };
@@ -74,12 +105,13 @@ exports.lock = async (req, res, next) => {
     const body = pickBody(req);
 
     const request = {
-      txType: body.txType,
+      txType: normalizeTxType(body.txType),
       amount: body.amount,
-      fromCurrency: body.fromCurrency,
-      toCurrency: body.toCurrency,
+      fromCurrency: upper(body.fromCurrency),
+      toCurrency: upper(body.toCurrency),
       country: body.country || null,
       operator: body.operator || null,
+      provider: body.provider || null,
     };
 
     const rules = await PricingRule.find({ active: true }).lean();
@@ -90,12 +122,11 @@ exports.lock = async (req, res, next) => {
       getMarketRate: async (from, to) => getMarketRate(from, to),
     });
 
-    // FxRule admin global
     const adjusted = await getAdjustedRate({
       baseRate: computed.result.appliedRate,
       context: {
         txType: String(request.txType || "").toUpperCase(),
-        provider: "",
+        provider: String(request.provider || "").toLowerCase(),
         country: (request.country || "").toLowerCase(),
         fromCurrency: request.fromCurrency,
         toCurrency: request.toCurrency,
@@ -121,13 +152,8 @@ exports.lock = async (req, res, next) => {
       status: "ACTIVE",
       request: computed.request,
       result: computed.result,
-
-      // ✅ ruleApplied bien stocké (PricingRule)
       ruleApplied: computed.ruleApplied,
-
-      // ✅ on garde aussi la règle FX admin (optionnel) dans un champ libre:
       fxRuleApplied: computed.fxRuleApplied || null,
-
       expiresAt,
     });
 
@@ -142,6 +168,13 @@ exports.lock = async (req, res, next) => {
       fxRuleApplied: doc.fxRuleApplied || null,
     });
   } catch (e) {
+    if (e && e.status === 404 && e.details) {
+      return res.status(404).json({
+        ok: false,
+        error: e.message || "No pricing rule matched",
+        details: e.details,
+      });
+    }
     return next(e);
   }
 };
