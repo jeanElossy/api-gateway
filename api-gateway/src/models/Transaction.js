@@ -9,6 +9,7 @@ const toISO = (v) => {
   return s.toUpperCase();
 };
 
+
 const MoneyAtomSchema = new mongoose.Schema(
   {
     amount: { type: Number },
