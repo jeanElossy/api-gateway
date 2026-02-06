@@ -1,18 +1,26 @@
 // File: api-gateway/src/app.js
 "use strict";
 
-console.log("HMAC enabled:", !!config.publicReadonlySecret);
-console.log("TTL:", config.publicSignatureTtlSec);
-
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const mongoSanitize = require("express-mongo-sanitize");
 const xssClean = require("xss-clean");
 const hpp = require("hpp");
-const config = require("./config");
 const morgan = require("morgan");
+const mongoose = require("mongoose");
+const axios = require("axios");
 
+// ✅ Config (DOIT être chargé AVANT d'utiliser config.*)
+const config = require("./config");
+
+// ✅ Swagger (docs Gateway)
+const swaggerUi = require("swagger-ui-express");
+const YAML = require("yamljs");
+const path = require("path");
+const openapiSpec = YAML.load(path.join(__dirname, "../docs/openapi.yaml"));
+
+// Routes
 const paymentRoutes = require("../routes/payment");
 const amlRoutes = require("../routes/aml");
 const transactionRoutes = require("../routes/admin/transactions.admin.routes");
@@ -40,19 +48,19 @@ const { authMiddleware } = require("./middlewares/auth");
 const { globalIpLimiter, userLimiter } = require("./middlewares/rateLimit");
 const { loggerMiddleware } = require("./middlewares/logger");
 const auditHeaders = require("./middlewares/auditHeaders");
-
 const logger = require("./logger");
-const mongoose = require("mongoose");
 const { getAllProviders, getProvider } = require("./providers");
-const axios = require("axios");
-
-// ✅ Swagger (docs Gateway)
-const swaggerUi = require("swagger-ui-express");
-const YAML = require("yamljs");
-const path = require("path");
-const openapiSpec = YAML.load(path.join(__dirname, "../docs/openapi.yaml"));
 
 const app = express();
+
+// Logs (APRÈS init config)
+try {
+  logger.info?.("[BOOT] env=" + config.env);
+  logger.info?.("[BOOT] HMAC enabled=" + String(!!config.publicReadonlySecret));
+  logger.info?.("[BOOT] HMAC TTL=" + String(config.publicSignatureTtlSec));
+} catch (_) {
+  // no-op
+}
 
 // 🔐 important derrière Render / Cloudflare
 app.set("trust proxy", 1);
@@ -76,7 +84,7 @@ app.use(
 function buildAllowedOriginsSet() {
   const set = new Set();
 
-  // legacy config.cors.origins
+  // legacy config.cors.origins (si présent)
   (config.cors?.origins || []).forEach((o) => set.add(o));
 
   // nouveaux allowlists
@@ -202,6 +210,14 @@ app.use((req, res, next) => {
 
 // ─────────── /public/* : signature HMAC obligatoire ───────────
 app.use("/api/v1/public", (req, res, next) => {
+  // Si tu n'as PAS encore configuré la clé, on renvoie un message clair.
+  if (!config.publicReadonlySecret) {
+    return res.status(503).json({
+      success: false,
+      message: "Public read-only is not configured (missing PUBLIC_READONLY_HMAC_SECRET).",
+    });
+  }
+
   const out = config.verifyPublicSignature(req);
   if (!out.ok) {
     return res.status(401).json({
@@ -224,9 +240,9 @@ app.use(auditHeaders);
 // Rate limit par utilisateur pour routes authentifiées
 app.use(userLimiter);
 
-// ─────────── DB READY STATE (pour routes qui touchent DB) ───────────
+// ─────────── DB READY STATE (bloque uniquement les routes DB) ───────────
 app.use((req, res, next) => {
-  // ne pas bloquer les endpoints open déjà servis au-dessus
+  // endpoints "open" et docs sont servis AVANT, donc ici on protège le reste
   if (mongoose.connection.readyState !== 1) {
     logger.error("[MONGO] Requête refusée, MongoDB non connecté !");
     return res.status(500).json({ success: false, error: "MongoDB non connecté" });
