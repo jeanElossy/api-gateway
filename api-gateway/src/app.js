@@ -1,258 +1,8 @@
-// // File: api-gateway/src/app.js
-
-// const express = require('express');
-// const cors = require('cors');
-// const helmet = require('helmet');
-// const mongoSanitize = require('express-mongo-sanitize');
-// const xssClean = require('xss-clean');
-// const hpp = require('hpp');
-// const config = require('./config');
-// const morgan = require('morgan');
-// const paymentRoutes = require('../routes/payment');
-// const amlRoutes = require('../routes/aml');
-// const transactionRoutes = require('../routes/admin/transactions.admin.routes');
-// const feesRoutes = require('../routes/fees');
-// const exchangeRateRoutes = require('../routes/admin/exchangeRates.routes');
-// const commissionsRoutes = require('../routes/commissionsRoutes');
-// const { authMiddleware } = require('./middlewares/auth');
-// const { globalIpLimiter, userLimiter } = require('./middlewares/rateLimit');
-// const { loggerMiddleware } = require('./middlewares/logger');
-// const logger = require('./logger');
-// const mongoose = require('mongoose');
-// const { getAllProviders, getProvider } = require('./providers');
-// const axios = require('axios');
-// const auditHeaders = require('./middlewares/auditHeaders');
-// const userTransactionRoutes = require('../routes/transactions');
-
-// // 🔧 Route interne existante (legacy)
-// const internalTransactionsRouter = require('../routes/internalTransactions');
-
-// // 🔧 Nouvelles routes internes versionnées
-// const internalRoutes = require('../routes/internalRoutes');
-
-
-
-// const phoneVerificationRoutes = require("../routes/phoneVerificationRoutes");
-
-
-
-// // ✅ Swagger (docs Gateway)
-// const swaggerUi = require('swagger-ui-express');
-// const YAML = require('yamljs');
-// const path = require('path');
-// const openapiSpec = YAML.load(path.join(__dirname, '../docs/openapi.yaml'));
-
-// const app = express();
-
-// // 🔐 Très important pour que req.ip / X-Forwarded-For soient corrects
-// //     derrière Render / Cloudflare
-// app.set('trust proxy', 1);
-
-// // ─────────── SÉCURITÉ & LOG ───────────
-// app.use(
-//   helmet({
-//     crossOriginResourcePolicy: false,
-//   })
-// );
-
-// // Anti injection / XSS / HPP
-// app.use(mongoSanitize());
-// app.use(xssClean());
-// app.use(
-//   hpp({
-//     // On peut whitelist quelques paramètres si besoin
-//     whitelist: ['page', 'limit', 'sort', 'provider', 'status'],
-//   })
-// );
-
-// app.use(
-//   cors({
-//     origin: (origin, callback) => {
-//       if (config.cors.origins.includes('*')) return callback(null, true);
-//       if (!origin) return callback(null, true); // ← autorise clients sans Origin (CLI/Postman)
-//       if (config.cors.origins.includes(origin)) return callback(null, true);
-//       return callback(new Error('CORS: origine non autorisée'));
-//     },
-//     credentials: true,
-//   })
-// );
-
-// if (config.nodeEnv !== 'test') {
-//   app.use(morgan(config.logging.level === 'debug' ? 'dev' : 'combined'));
-// }
-
-// app.use(express.json({ limit: '2mb' }));
-// app.use(loggerMiddleware);
-
-// // 🛡️ Bouclier global IP (avant tout le reste)
-// app.use(globalIpLimiter);
-
-// // ─────────── DOCS PUBLIQUES (avant auth) ───────────
-// app.get('/openapi.json', (_req, res) => res.json(openapiSpec));
-// app.use(
-//   '/docs',
-//   swaggerUi.serve,
-//   swaggerUi.setup(openapiSpec, {
-//     explorer: true,
-//     customSiteTitle: 'PayNoval Gateway API',
-//   })
-// );
-
-// // ─────────── AUTH GLOBAL GATEWAY ───────────
-// const openEndpoints = [
-//   '/', // ✅ root pour health-check Render
-//   '/healthz',
-//   '/status',
-//   '/docs', // ← doc publique
-//   '/openapi.json', // ← spec publique
-//   '/api/v1/fees/simulate',
-//   '/api/v1/commissions/simulate',
-//   '/api/v1/exchange-rates/rate',
-//   // 🔓 On laisse passer les appels internes (protégés par x-internal-token)
-//   '/internal/transactions',
-//   '/api/v1/internal',
-//   // tu pourras ajouter ici tes routes d'auth publiques (login/register) si besoin
-//   // '/api/v1/auth',
-// ];
-
-// app.use((req, res, next) => {
-//   // 1) Toujours laisser passer les préflight CORS
-//   if (req.method === 'OPTIONS') {
-//     return res.sendStatus(204);
-//   }
-
-//   // 2) Endpoints publics (docs, health, simulate, internal, etc.)
-//   const isOpen = openEndpoints.some(
-//     (ep) => req.path === ep || req.path.startsWith(ep + '/')
-//   );
-
-//   if (isOpen) return next();
-
-//   // 3) Tout le reste est protégé
-//   authMiddleware(req, res, next);
-// });
-
-// // Ajout des headers d'audit après auth (req.user déjà renseigné si JWT ok)
-// app.use(auditHeaders);
-
-// // 👤 Rate limit par utilisateur pour les routes authentifiées
-// app.use(userLimiter);
-
-// // ─────────── DB READY STATE ───────────
-// app.use((req, res, next) => {
-//   if (mongoose.connection.readyState !== 1) {
-//     logger.error('[MONGO] Requête refusée, MongoDB non connecté !');
-//     return res
-//       .status(500)
-//       .json({ success: false, error: 'MongoDB non connecté' });
-//   }
-//   next();
-// });
-
-// // ─────────── ROUTES PRINCIPALES ───────────
-// app.use('/api/v1/pay', paymentRoutes);
-
-// // 🔧 Route interne “legacy”
-// app.use('/internal/transactions', internalTransactionsRouter);
-
-// // 🔧 Nouvelles routes internes versionnées (API PayNoval → Gateway)
-// app.use('/api/v1/internal', internalRoutes);
-
-// // Pour les utilisateurs normaux
-// app.use('/api/v1/transactions', userTransactionRoutes);
-
-// // Pour les admins
-// app.use('/api/v1/admin/transactions', transactionRoutes);
-
-// app.use('/api/v1/aml', amlRoutes);
-// app.use('/api/v1/fees', feesRoutes);
-// app.use('/api/v1/exchange-rates', exchangeRateRoutes);
-// app.use('/api/v1/commissions', commissionsRoutes);
-
-
-// app.use("/api/v1/pricing", require("../routes/pricingRoutes"));
-
-// app.use("/api/v1/fx-rules", require("../routes/fxRules"));
-
-
-// app.use("/api/v1/phone-verification", phoneVerificationRoutes);
-
-
-// // ─────────── MONITORING / HEALTH ───────────
-
-// // ✅ Root simple pour Render / navigateur
-// app.get('/', (req, res) =>
-//   res.json({
-//     status: 'ok',
-//     service: 'api-gateway',
-//     ts: new Date().toISOString(),
-//   })
-// );
-
-// app.get('/healthz', (req, res) =>
-//   res.json({ status: 'ok', ts: new Date().toISOString() })
-// );
-
-// app.get('/status', async (req, res) => {
-//   const statuses = {};
-//   await Promise.all(
-//     getAllProviders().map(async (name) => {
-//       const p = getProvider(name);
-//       if (!p || !p.enabled) return;
-//       try {
-//         const health = await axios.get(p.url + (p.health || '/health'), {
-//           timeout: 3000,
-//         });
-//         statuses[name] = {
-//           up: true,
-//           status: health.data.status || 'ok',
-//         };
-//       } catch (err) {
-//         statuses[name] = {
-//           up: false,
-//           error: err.message,
-//         };
-//       }
-//     })
-//   );
-//   res.json({ gateway: 'ok', microservices: statuses });
-// });
-
-// // ─────────── 404 & ERROR HANDLERS ───────────
-// app.use((req, res) =>
-//   res.status(404).json({ success: false, error: 'Ressource non trouvée' })
-// );
-
-// app.use((err, req, res, next) => {
-//   logger.error('[API ERROR]', {
-//     message: err.message,
-//     stack: err.stack,
-//     status: err.status,
-//     path: req.originalUrl,
-//     method: req.method,
-//     ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
-//     userAgent: req.headers['user-agent'],
-//     user: req.user?.email,
-//     body: req.body,
-//   });
-//   res.status(err.status || 500).json({
-//     success: false,
-//     error:
-//       err.isJoi && err.details
-//         ? err.details.map((d) => d.message).join('; ')
-//         : err.message || 'Erreur serveur',
-//   });
-// });
-
-// module.exports = app;
-
-
-
-
-
-
 // File: api-gateway/src/app.js
 "use strict";
+
+console.log("HMAC enabled:", !!config.publicReadonlySecret);
+console.log("TTL:", config.publicSignatureTtlSec);
 
 const express = require("express");
 const cors = require("cors");
@@ -283,6 +33,9 @@ const phoneVerificationRoutes = require("../routes/phoneVerificationRoutes");
 const pricingRoutes = require("../routes/pricingRoutes");
 const fxRulesRoutes = require("../routes/fxRules");
 
+// ✅ Public read-only routes
+const publicRoutes = require("../routes/publicRoutes");
+
 const { authMiddleware } = require("./middlewares/auth");
 const { globalIpLimiter, userLimiter } = require("./middlewares/rateLimit");
 const { loggerMiddleware } = require("./middlewares/logger");
@@ -301,7 +54,7 @@ const openapiSpec = YAML.load(path.join(__dirname, "../docs/openapi.yaml"));
 
 const app = express();
 
-// 🔐 Très important pour que req.ip / X-Forwarded-For soient corrects derrière Render / Cloudflare
+// 🔐 important derrière Render / Cloudflare
 app.set("trust proxy", 1);
 
 // ─────────── SÉCURITÉ & LOG ───────────
@@ -315,20 +68,36 @@ app.use(mongoSanitize());
 app.use(xssClean());
 app.use(
   hpp({
-    // whitelist params utiles
     whitelist: ["page", "limit", "sort", "provider", "status"],
   })
 );
 
+// ─────────── CORS (compat + moderne) ───────────
+function buildAllowedOriginsSet() {
+  const set = new Set();
+
+  // legacy config.cors.origins
+  (config.cors?.origins || []).forEach((o) => set.add(o));
+
+  // nouveaux allowlists
+  (config.cors?.adminOrigins || []).forEach((o) => set.add(o));
+  (config.cors?.mobileOrigins || []).forEach((o) => set.add(o));
+
+  return set;
+}
+
+const allowedOrigins = buildAllowedOriginsSet();
+const allowAll = allowedOrigins.has("*") || (config.cors?.origins || []).includes("*");
+
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (config.cors.origins.includes("*")) return callback(null, true);
-      if (!origin) return callback(null, true); // autorise clients sans Origin (CLI/Postman)
-      if (config.cors.origins.includes(origin)) return callback(null, true);
+      if (!origin) return callback(null, true); // mobile native / postman / curl
+      if (allowAll) return callback(null, true);
+      if (allowedOrigins.has(origin)) return callback(null, true);
       return callback(new Error("CORS: origine non autorisée"));
     },
-    credentials: true,
+    credentials: config.cors?.allowCredentials !== false,
   })
 );
 
@@ -339,10 +108,28 @@ if (config.nodeEnv !== "test") {
 app.use(express.json({ limit: "2mb" }));
 app.use(loggerMiddleware);
 
-// 🛡️ Bouclier global IP (avant tout le reste)
+// 🛡️ Bouclier global IP (avant tout)
 app.use(globalIpLimiter);
 
-// ─────────── DOCS PUBLIQUES (avant auth) ───────────
+// ─────────── RATE LIMIT spécial /public (read-only) ───────────
+let rateLimit = null;
+try {
+  rateLimit = require("express-rate-limit");
+} catch (e) {
+  rateLimit = null;
+}
+
+if (rateLimit && config.rateLimit?.public) {
+  const publicLimiter = rateLimit({
+    windowMs: config.rateLimit.public.windowMs,
+    max: config.rateLimit.public.max,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+  app.use("/api/v1/public", publicLimiter);
+}
+
+// ─────────── DOCS PUBLIQUES ───────────
 app.get("/openapi.json", (_req, res) => res.json(openapiSpec));
 app.use(
   "/docs",
@@ -353,87 +140,7 @@ app.use(
   })
 );
 
-// ─────────── AUTH GLOBAL GATEWAY ───────────
-const openEndpoints = [
-  "/", // root pour health-check Render
-  "/healthz",
-  "/status",
-  "/docs",
-  "/openapi.json",
-
-  // simulate endpoints
-  "/api/v1/fees/simulate",
-  "/api/v1/commissions/simulate",
-
-  // FX public rate endpoint (utilisé par services internes)
-  "/api/v1/exchange-rates/rate",
-
-  // ✅ (optionnel) si tu veux permettre preview pricing sans auth
-  // "/api/v1/pricing/quote",
-
-  // appels internes (protégés par x-internal-token dans leurs routes)
-  "/internal/transactions",
-  "/api/v1/internal",
-
-  // ajoute ici tes routes d'auth publiques si besoin
-  // "/api/v1/auth",
-];
-
-app.use((req, res, next) => {
-  // 1) Toujours laisser passer les preflight CORS
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-
-  // 2) Endpoints publics
-  const isOpen = openEndpoints.some((ep) => req.path === ep || req.path.startsWith(ep + "/"));
-  if (isOpen) return next();
-
-  // 3) Tout le reste est protégé
-  return authMiddleware(req, res, next);
-});
-
-// Ajout des headers d'audit après auth (req.user déjà renseigné si JWT ok)
-app.use(auditHeaders);
-
-// 👤 Rate limit par utilisateur pour les routes authentifiées
-app.use(userLimiter);
-
-// ─────────── DB READY STATE ───────────
-app.use((req, res, next) => {
-  if (mongoose.connection.readyState !== 1) {
-    logger.error("[MONGO] Requête refusée, MongoDB non connecté !");
-    return res.status(500).json({ success: false, error: "MongoDB non connecté" });
-  }
-  return next();
-});
-
-// ─────────── ROUTES PRINCIPALES ───────────
-app.use("/api/v1/pay", paymentRoutes);
-
-// Route interne legacy
-app.use("/internal/transactions", internalTransactionsRouter);
-
-// Nouvelles routes internes versionnées (API PayNoval → Gateway)
-app.use("/api/v1/internal", internalRoutes);
-
-// Utilisateurs
-app.use("/api/v1/transactions", userTransactionRoutes);
-
-// Admins
-app.use("/api/v1/admin/transactions", transactionRoutes);
-
-app.use("/api/v1/aml", amlRoutes);
-app.use("/api/v1/fees", feesRoutes);
-app.use("/api/v1/exchange-rates", exchangeRateRoutes);
-app.use("/api/v1/commissions", commissionsRoutes);
-
-// ✅ Pricing + FX Rules
-app.use("/api/v1/pricing", pricingRoutes);
-app.use("/api/v1/fx-rules", fxRulesRoutes);
-
-// ✅ Phone verification
-app.use("/api/v1/phone-verification", phoneVerificationRoutes);
-
-// ─────────── MONITORING / HEALTH ───────────
+// ─────────── HEALTH / STATUS (avant Mongo guard) ───────────
 app.get("/", (_req, res) =>
   res.json({
     status: "ok",
@@ -460,6 +167,99 @@ app.get("/status", async (_req, res) => {
   );
   res.json({ gateway: "ok", microservices: statuses });
 });
+
+// ─────────── AUTH GLOBAL GATEWAY ───────────
+const openEndpoints = [
+  "/",
+  "/healthz",
+  "/status",
+  "/docs",
+  "/openapi.json",
+
+  // legacy simulate endpoints
+  "/api/v1/fees/simulate",
+  "/api/v1/commissions/simulate",
+
+  // legacy FX public rate
+  "/api/v1/exchange-rates/rate",
+
+  // ✅ nouveau: endpoints read-only signés
+  "/api/v1/public",
+
+  // internal routes (protégées dans leurs routes)
+  "/internal/transactions",
+  "/api/v1/internal",
+];
+
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+
+  const isOpen = openEndpoints.some((ep) => req.path === ep || req.path.startsWith(ep + "/"));
+  if (isOpen) return next();
+
+  return authMiddleware(req, res, next);
+});
+
+// ─────────── /public/* : signature HMAC obligatoire ───────────
+app.use("/api/v1/public", (req, res, next) => {
+  const out = config.verifyPublicSignature(req);
+  if (!out.ok) {
+    return res.status(401).json({
+      success: false,
+      message: "Unauthorized (public signature required)",
+      reason: out.reason,
+      age: out.age,
+    });
+  }
+  req.publicSig = out;
+  return next();
+});
+
+// ✅ Mount read-only public routes
+app.use("/api/v1/public", publicRoutes);
+
+// Ajout headers audit après auth (req.user si JWT ok)
+app.use(auditHeaders);
+
+// Rate limit par utilisateur pour routes authentifiées
+app.use(userLimiter);
+
+// ─────────── DB READY STATE (pour routes qui touchent DB) ───────────
+app.use((req, res, next) => {
+  // ne pas bloquer les endpoints open déjà servis au-dessus
+  if (mongoose.connection.readyState !== 1) {
+    logger.error("[MONGO] Requête refusée, MongoDB non connecté !");
+    return res.status(500).json({ success: false, error: "MongoDB non connecté" });
+  }
+  return next();
+});
+
+// ─────────── ROUTES PRINCIPALES ───────────
+app.use("/api/v1/pay", paymentRoutes);
+
+// legacy internal
+app.use("/internal/transactions", internalTransactionsRouter);
+
+// nouvelles routes internes versionnées
+app.use("/api/v1/internal", internalRoutes);
+
+// users
+app.use("/api/v1/transactions", userTransactionRoutes);
+
+// admins
+app.use("/api/v1/admin/transactions", transactionRoutes);
+
+app.use("/api/v1/aml", amlRoutes);
+app.use("/api/v1/fees", feesRoutes);
+app.use("/api/v1/exchange-rates", exchangeRateRoutes);
+app.use("/api/v1/commissions", commissionsRoutes);
+
+// pricing + fx rules
+app.use("/api/v1/pricing", pricingRoutes);
+app.use("/api/v1/fx-rules", fxRulesRoutes);
+
+// phone verification
+app.use("/api/v1/phone-verification", phoneVerificationRoutes);
 
 // ─────────── 404 & ERROR HANDLERS ───────────
 app.use((req, res) => res.status(404).json({ success: false, error: "Ressource non trouvée" }));
