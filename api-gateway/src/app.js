@@ -157,6 +157,19 @@ app.get("/", (_req, res) =>
   })
 );
 
+// ✅ healthcheck versionné: GET /api/v1/
+app.get("/api/v1", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  return res.status(200).json({
+    success: true,
+    service: "api-gateway",
+    status: "ok",
+    ts: new Date().toISOString(),
+  });
+});
+
+
+
 app.get("/healthz", (_req, res) => res.json({ status: "ok", ts: new Date().toISOString() }));
 
 app.get("/status", async (_req, res) => {
@@ -179,6 +192,7 @@ app.get("/status", async (_req, res) => {
 // ─────────── AUTH GLOBAL GATEWAY ───────────
 const openEndpoints = [
   "/",
+  "/api/v1",
   "/healthz",
   "/status",
   "/docs",
