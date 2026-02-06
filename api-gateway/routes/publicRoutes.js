@@ -27,7 +27,7 @@ router.get("/fees/simulate", feesCtrl.simulateFee);
 // ─────────────────────────────────────────────
 // 2) Exchange rate public rate (READ-ONLY)
 // ─────────────────────────────────────────────
-const exchangeRatesCtrl = require("../src/controllers/exchangeRatesController");
+const exchangeRatesCtrl = require("../controllers/exchangeRatesController");
 router.get("/exchange-rates/rate", exchangeRatesCtrl.getRatePublic);
 
 // ─────────────────────────────────────────────
