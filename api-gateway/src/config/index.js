@@ -1,3 +1,4 @@
+// File: api-gateway/src/config/index.js
 "use strict";
 
 const Joi = require("joi");
@@ -6,19 +7,13 @@ const crypto = require("crypto");
 
 /**
  * ✅ Tokens
- *
  * - GATEWAY_INTERNAL_TOKEN : protège les routes internes du gateway (x-internal-token)
  * - PRINCIPAL_INTERNAL_TOKEN : token pour appeler le backend principal
+ * - INTERNAL_TOKEN : fallback legacy
  *
- * 🔁 Rétro-compatibilité:
- * - INTERNAL_TOKEN fallback (ancien système)
- *
- * ✅ Ajouts (moderne/clean)
+ * ✅ Public read-only signature
  * - PUBLIC_READONLY_HMAC_SECRET : secret HMAC pour /api/v1/public/*
  * - PUBLIC_SIGNATURE_TTL_SEC : TTL anti-replay (default 60s)
- * - ADMIN_CORS_ORIGINS, MOBILE_CORS_ORIGINS : allowlists spécifiques (optionnels)
- * - CORS_CREDENTIALS : default true
- * - PUBLIC_RL_*, ADMIN_RL_* : rate limits séparés (optionnels)
  */
 
 const schema = Joi.object({
@@ -26,31 +21,29 @@ const schema = Joi.object({
   PORT: Joi.number().integer().min(1).default(4000),
   JWT_SECRET: Joi.string().min(16).required(),
 
-  // ✅ Legacy (fallback)
-  INTERNAL_TOKEN: Joi.string().min(16).optional(),
+  // legacy
+  INTERNAL_TOKEN: Joi.string().min(16).allow("").optional(),
 
-  // ✅ Recommandés (nouveaux)
-  GATEWAY_INTERNAL_TOKEN: Joi.string().min(16).optional(),
-  PRINCIPAL_INTERNAL_TOKEN: Joi.string().min(16).optional(),
+  // recommended
+  GATEWAY_INTERNAL_TOKEN: Joi.string().min(16).allow("").optional(),
+  PRINCIPAL_INTERNAL_TOKEN: Joi.string().min(16).allow("").optional(),
 
-  // ✅ Backend principal (optionnel si ton gateway l’utilise via config ailleurs)
+  // backend principal (optionnel)
   PRINCIPAL_URL: Joi.string().uri().allow("").optional(),
 
-  // Microservices
+  // microservices
   SERVICE_PAYNOVAL_URL: Joi.string().uri().required(),
-  SERVICE_BANK_URL: Joi.string().uri().required(),
-  SERVICE_MOBILEMONEY_URL: Joi.string().uri().required(),
-  SERVICE_STRIPE_URL: Joi.string().uri().required(),
-  SERVICE_VISA_DIRECT_URL: Joi.string().uri().required(),
-  SERVICE_STRIPE2MOMO_URL: Joi.string().uri().required(),
-  SERVICE_CASHIN_URL: Joi.string().uri().required(),
-  SERVICE_CASHOUT_URL: Joi.string().uri().required(),
-  SERVICE_FLUTTERWAVE_URL: Joi.string().uri().required(),
+  SERVICE_BANK_URL: Joi.string().uri().allow("").optional(),
+  SERVICE_MOBILEMONEY_URL: Joi.string().uri().allow("").optional(),
+  SERVICE_STRIPE_URL: Joi.string().uri().allow("").optional(),
+  SERVICE_VISA_DIRECT_URL: Joi.string().uri().allow("").optional(),
+  SERVICE_STRIPE2MOMO_URL: Joi.string().uri().allow("").optional(),
+  SERVICE_CASHIN_URL: Joi.string().uri().allow("").optional(),
+  SERVICE_CASHOUT_URL: Joi.string().uri().allow("").optional(),
+  SERVICE_FLUTTERWAVE_URL: Joi.string().uri().allow("").optional(),
 
-  // CORS (legacy)
+  // CORS
   CORS_ORIGINS: Joi.string().default("*"),
-
-  // ✅ CORS (nouveau, optionnel)
   ADMIN_CORS_ORIGINS: Joi.string().allow("").optional(),
   MOBILE_CORS_ORIGINS: Joi.string().allow("").optional(),
   CORS_CREDENTIALS: Joi.string().valid("true", "false").default("true"),
@@ -59,23 +52,23 @@ const schema = Joi.object({
   LOGS_LEVEL: Joi.string().valid("error", "warn", "info", "debug").default("info"),
   SENTRY_DSN: Joi.string().allow("").optional(),
 
-  // Rate limiting (legacy)
+  // Rate limiting legacy
   RATE_LIMIT_WINDOW_MS: Joi.number().integer().min(1000).default(60000),
   RATE_LIMIT_MAX: Joi.number().integer().min(1).default(100),
 
-  // ✅ Rate limiting (nouveau, optionnel)
+  // Rate limiting optionnel
   PUBLIC_RL_WINDOW_MS: Joi.number().integer().min(1000).optional(),
   PUBLIC_RL_MAX: Joi.number().integer().min(1).optional(),
   ADMIN_RL_WINDOW_MS: Joi.number().integer().min(1000).optional(),
   ADMIN_RL_MAX: Joi.number().integer().min(1).optional(),
 
-  // ✅ Public read-only signature HMAC (nouveau, optionnel)
+  // Public signature HMAC
   PUBLIC_READONLY_HMAC_SECRET: Joi.string().min(16).allow("").optional(),
   PUBLIC_SIGNATURE_TTL_SEC: Joi.number().integer().min(10).default(60),
 
-  // DB URIs
-  MONGO_URI_USERS: Joi.string().uri().required(),
-  MONGO_URI_GATEWAY: Joi.string().uri().required(),
+  // DB URIs (optionnels)
+  MONGO_URI_USERS: Joi.string().uri().allow("").optional(),
+  MONGO_URI_GATEWAY: Joi.string().uri().allow("").optional(),
 
   // AML/fraude alertes
   FRAUD_ALERT_EMAIL: Joi.string().email().allow("").optional(),
@@ -97,7 +90,7 @@ if (error) {
   process.exit(1);
 }
 
-// ✅ Helpers
+// ---------------- Helpers ----------------
 const normStr = (v) => {
   const s = String(v ?? "").trim();
   return s ? s : "";
@@ -109,55 +102,94 @@ const splitCSV = (v) =>
     .map((x) => x.trim())
     .filter(Boolean);
 
-// ✅ Safe constant-time compare
-function safeEqual(a, b) {
-  const aa = Buffer.from(String(a || ""));
-  const bb = Buffer.from(String(b || ""));
-  if (aa.length !== bb.length) return false;
-  return crypto.timingSafeEqual(aa, bb);
-}
-
-// ✅ Résolution tokens (rétro-compat)
-const legacyToken = env.INTERNAL_TOKEN || "";
-const gatewayInternalToken = env.GATEWAY_INTERNAL_TOKEN || legacyToken;
-const principalInternalToken = env.PRINCIPAL_INTERNAL_TOKEN || legacyToken;
-
-// ✅ Petit guard pro : en production on veut au moins 1 token interne
-if (env.NODE_ENV === "production") {
-  if (!gatewayInternalToken) {
-    console.error("❌ GATEWAY_INTERNAL_TOKEN manquant (ou INTERNAL_TOKEN fallback).");
-    process.exit(1);
+// constant-time compare for hex strings
+function safeEqualHex(a, b) {
+  try {
+    const ba = Buffer.from(String(a || ""), "hex");
+    const bb = Buffer.from(String(b || ""), "hex");
+    if (ba.length !== bb.length) return false;
+    return crypto.timingSafeEqual(ba, bb);
+  } catch {
+    return false;
   }
-  if (!principalInternalToken) {
-    console.error("❌ PRINCIPAL_INTERNAL_TOKEN manquant (ou INTERNAL_TOKEN fallback).");
-    process.exit(1);
-  }
-}
-
-/**
- * ✅ HMAC canonical string
- * payload = ts + "\n" + METHOD + "\n" + PATH + "\n" + sortedQueryString
- */
-function canonicalString({ ts, method, path, query }) {
-  const m = String(method || "GET").toUpperCase();
-  const p = String(path || "/");
-  const q = query || {};
-  const qs = Object.keys(q)
-    .sort()
-    .map((k) => `${k}=${String(q[k])}`)
-    .join("&");
-  return `${String(ts)}\n${m}\n${p}\n${qs}`;
-}
-
-function hmacSign(secret, payload) {
-  return crypto.createHmac("sha256", String(secret)).update(String(payload)).digest("hex");
 }
 
 function nowSec() {
   return Math.floor(Date.now() / 1000);
 }
 
-// ✅ Build CORS origins (compat legacy + nouveaux)
+// ---------------- Tokens ----------------
+const legacyToken = normStr(env.INTERNAL_TOKEN || "");
+const gatewayInternalToken = normStr(env.GATEWAY_INTERNAL_TOKEN || "") || legacyToken;
+const principalInternalToken = normStr(env.PRINCIPAL_INTERNAL_TOKEN || "") || legacyToken;
+
+// Guard prod: recommandé d'avoir au moins le token gateway
+if (env.NODE_ENV === "production") {
+  if (!gatewayInternalToken) {
+    console.error("❌ GATEWAY_INTERNAL_TOKEN manquant (ou INTERNAL_TOKEN fallback).");
+    process.exit(1);
+  }
+  if (!principalInternalToken && normStr(env.PRINCIPAL_URL || "")) {
+    console.warn(
+      "⚠️ PRINCIPAL_INTERNAL_TOKEN manquant: si tu proxifies vers le backend principal avec x-internal-token, ça peut échouer."
+    );
+  }
+}
+
+// ---------------- Public Signature (HMAC) ----------------
+// IMPORTANT: doit matcher le client publicSignedFetch.js
+// - canonical = `${ts}\n${METHOD}\n${PATH}\n${sortedQueryStringNonEncode}`
+// - query string NON encodée (k=v&k2=v2) car côté client "signature" n'encode pas
+const publicReadonlySecret = normStr(env.PUBLIC_READONLY_HMAC_SECRET || "");
+const publicSignatureTtlSec = Number(env.PUBLIC_SIGNATURE_TTL_SEC || 60);
+
+function normalizePath(p) {
+  const s = String(p || "").trim();
+  if (!s.startsWith("/")) return "/" + s;
+  // supprime slash final sauf "/"
+  return s.length > 1 ? s.replace(/\/+$/, "") : s;
+}
+
+function flattenAndSortQuery(queryObj) {
+  const pairs = [];
+
+  for (const k of Object.keys(queryObj || {})) {
+    const val = queryObj[k];
+    if (val === undefined || val === null || String(val) === "") continue;
+
+    if (Array.isArray(val)) {
+      for (const v of val) {
+        if (v === undefined || v === null || String(v) === "") continue;
+        pairs.push([String(k), String(v)]);
+      }
+    } else {
+      pairs.push([String(k), String(val)]);
+    }
+  }
+
+  pairs.sort((a, b) => {
+    if (a[0] < b[0]) return -1;
+    if (a[0] > b[0]) return 1;
+    if (a[1] < b[1]) return -1;
+    if (a[1] > b[1]) return 1;
+    return 0;
+  });
+
+  return pairs.map(([k, v]) => `${k}=${v}`).join("&");
+}
+
+function hmacSha256Hex(secret, payload) {
+  return crypto.createHmac("sha256", String(secret)).update(String(payload)).digest("hex");
+}
+
+function canonicalString({ ts, method, path: pth, query }) {
+  const m = String(method || "GET").toUpperCase();
+  const p = normalizePath(pth || "/");
+  const qs = flattenAndSortQuery(query || {});
+  return `${String(ts)}\n${m}\n${p}\n${qs}`;
+}
+
+// ---------------- CORS / RateLimit ----------------
 const legacyCorsOrigins =
   env.CORS_ORIGINS === "*"
     ? ["*"]
@@ -166,10 +198,9 @@ const legacyCorsOrigins =
 const adminOrigins = splitCSV(env.ADMIN_CORS_ORIGINS || "");
 const mobileOrigins = splitCSV(env.MOBILE_CORS_ORIGINS || "");
 
-// ✅ Rate limits (legacy + nouveaux)
 const legacyRate = {
-  windowMs: env.RATE_LIMIT_WINDOW_MS,
-  max: env.RATE_LIMIT_MAX,
+  windowMs: Number(env.RATE_LIMIT_WINDOW_MS),
+  max: Number(env.RATE_LIMIT_MAX),
 };
 
 const publicRate = {
@@ -182,46 +213,53 @@ const adminRate = {
   max: Number(env.ADMIN_RL_MAX || Math.max(legacyRate.max, 300)),
 };
 
+// ---------------- URLs / DB ----------------
+const principalUrl = normStr(env.PRINCIPAL_URL || "").replace(/\/+$/, "");
+const mongoUsers = normStr(env.MONGO_URI_USERS || "");
+const mongoGateway = normStr(env.MONGO_URI_GATEWAY || "");
+
+if (env.NODE_ENV === "production") {
+  if (!mongoGateway) {
+    console.warn(
+      "⚠️ MONGO_URI_GATEWAY absent: les routes DB du gateway (admin/fees/fx logs) peuvent échouer."
+    );
+  }
+  if (!mongoUsers) {
+    console.warn("⚠️ MONGO_URI_USERS absent: l'auth JWT gateway peut échouer si DB users requis.");
+  }
+}
+
 module.exports = {
   nodeEnv: env.NODE_ENV,
   port: env.PORT,
   jwtSecret: env.JWT_SECRET,
 
-  /**
-   * ✅ IMPORTANT
-   * - internalToken => utilisé historiquement partout (legacy)
-   * - gatewayInternalToken => token interne du gateway
-   * - principalInternalToken => token pour appeler le backend principal
-   */
-  internalToken: legacyToken || gatewayInternalToken || principalInternalToken,
+  // legacy + nouveaux
+  internalToken: gatewayInternalToken || principalInternalToken || legacyToken,
   gatewayInternalToken,
   principalInternalToken,
 
-  // ✅ Public read-only HMAC
-  publicReadonlySecret: normStr(env.PUBLIC_READONLY_HMAC_SECRET || ""),
-  publicSignatureTtlSec: Number(env.PUBLIC_SIGNATURE_TTL_SEC || 60),
+  // public signature
+  publicReadonlySecret,
+  publicSignatureTtlSec,
 
-  // Backend principal (optionnel)
-  principalUrl: (env.PRINCIPAL_URL || "").replace(/\/+$/, ""),
+  // backend principal
+  principalUrl,
 
   microservices: {
-    paynoval: env.SERVICE_PAYNOVAL_URL,
-    bank: env.SERVICE_BANK_URL,
-    mobilemoney: env.SERVICE_MOBILEMONEY_URL,
-    stripe: env.SERVICE_STRIPE_URL,
-    visa_direct: env.SERVICE_VISA_DIRECT_URL,
-    stripe2momo: env.SERVICE_STRIPE2MOMO_URL,
-    cashin: env.SERVICE_CASHIN_URL,
-    cashout: env.SERVICE_CASHOUT_URL,
-    flutterwave: env.SERVICE_FLUTTERWAVE_URL,
+    paynoval: normStr(env.SERVICE_PAYNOVAL_URL || "").replace(/\/+$/, ""),
+    bank: normStr(env.SERVICE_BANK_URL || "").replace(/\/+$/, ""),
+    mobilemoney: normStr(env.SERVICE_MOBILEMONEY_URL || "").replace(/\/+$/, ""),
+    stripe: normStr(env.SERVICE_STRIPE_URL || "").replace(/\/+$/, ""),
+    visa_direct: normStr(env.SERVICE_VISA_DIRECT_URL || "").replace(/\/+$/, ""),
+    stripe2momo: normStr(env.SERVICE_STRIPE2MOMO_URL || "").replace(/\/+$/, ""),
+    cashin: normStr(env.SERVICE_CASHIN_URL || "").replace(/\/+$/, ""),
+    cashout: normStr(env.SERVICE_CASHOUT_URL || "").replace(/\/+$/, ""),
+    flutterwave: normStr(env.SERVICE_FLUTTERWAVE_URL || "").replace(/\/+$/, ""),
   },
 
-  // ✅ CORS (compat + nouveau)
   cors: {
-    // legacy (ton app.js l'utilise déjà)
     origins: legacyCorsOrigins,
-
-    // nouveaux
     adminOrigins,
     mobileOrigins,
     allowCredentials: String(env.CORS_CREDENTIALS || "true") === "true",
@@ -233,70 +271,70 @@ module.exports = {
     logsDir: path.join(__dirname, "..", "..", "logs"),
   },
 
-  // ✅ Rate limits (compat + nouveau)
   rateLimit: {
-    // legacy (tes middlewares actuels peuvent l'utiliser)
     windowMs: legacyRate.windowMs,
     max: legacyRate.max,
-
-    // nouveaux (pour app.js)
     public: publicRate,
     admin: adminRate,
   },
 
   dbUris: {
-    users: env.MONGO_URI_USERS,
-    gateway: env.MONGO_URI_GATEWAY,
+    users: mongoUsers || null,
+    gateway: mongoGateway || null,
   },
 
   fraudAlert: {
-    email: env.FRAUD_ALERT_EMAIL || null,
-    webhookUrl: env.FRAUD_ALERT_WEBHOOK_URL || null,
+    email: normStr(env.FRAUD_ALERT_EMAIL || "") || null,
+    webhookUrl: normStr(env.FRAUD_ALERT_WEBHOOK_URL || "") || null,
   },
 
-  // ✅ Helpers: internal token check (x-internal-token)
+  // ✅ helper internal token check
   verifyInternalToken(req) {
     const got = req.get("x-internal-token");
     const expected = String(gatewayInternalToken || "");
-    if (!expected) return false;
-    if (!got) return false;
-    return safeEqual(got, expected);
+    if (!expected || !got) return false;
+    // ici on compare en string normal (pas hex)
+    const a = Buffer.from(String(got));
+    const b = Buffer.from(String(expected));
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
   },
 
-  // ✅ Helpers: public signature check (HMAC) for /api/v1/public/*
+  // ✅ helper public signature check (HMAC)
   verifyPublicSignature(req) {
-    const secret = String(module.exports.publicReadonlySecret || "");
+    const secret = String(publicReadonlySecret || "");
     if (!secret) return { ok: false, reason: "public_secret_missing" };
 
-    const sig = req.get("x-signature") || "";
-    const tsRaw = req.get("x-ts") || "";
+    const sig = String(req.get("x-signature") || "");
+    const tsRaw = String(req.get("x-ts") || "");
     if (!sig || !tsRaw) return { ok: false, reason: "missing_headers" };
 
-    // seconds or ms
     let ts = Number(tsRaw);
     if (!Number.isFinite(ts)) return { ok: false, reason: "invalid_ts" };
+    // accepte ms -> convert
     if (ts > 10_000_000_000) ts = Math.floor(ts / 1000);
 
     const age = Math.abs(nowSec() - ts);
-    if (age > Number(module.exports.publicSignatureTtlSec || 60)) {
-      return { ok: false, reason: "ts_expired", age };
-    }
+    const ttl = Number(publicSignatureTtlSec || 60);
+    if (ttl > 0 && age > ttl) return { ok: false, reason: "ts_expired", age };
 
-    // path = baseUrl + path (Express)
-    const p = req.baseUrl
-      ? String(req.baseUrl) + String(req.path || "")
-      : String(req.path || req.originalUrl || "");
+    // ✅ IMPORTANT: baseUrl + path (middleware monté sur /api/v1/public)
+    const fullPath = normalizePath(`${req.baseUrl || ""}${req.path || ""}`);
 
     const payload = canonicalString({
       ts,
       method: req.method,
-      path: p,
+      path: fullPath,
       query: req.query || {},
     });
 
-    const expected = hmacSign(secret, payload);
-    if (!safeEqual(sig, expected)) return { ok: false, reason: "bad_signature" };
+    const expected = hmacSha256Hex(secret, payload);
 
-    return { ok: true, ts, age };
+    // compare en hex constant-time
+    if (!safeEqualHex(sig, expected)) {
+      return { ok: false, reason: "bad_signature", age };
+    }
+
+    return { ok: true, ts, age, path: fullPath };
   },
 };

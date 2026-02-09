@@ -1,6 +1,7 @@
+// File: api-gateway/src/middlewares/requirePublicSignature.js
 "use strict";
 
-const config = require("../../src/config");
+const config = require("../config"); // ✅ bon chemin
 
 module.exports = function requirePublicSignature(req, res, next) {
   const out = config.verifyPublicSignature(req);
@@ -14,7 +15,6 @@ module.exports = function requirePublicSignature(req, res, next) {
     });
   }
 
-  // optional: attach debug info
   req.publicSig = out;
   return next();
 };
