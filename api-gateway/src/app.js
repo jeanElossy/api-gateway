@@ -80,9 +80,10 @@ const allowedOrigins = buildAllowedOriginsSet();
 const allowAll =
   allowedOrigins.has("*") || (config.cors?.origins || []).includes("*");
 
-// ✅ fallback DEV: autorise localhost si pas configuré
 const nodeEnv = config.nodeEnv || process.env.NODE_ENV || "development";
 const isProd = nodeEnv === "production";
+
+// ✅ fallback DEV: autorise localhost si pas configuré
 const devLocalOrigins = new Set([
   "http://localhost:3000",
   "http://127.0.0.1:3000",
@@ -92,7 +93,7 @@ const devLocalOrigins = new Set([
 
 const corsOptions = {
   origin: (origin, cb) => {
-    // outils/SSR/Postman
+    // outils/SSR/Postman (pas d'origin)
     if (!origin) return cb(null, true);
 
     if (allowAll) return cb(null, true);
@@ -102,19 +103,37 @@ const corsOptions = {
 
     if (allowedOrigins.has(origin)) return cb(null, true);
 
-    // Important: renvoyer false => pas de header CORS
-    // (et le navigateur bloquera). En prod c’est voulu.
-    return cb(null, false);
+    // ✅ IMPORTANT: renvoyer une erreur => on pourra répondre 403 proprement
+    return cb(new Error("CORS_NOT_ALLOWED: " + origin));
   },
   credentials: config.cors?.allowCredentials !== false,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "X-Request-Id"],
-  exposedHeaders: ["Retry-After"], // utile pour 429 côté front
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "X-Request-Id",
+    "x-internal-token",
+  ],
+  exposedHeaders: ["Retry-After"],
   maxAge: 86400,
 };
 
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
+
+// ✅ handler CORS error lisible (évite “No Access-Control-Allow-Origin” incompréhensible)
+app.use((err, req, res, next) => {
+  if (err && String(err.message || "").startsWith("CORS_NOT_ALLOWED")) {
+    return res.status(403).json({
+      success: false,
+      error: "CORS forbidden",
+      detail: err.message,
+      origin: req.headers.origin || null,
+    });
+  }
+  return next(err);
+});
 
 // ─────────── SÉCURITÉ & LOG ───────────
 app.use(
@@ -152,7 +171,7 @@ app.use(express.json({ limit: "2mb" }));
 app.use(loggerMiddleware);
 
 // 🛡️ Bouclier global IP
-// ✅ on skip OPTIONS sinon ça peut générer des CORS faux-positifs
+// ✅ Ne pas bloquer OPTIONS (préflight). CORS est déjà au-dessus.
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   return globalIpLimiter(req, res, next);
@@ -167,7 +186,6 @@ if (config.rateLimit?.public) {
     legacyHeaders: false,
     skip: (req) => req.method === "OPTIONS",
     handler: (req, res) => {
-      // CORS headers déjà posés car cors() est au-dessus
       res.status(429).json({
         success: false,
         message: "Trop de requêtes (public). Réessaie dans un instant.",
@@ -233,7 +251,8 @@ app.get("/status", async (_req, res) => {
 // ─────────────────────────────────────────────────────────────
 // ✅ PROXY vers BACKEND PRINCIPAL (pour routes app)
 // ─────────────────────────────────────────────────────────────
-const PRINCIPAL_BASE = config.principalUrl || process.env.PRINCIPAL_API_BASE_URL || "";
+const PRINCIPAL_BASE =
+  config.principalUrl || process.env.PRINCIPAL_API_BASE_URL || "";
 
 // Préfixes servis par le backend principal (proxy)
 const PRINCIPAL_PREFIXES = [
@@ -274,26 +293,53 @@ function makePrincipalProxy() {
     proxyTimeout: 30000,
     timeout: 30000,
 
-    onProxyReq: (proxyReq, req) => {
-      fixRequestBody(proxyReq, req);
+    // ✅ FIX 502/crash: ne jamais setHeader si headers déjà envoyés
+    onProxyReq: (proxyReq, req, res) => {
+      if (res?.headersSent || res?.writableEnded) return;
 
+      try {
+        fixRequestBody(proxyReq, req);
+      } catch (_) {}
+
+      // Correlation id
       const rid = req.headers["x-request-id"];
-      if (rid) proxyReq.setHeader("X-Request-Id", rid);
-
-      if (req.headers.authorization)
-        proxyReq.setHeader("Authorization", req.headers.authorization);
-
-      if (config.principalInternalToken) {
-        proxyReq.setHeader("x-internal-token", String(config.principalInternalToken));
+      if (rid) {
+        try {
+          proxyReq.setHeader("X-Request-Id", rid);
+        } catch (_) {}
       }
 
-      proxyReq.setHeader("x-forwarded-service", "api-gateway");
+      // Keep Authorization (JWT)
+      if (req.headers.authorization) {
+        try {
+          proxyReq.setHeader("Authorization", req.headers.authorization);
+        } catch (_) {}
+      }
+
+      // Optionnel: sécuriser le lien gateway -> principal via x-internal-token
+      if (config.principalInternalToken) {
+        try {
+          proxyReq.setHeader(
+            "x-internal-token",
+            String(config.principalInternalToken)
+          );
+        } catch (_) {}
+      }
+
+      try {
+        proxyReq.setHeader("x-forwarded-service", "api-gateway");
+      } catch (_) {}
     },
 
     onError: (err, req, res) => {
-      logger.error("[PROXY principal] error", { message: err.message, path: req.originalUrl });
+      logger.error("[PROXY principal] error", {
+        message: err.message,
+        path: req.originalUrl,
+      });
       if (!res.headersSent) {
-        res.status(502).json({ success: false, error: "Principal upstream unavailable" });
+        res
+          .status(502)
+          .json({ success: false, error: "Principal upstream unavailable" });
       }
     },
   });
@@ -360,11 +406,11 @@ app.use("/api/v1/public", publicRoutes);
 app.use(auditHeaders);
 
 // ✅ Rate limit par utilisateur (protégé) MAIS on évite de casser /users/me
-// Sinon ton front appelle /users/me plusieurs fois (layout, guards, refresh token) -> 429
 app.use((req, res, next) => {
   const isUsersMe =
     req.method === "GET" &&
-    (req.path === "/api/v1/users/me" || req.path.startsWith("/api/v1/users/me/"));
+    (req.path === "/api/v1/users/me" ||
+      req.path.startsWith("/api/v1/users/me/"));
   if (isUsersMe) return next();
   return userLimiter(req, res, next);
 });
@@ -391,7 +437,9 @@ app.use((req, res, next) => {
   if (!needsMongo) return next();
 
   if (mongoose.connection.readyState !== 1) {
-    logger.error("[MONGO] Requête refusée (route DB gateway), MongoDB non connecté !");
+    logger.error(
+      "[MONGO] Requête refusée (route DB gateway), MongoDB non connecté !"
+    );
     return res.status(500).json({ success: false, error: "MongoDB non connecté" });
   }
   return next();
