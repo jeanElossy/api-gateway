@@ -24,7 +24,12 @@ const openapiSpec = YAML.load(path.join(__dirname, "../docs/openapi.yaml"));
 
 // ✅ Middlewares internes
 const { authMiddleware } = require("./middlewares/auth");
-const { globalIpLimiter, userLimiter } = require("./middlewares/rateLimit");
+const {
+  globalIpLimiter,
+  authLoginLimiter,
+  userLimiter,
+} = require("./middlewares/rateLimit");
+
 const { loggerMiddleware } = require("./middlewares/logger");
 const auditHeaders = require("./middlewares/auditHeaders");
 const logger = require("./logger");
@@ -63,10 +68,11 @@ try {
   logger.info?.("[BOOT] HMAC TTL=" + String(config.publicSignatureTtlSec));
 } catch (_) {}
 
-app.set("trust proxy", 1);
+// ✅ IMPORTANT: Render/Cloudflare => plusieurs proxies
+app.set("trust proxy", true);
 
 // ─────────────────────────────────────────────────────────────
-// ✅ CORS DOIT ÊTRE TOUT EN HAUT (avant rate-limit et avant routes)
+// ✅ CORS TOUT EN HAUT
 // ─────────────────────────────────────────────────────────────
 function buildAllowedOriginsSet() {
   const set = new Set();
@@ -83,7 +89,6 @@ const allowAll =
 const nodeEnv = config.nodeEnv || process.env.NODE_ENV || "development";
 const isProd = nodeEnv === "production";
 
-// ✅ fallback DEV: autorise localhost si pas configuré
 const devLocalOrigins = new Set([
   "http://localhost:3000",
   "http://127.0.0.1:3000",
@@ -93,17 +98,10 @@ const devLocalOrigins = new Set([
 
 const corsOptions = {
   origin: (origin, cb) => {
-    // outils/SSR/Postman (pas d'origin)
     if (!origin) return cb(null, true);
-
     if (allowAll) return cb(null, true);
-
-    // ✅ autoriser localhost en dev même si config pas prêt
     if (!isProd && devLocalOrigins.has(origin)) return cb(null, true);
-
     if (allowedOrigins.has(origin)) return cb(null, true);
-
-    // ✅ IMPORTANT: renvoyer une erreur => on pourra répondre 403 proprement
     return cb(new Error("CORS_NOT_ALLOWED: " + origin));
   },
   credentials: config.cors?.allowCredentials !== false,
@@ -122,7 +120,6 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-// ✅ handler CORS error lisible (évite “No Access-Control-Allow-Origin” incompréhensible)
 app.use((err, req, res, next) => {
   if (err && String(err.message || "").startsWith("CORS_NOT_ALLOWED")) {
     return res.status(403).json({
@@ -166,12 +163,15 @@ if (config.nodeEnv !== "test") {
   app.use(morgan(config.logging?.level === "debug" ? "dev" : "combined"));
 }
 
-// IMPORTANT: body parser AVANT proxy (fixRequestBody gère l’envoi)
+// ✅ Body parser AVANT login limiter (pour lire emailOrPhone)
 app.use(express.json({ limit: "2mb" }));
 app.use(loggerMiddleware);
 
-// 🛡️ Bouclier global IP
-// ✅ Ne pas bloquer OPTIONS (préflight). CORS est déjà au-dessus.
+// ✅ Anti brute-force login (APRÈS express.json, AVANT proxy /auth)
+app.use("/api/v1/auth/login", authLoginLimiter);
+app.use("/api/v1/auth/login-2fa", authLoginLimiter);
+
+// 🛡️ Bouclier global IP (ne pas bloquer OPTIONS)
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   return globalIpLimiter(req, res, next);
@@ -254,7 +254,6 @@ app.get("/status", async (_req, res) => {
 const PRINCIPAL_BASE =
   config.principalUrl || process.env.PRINCIPAL_API_BASE_URL || "";
 
-// Préfixes servis par le backend principal (proxy)
 const PRINCIPAL_PREFIXES = [
   "/api/v1/auth",
   "/api/v1/users",
@@ -277,7 +276,6 @@ const PRINCIPAL_PREFIXES = [
   "/api/v1/rates",
 ];
 
-// Factory proxy vers principal
 function makePrincipalProxy() {
   if (!PRINCIPAL_BASE) {
     logger.warn?.("[PROXY] PRINCIPAL_BASE missing -> principal routes disabled");
@@ -293,7 +291,6 @@ function makePrincipalProxy() {
     proxyTimeout: 30000,
     timeout: 30000,
 
-    // ✅ FIX 502/crash: ne jamais setHeader si headers déjà envoyés
     onProxyReq: (proxyReq, req, res) => {
       if (res?.headersSent || res?.writableEnded) return;
 
@@ -301,7 +298,6 @@ function makePrincipalProxy() {
         fixRequestBody(proxyReq, req);
       } catch (_) {}
 
-      // Correlation id
       const rid = req.headers["x-request-id"];
       if (rid) {
         try {
@@ -309,14 +305,12 @@ function makePrincipalProxy() {
         } catch (_) {}
       }
 
-      // Keep Authorization (JWT)
       if (req.headers.authorization) {
         try {
           proxyReq.setHeader("Authorization", req.headers.authorization);
         } catch (_) {}
       }
 
-      // Optionnel: sécuriser le lien gateway -> principal via x-internal-token
       if (config.principalInternalToken) {
         try {
           proxyReq.setHeader(
@@ -355,28 +349,17 @@ const openEndpoints = [
   "/status",
   "/docs",
   "/openapi.json",
-
-  // auth du principal (proxy) => ouvert
   "/api/v1/auth",
   "/api/v1/verification",
-
-  // public HMAC signed
   "/api/v1/public",
-
-  // legacy simulate endpoints (gateway)
   "/api/v1/fees/simulate",
   "/api/v1/commissions/simulate",
-
-  // legacy FX public rate
   "/api/v1/exchange-rates/rate",
-
-  // internal routes (protégées dans leurs routes)
   "/internal/transactions",
   "/api/v1/internal",
 ];
 
 app.use((req, res, next) => {
-  // ✅ préflight déjà géré plus haut, mais on garde une sécurité
   if (req.method === "OPTIONS") return res.sendStatus(204);
 
   const isOpen = openEndpoints.some(
@@ -399,13 +382,12 @@ app.use("/api/v1/public", (req, res, next) => {
   return requirePublicSignature(req, res, next);
 });
 
-// ✅ Mount read-only public routes
 app.use("/api/v1/public", publicRoutes);
 
-// Ajout headers audit après auth (req.user si JWT ok)
+// audit headers après auth
 app.use(auditHeaders);
 
-// ✅ Rate limit par utilisateur (protégé) MAIS on évite de casser /users/me
+// ✅ user limiter (protégé) — on laisse /users/me passer si tu veux
 app.use((req, res, next) => {
   const isUsersMe =
     req.method === "GET" &&
@@ -415,10 +397,6 @@ app.use((req, res, next) => {
   return userLimiter(req, res, next);
 });
 
-/**
- * ─────────── DB READY STATE (bloque UNIQUEMENT les routes DB du GATEWAY) ───────────
- * Objectif: la gateway doit pouvoir proxy /auth, /users... même si Mongo du gateway est KO.
- */
 const mongoRequiredPrefixes = [
   "/api/v1/admin",
   "/api/v1/aml",
@@ -437,58 +415,39 @@ app.use((req, res, next) => {
   if (!needsMongo) return next();
 
   if (mongoose.connection.readyState !== 1) {
-    logger.error(
-      "[MONGO] Requête refusée (route DB gateway), MongoDB non connecté !"
-    );
+    logger.error("[MONGO] Requête refusée (route DB gateway), MongoDB non connecté !");
     return res.status(500).json({ success: false, error: "MongoDB non connecté" });
   }
   return next();
 });
 
 // ─────────── ROUTES GATEWAY NATIVES ───────────
-
-// payment
 app.use("/api/v1/pay", paymentRoutes);
-
-// legacy internal
 app.use("/internal/transactions", internalTransactionsRouter);
-
-// nouvelles routes internes versionnées
 app.use("/api/v1/internal", internalRoutes);
-
-// tx (gateway -> tx-core microservice)
 app.use("/api/v1/transactions", userTransactionRoutes);
-
-// admins
 app.use("/api/v1/admin/transactions", transactionRoutes);
-
-// db-ish routes
 app.use("/api/v1/aml", amlRoutes);
 app.use("/api/v1/fees", feesRoutes);
 app.use("/api/v1/exchange-rates", exchangeRateRoutes);
 app.use("/api/v1/commissions", commissionsRoutes);
-
-// pricing + fx rules
 app.use("/api/v1/pricing", pricingRoutes);
 app.use("/api/v1/fx-rules", fxRulesRoutes);
-
-// phone verification
 app.use("/api/v1/phone-verification", phoneVerificationRoutes);
 
-// ─────────────────────────────────────────────────────────────
-// ✅ PROXY FINAL: routes du backend principal passent ICI
-// ─────────────────────────────────────────────────────────────
+// ✅ PROXY FINAL: routes du backend principal
 if (principalProxy) {
   PRINCIPAL_PREFIXES.forEach((prefix) => {
     app.use(prefix, principalProxy);
   });
 }
 
-// ─────────── 404 & ERROR HANDLERS ───────────
+// 404
 app.use((req, res) =>
   res.status(404).json({ success: false, error: "Ressource non trouvée" })
 );
 
+// error handler
 app.use((err, req, res, _next) => {
   logger.error("[API ERROR]", {
     message: err.message,
