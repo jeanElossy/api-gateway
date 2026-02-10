@@ -1,7 +1,7 @@
 // File: src/middleware/aml
 "use strict";
 
-const logger = require("../logger");
+const logger = require("../../src/logger");
 const {
   logTransaction,
   getUserTransactionsStats,

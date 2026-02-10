@@ -1,42 +1,44 @@
-// File: api-gateway/routes/principalProxyRoutes.js
+// routes/principalProxyRoutes.js
 "use strict";
 
 const { createProxyMiddleware, fixRequestBody } = require("http-proxy-middleware");
-const config = require("../config");
+const config = require("../src/config"); // adapte si ton config est ailleurs
 
-const PRINCIPAL_URL = String(config?.principalUrl || process.env.PRINCIPAL_URL || "").replace(/\/+$/, "");
+const PRINCIPAL_URL = String(
+  config?.principalUrl || process.env.PRINCIPAL_URL || process.env.PRINCIPAL_API_BASE_URL || ""
+).replace(/\/+$/, "");
+
 const INTERNAL_TOKEN = String(process.env.INTERNAL_TOKEN || config?.internalToken || "");
 
 if (!PRINCIPAL_URL) {
-  // On throw pas ici pour éviter crash au require en dev,
-  // mais en prod c’est obligatoire.
   console.warn("[principalProxyRoutes] ⚠️ PRINCIPAL_URL manquant");
 }
 
-/**
- * ✅ Proxy fallback vers Backend Principal
- * - Forward toutes les routes /api/v1/* que le gateway n’a pas gérées avant
- * - Conserve Authorization: Bearer <jwt> => le backend principal valide le JWT
- * - Ajoute x-internal-token (si tu veux sécuriser la relation gateway -> principal)
- */
 module.exports = createProxyMiddleware({
   target: PRINCIPAL_URL,
   changeOrigin: true,
   xfwd: true,
+  ws: true,
   proxyTimeout: 30000,
   timeout: 30000,
+  logLevel: process.env.NODE_ENV === "production" ? "warn" : "debug",
 
-  // Important: on garde le chemin tel quel (gateway et principal ont /api/v1)
-  // pathRewrite: (path) => path,  // pas nécessaire
-
-  onProxyReq: (proxyReq, req, res) => {
-    // ✅ si tu utilises express.json(), fixRequestBody évite body vide sur POST/PUT
+  onProxyReq: (proxyReq, req) => {
     fixRequestBody(proxyReq, req);
 
-    // ✅ token interne optionnel (recommandé si ton principal accepte x-internal-token)
+    // Conserve JWT
+    if (req.headers.authorization) {
+      proxyReq.setHeader("Authorization", req.headers.authorization);
+    }
+
+    // Correlation id (si tu en utilises)
+    if (req.headers["x-request-id"]) {
+      proxyReq.setHeader("X-Request-Id", req.headers["x-request-id"]);
+    }
+
+    // Token interne optionnel (gateway -> principal)
     if (INTERNAL_TOKEN) proxyReq.setHeader("x-internal-token", INTERNAL_TOKEN);
 
-    // ✅ audit/debug
     proxyReq.setHeader("x-forwarded-service", "api-gateway");
   },
 
@@ -49,6 +51,4 @@ module.exports = createProxyMiddleware({
       });
     }
   },
-
-  logLevel: process.env.NODE_ENV === "production" ? "warn" : "debug",
 });

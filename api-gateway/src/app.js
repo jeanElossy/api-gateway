@@ -65,6 +65,57 @@ try {
 
 app.set("trust proxy", 1);
 
+// ─────────────────────────────────────────────────────────────
+// ✅ CORS DOIT ÊTRE TOUT EN HAUT (avant rate-limit et avant routes)
+// ─────────────────────────────────────────────────────────────
+function buildAllowedOriginsSet() {
+  const set = new Set();
+  (config.cors?.origins || []).forEach((o) => set.add(o));
+  (config.cors?.adminOrigins || []).forEach((o) => set.add(o));
+  (config.cors?.mobileOrigins || []).forEach((o) => set.add(o));
+  return set;
+}
+
+const allowedOrigins = buildAllowedOriginsSet();
+const allowAll =
+  allowedOrigins.has("*") || (config.cors?.origins || []).includes("*");
+
+// ✅ fallback DEV: autorise localhost si pas configuré
+const nodeEnv = config.nodeEnv || process.env.NODE_ENV || "development";
+const isProd = nodeEnv === "production";
+const devLocalOrigins = new Set([
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+]);
+
+const corsOptions = {
+  origin: (origin, cb) => {
+    // outils/SSR/Postman
+    if (!origin) return cb(null, true);
+
+    if (allowAll) return cb(null, true);
+
+    // ✅ autoriser localhost en dev même si config pas prêt
+    if (!isProd && devLocalOrigins.has(origin)) return cb(null, true);
+
+    if (allowedOrigins.has(origin)) return cb(null, true);
+
+    // Important: renvoyer false => pas de header CORS
+    // (et le navigateur bloquera). En prod c’est voulu.
+    return cb(null, false);
+  },
+  credentials: config.cors?.allowCredentials !== false,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "X-Request-Id"],
+  exposedHeaders: ["Retry-After"], // utile pour 429 côté front
+  maxAge: 86400,
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+
 // ─────────── SÉCURITÉ & LOG ───────────
 app.use(
   helmet({
@@ -76,35 +127,21 @@ app.use(mongoSanitize());
 app.use(xssClean());
 app.use(
   hpp({
-    whitelist: ["page", "limit", "sort", "provider", "status", "skip", "from", "to", "base", "quote", "days"],
+    whitelist: [
+      "page",
+      "limit",
+      "sort",
+      "provider",
+      "status",
+      "skip",
+      "from",
+      "to",
+      "base",
+      "quote",
+      "days",
+    ],
   })
 );
-
-// ─────────── CORS ───────────
-function buildAllowedOriginsSet() {
-  const set = new Set();
-  (config.cors?.origins || []).forEach((o) => set.add(o));
-  (config.cors?.adminOrigins || []).forEach((o) => set.add(o));
-  (config.cors?.mobileOrigins || []).forEach((o) => set.add(o));
-  return set;
-}
-
-const allowedOrigins = buildAllowedOriginsSet();
-const allowAll = allowedOrigins.has("*") || (config.cors?.origins || []).includes("*");
-
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
-      if (allowAll) return cb(null, true);
-      if (allowedOrigins.has(origin)) return cb(null, true);
-      return cb(null, false);
-    },
-    credentials: config.cors?.allowCredentials !== false,
-  })
-);
-
-app.options("*", cors());
 
 if (config.nodeEnv !== "test") {
   app.use(morgan(config.logging?.level === "debug" ? "dev" : "combined"));
@@ -115,7 +152,11 @@ app.use(express.json({ limit: "2mb" }));
 app.use(loggerMiddleware);
 
 // 🛡️ Bouclier global IP
-app.use(globalIpLimiter);
+// ✅ on skip OPTIONS sinon ça peut générer des CORS faux-positifs
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  return globalIpLimiter(req, res, next);
+});
 
 // ─────────── RATE LIMIT spécial /public (read-only) ───────────
 if (config.rateLimit?.public) {
@@ -124,6 +165,14 @@ if (config.rateLimit?.public) {
     max: config.rateLimit.public.max,
     standardHeaders: true,
     legacyHeaders: false,
+    skip: (req) => req.method === "OPTIONS",
+    handler: (req, res) => {
+      // CORS headers déjà posés car cors() est au-dessus
+      res.status(429).json({
+        success: false,
+        message: "Trop de requêtes (public). Réessaie dans un instant.",
+      });
+    },
   });
   app.use("/api/v1/public", publicLimiter);
 }
@@ -158,7 +207,9 @@ app.get("/api/v1", (_req, res) => {
   });
 });
 
-app.get("/healthz", (_req, res) => res.json({ status: "ok", ts: new Date().toISOString() }));
+app.get("/healthz", (_req, res) =>
+  res.json({ status: "ok", ts: new Date().toISOString() })
+);
 
 app.get("/status", async (_req, res) => {
   const statuses = {};
@@ -167,7 +218,9 @@ app.get("/status", async (_req, res) => {
       const p = getProvider(name);
       if (!p || !p.enabled) return;
       try {
-        const health = await axios.get(p.url + (p.health || "/health"), { timeout: 3000 });
+        const health = await axios.get(p.url + (p.health || "/health"), {
+          timeout: 3000,
+        });
         statuses[name] = { up: true, status: health.data?.status || "ok" };
       } catch (err) {
         statuses[name] = { up: false, error: err.message };
@@ -180,14 +233,7 @@ app.get("/status", async (_req, res) => {
 // ─────────────────────────────────────────────────────────────
 // ✅ PROXY vers BACKEND PRINCIPAL (pour routes app)
 // ─────────────────────────────────────────────────────────────
-//
-// IMPORTANT: ton config exporte principalUrl (pas services.principalBaseUrl)
-// Donc ici on lit : config.principalUrl ou env PRINCIPAL_API_BASE_URL
-//
-const PRINCIPAL_BASE =
-  config.principalUrl ||
-  process.env.PRINCIPAL_API_BASE_URL ||
-  "";
+const PRINCIPAL_BASE = config.principalUrl || process.env.PRINCIPAL_API_BASE_URL || "";
 
 // Préfixes servis par le backend principal (proxy)
 const PRINCIPAL_PREFIXES = [
@@ -229,18 +275,14 @@ function makePrincipalProxy() {
     timeout: 30000,
 
     onProxyReq: (proxyReq, req) => {
-      // Fix body for POST/PUT/PATCH with express.json
       fixRequestBody(proxyReq, req);
 
-      // Correlation id
       const rid = req.headers["x-request-id"];
       if (rid) proxyReq.setHeader("X-Request-Id", rid);
 
-      // Keep Authorization (JWT)
-      if (req.headers.authorization) proxyReq.setHeader("Authorization", req.headers.authorization);
+      if (req.headers.authorization)
+        proxyReq.setHeader("Authorization", req.headers.authorization);
 
-      // ✅ Optionnel: sécuriser le lien gateway -> principal via x-internal-token
-      // (si ton backend principal sait le vérifier)
       if (config.principalInternalToken) {
         proxyReq.setHeader("x-internal-token", String(config.principalInternalToken));
       }
@@ -260,9 +302,6 @@ function makePrincipalProxy() {
 const principalProxy = makePrincipalProxy();
 
 // ─────────── AUTH GLOBAL GATEWAY ───────────
-//
-// openEndpoints = routes qui ne nécessitent PAS de JWT
-//
 const openEndpoints = [
   "/",
   "/api/v1",
@@ -271,7 +310,7 @@ const openEndpoints = [
   "/docs",
   "/openapi.json",
 
-  // ✅ auth du principal (proxy) => ouvert
+  // auth du principal (proxy) => ouvert
   "/api/v1/auth",
   "/api/v1/verification",
 
@@ -291,9 +330,12 @@ const openEndpoints = [
 ];
 
 app.use((req, res, next) => {
+  // ✅ préflight déjà géré plus haut, mais on garde une sécurité
   if (req.method === "OPTIONS") return res.sendStatus(204);
 
-  const isOpen = openEndpoints.some((ep) => req.path === ep || req.path.startsWith(ep + "/"));
+  const isOpen = openEndpoints.some(
+    (ep) => req.path === ep || req.path.startsWith(ep + "/")
+  );
   if (isOpen) return next();
 
   return authMiddleware(req, res, next);
@@ -304,7 +346,8 @@ app.use("/api/v1/public", (req, res, next) => {
   if (!config.publicReadonlySecret) {
     return res.status(503).json({
       success: false,
-      message: "Public read-only is not configured (missing PUBLIC_READONLY_HMAC_SECRET).",
+      message:
+        "Public read-only is not configured (missing PUBLIC_READONLY_HMAC_SECRET).",
     });
   }
   return requirePublicSignature(req, res, next);
@@ -316,8 +359,15 @@ app.use("/api/v1/public", publicRoutes);
 // Ajout headers audit après auth (req.user si JWT ok)
 app.use(auditHeaders);
 
-// Rate limit par utilisateur pour routes authentifiées
-app.use(userLimiter);
+// ✅ Rate limit par utilisateur (protégé) MAIS on évite de casser /users/me
+// Sinon ton front appelle /users/me plusieurs fois (layout, guards, refresh token) -> 429
+app.use((req, res, next) => {
+  const isUsersMe =
+    req.method === "GET" &&
+    (req.path === "/api/v1/users/me" || req.path.startsWith("/api/v1/users/me/"));
+  if (isUsersMe) return next();
+  return userLimiter(req, res, next);
+});
 
 /**
  * ─────────── DB READY STATE (bloque UNIQUEMENT les routes DB du GATEWAY) ───────────
@@ -335,7 +385,9 @@ const mongoRequiredPrefixes = [
 ];
 
 app.use((req, res, next) => {
-  const needsMongo = mongoRequiredPrefixes.some((p) => req.path === p || req.path.startsWith(p + "/"));
+  const needsMongo = mongoRequiredPrefixes.some(
+    (p) => req.path === p || req.path.startsWith(p + "/")
+  );
   if (!needsMongo) return next();
 
   if (mongoose.connection.readyState !== 1) {
@@ -385,7 +437,9 @@ if (principalProxy) {
 }
 
 // ─────────── 404 & ERROR HANDLERS ───────────
-app.use((req, res) => res.status(404).json({ success: false, error: "Ressource non trouvée" }));
+app.use((req, res) =>
+  res.status(404).json({ success: false, error: "Ressource non trouvée" })
+);
 
 app.use((err, req, res, _next) => {
   logger.error("[API ERROR]", {
