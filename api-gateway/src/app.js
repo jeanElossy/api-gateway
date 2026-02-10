@@ -13,7 +13,7 @@ const axios = require("axios");
 const rateLimit = require("express-rate-limit");
 const { createProxyMiddleware, fixRequestBody } = require("http-proxy-middleware");
 
-// ✅ Config (DOIT être chargé AVANT d'utiliser config.*)
+// ✅ Config
 const config = require("./config");
 
 // ✅ Swagger (docs Gateway)
@@ -24,12 +24,7 @@ const openapiSpec = YAML.load(path.join(__dirname, "../docs/openapi.yaml"));
 
 // ✅ Middlewares internes
 const { authMiddleware } = require("./middlewares/auth");
-const {
-  globalIpLimiter,
-  authLoginLimiter,
-  userLimiter,
-} = require("./middlewares/rateLimit");
-
+const { globalIpLimiter, authLoginLimiter, userLimiter } = require("./middlewares/rateLimit");
 const { loggerMiddleware } = require("./middlewares/logger");
 const auditHeaders = require("./middlewares/auditHeaders");
 const logger = require("./logger");
@@ -66,13 +61,15 @@ try {
   logger.info?.("[BOOT] env=" + (config.nodeEnv || process.env.NODE_ENV));
   logger.info?.("[BOOT] HMAC enabled=" + String(!!config.publicReadonlySecret));
   logger.info?.("[BOOT] HMAC TTL=" + String(config.publicSignatureTtlSec));
+  logger.info?.("[BOOT] PRINCIPAL_URL=" + String(config.principalUrl || ""));
 } catch (_) {}
 
 // ✅ IMPORTANT: Render/Cloudflare => plusieurs proxies
 app.set("trust proxy", true);
 
 // ─────────────────────────────────────────────────────────────
-// ✅ CORS TOUT EN HAUT
+// ✅ CORS TOUT EN HAUT (NE JAMAIS throw dans origin callback)
+// - compatible avec credentials + "*"
 // ─────────────────────────────────────────────────────────────
 function buildAllowedOriginsSet() {
   const set = new Set();
@@ -83,26 +80,20 @@ function buildAllowedOriginsSet() {
 }
 
 const allowedOrigins = buildAllowedOriginsSet();
-const allowAll =
-  allowedOrigins.has("*") || (config.cors?.origins || []).includes("*");
-
-const nodeEnv = config.nodeEnv || process.env.NODE_ENV || "development";
-const isProd = nodeEnv === "production";
-
-const devLocalOrigins = new Set([
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-]);
+const allowAll = allowedOrigins.has("*") || (config.cors?.origins || []).includes("*");
 
 const corsOptions = {
   origin: (origin, cb) => {
+    // outils/SSR/Postman
     if (!origin) return cb(null, true);
-    if (allowAll) return cb(null, true);
-    if (!isProd && devLocalOrigins.has(origin)) return cb(null, true);
-    if (allowedOrigins.has(origin)) return cb(null, true);
-    return cb(new Error("CORS_NOT_ALLOWED: " + origin));
+
+    // ✅ si "*" => renvoyer l'origin (pas true / pas "*") pour que credentials marche
+    if (allowAll) return cb(null, origin);
+
+    if (allowedOrigins.has(origin)) return cb(null, origin);
+
+    // ✅ refuse proprement -> pas de header CORS
+    return cb(null, false);
   },
   credentials: config.cors?.allowCredentials !== false,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -120,18 +111,6 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-app.use((err, req, res, next) => {
-  if (err && String(err.message || "").startsWith("CORS_NOT_ALLOWED")) {
-    return res.status(403).json({
-      success: false,
-      error: "CORS forbidden",
-      detail: err.message,
-      origin: req.headers.origin || null,
-    });
-  }
-  return next(err);
-});
-
 // ─────────── SÉCURITÉ & LOG ───────────
 app.use(
   helmet({
@@ -143,19 +122,7 @@ app.use(mongoSanitize());
 app.use(xssClean());
 app.use(
   hpp({
-    whitelist: [
-      "page",
-      "limit",
-      "sort",
-      "provider",
-      "status",
-      "skip",
-      "from",
-      "to",
-      "base",
-      "quote",
-      "days",
-    ],
+    whitelist: ["page", "limit", "sort", "provider", "status", "skip", "from", "to", "base", "quote", "days"],
   })
 );
 
@@ -225,9 +192,7 @@ app.get("/api/v1", (_req, res) => {
   });
 });
 
-app.get("/healthz", (_req, res) =>
-  res.json({ status: "ok", ts: new Date().toISOString() })
-);
+app.get("/healthz", (_req, res) => res.json({ status: "ok", ts: new Date().toISOString() }));
 
 app.get("/status", async (_req, res) => {
   const statuses = {};
@@ -236,9 +201,7 @@ app.get("/status", async (_req, res) => {
       const p = getProvider(name);
       if (!p || !p.enabled) return;
       try {
-        const health = await axios.get(p.url + (p.health || "/health"), {
-          timeout: 3000,
-        });
+        const health = await axios.get(p.url + (p.health || "/health"), { timeout: 3000 });
         statuses[name] = { up: true, status: health.data?.status || "ok" };
       } catch (err) {
         statuses[name] = { up: false, error: err.message };
@@ -251,8 +214,7 @@ app.get("/status", async (_req, res) => {
 // ─────────────────────────────────────────────────────────────
 // ✅ PROXY vers BACKEND PRINCIPAL (pour routes app)
 // ─────────────────────────────────────────────────────────────
-const PRINCIPAL_BASE =
-  config.principalUrl || process.env.PRINCIPAL_API_BASE_URL || "";
+const PRINCIPAL_BASE = config.principalUrl || process.env.PRINCIPAL_API_BASE_URL || "";
 
 const PRINCIPAL_PREFIXES = [
   "/api/v1/auth",
@@ -311,12 +273,10 @@ function makePrincipalProxy() {
         } catch (_) {}
       }
 
+      // ✅ Optionnel: token interne gateway -> principal
       if (config.principalInternalToken) {
         try {
-          proxyReq.setHeader(
-            "x-internal-token",
-            String(config.principalInternalToken)
-          );
+          proxyReq.setHeader("x-internal-token", String(config.principalInternalToken));
         } catch (_) {}
       }
 
@@ -326,14 +286,9 @@ function makePrincipalProxy() {
     },
 
     onError: (err, req, res) => {
-      logger.error("[PROXY principal] error", {
-        message: err.message,
-        path: req.originalUrl,
-      });
+      logger.error("[PROXY principal] error", { message: err.message, path: req.originalUrl });
       if (!res.headersSent) {
-        res
-          .status(502)
-          .json({ success: false, error: "Principal upstream unavailable" });
+        res.status(502).json({ success: false, error: "Principal upstream unavailable" });
       }
     },
   });
@@ -362,9 +317,7 @@ const openEndpoints = [
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
 
-  const isOpen = openEndpoints.some(
-    (ep) => req.path === ep || req.path.startsWith(ep + "/")
-  );
+  const isOpen = openEndpoints.some((ep) => req.path === ep || req.path.startsWith(ep + "/"));
   if (isOpen) return next();
 
   return authMiddleware(req, res, next);
@@ -375,28 +328,34 @@ app.use("/api/v1/public", (req, res, next) => {
   if (!config.publicReadonlySecret) {
     return res.status(503).json({
       success: false,
-      message:
-        "Public read-only is not configured (missing PUBLIC_READONLY_HMAC_SECRET).",
+      message: "Public read-only is not configured (missing PUBLIC_READONLY_HMAC_SECRET).",
     });
   }
   return requirePublicSignature(req, res, next);
 });
-
 app.use("/api/v1/public", publicRoutes);
 
 // audit headers après auth
 app.use(auditHeaders);
 
-// ✅ user limiter (protégé) — on laisse /users/me passer si tu veux
+// ✅ user limiter (protégé) — on SKIP des endpoints “fréquents” pour ne pas casser mobile/web
+const skipUserLimiterPrefixes = [
+  "/api/v1/users/me",
+  "/api/v1/balance",
+  "/api/v1/users/me/badges",
+  "/api/v1/vaults/withdrawals/me",
+  "/api/v1/vaults/me",
+  "/api/v1/notifications",
+];
 app.use((req, res, next) => {
-  const isUsersMe =
-    req.method === "GET" &&
-    (req.path === "/api/v1/users/me" ||
-      req.path.startsWith("/api/v1/users/me/"));
-  if (isUsersMe) return next();
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  if (skipUserLimiterPrefixes.some((p) => req.path === p || req.path.startsWith(p + "/"))) {
+    return next();
+  }
   return userLimiter(req, res, next);
 });
 
+// ─────────── DB READY STATE (bloque UNIQUEMENT routes DB du GATEWAY) ───────────
 const mongoRequiredPrefixes = [
   "/api/v1/admin",
   "/api/v1/aml",
@@ -409,9 +368,7 @@ const mongoRequiredPrefixes = [
 ];
 
 app.use((req, res, next) => {
-  const needsMongo = mongoRequiredPrefixes.some(
-    (p) => req.path === p || req.path.startsWith(p + "/")
-  );
+  const needsMongo = mongoRequiredPrefixes.some((p) => req.path === p || req.path.startsWith(p + "/"));
   if (!needsMongo) return next();
 
   if (mongoose.connection.readyState !== 1) {
@@ -443,9 +400,7 @@ if (principalProxy) {
 }
 
 // 404
-app.use((req, res) =>
-  res.status(404).json({ success: false, error: "Ressource non trouvée" })
-);
+app.use((req, res) => res.status(404).json({ success: false, error: "Ressource non trouvée" }));
 
 // error handler
 app.use((err, req, res, _next) => {
@@ -463,10 +418,7 @@ app.use((err, req, res, _next) => {
 
   res.status(err.status || 500).json({
     success: false,
-    error:
-      err.isJoi && err.details
-        ? err.details.map((d) => d.message).join("; ")
-        : err.message || "Erreur serveur",
+    error: err.isJoi && err.details ? err.details.map((d) => d.message).join("; ") : err.message || "Erreur serveur",
   });
 });
 
