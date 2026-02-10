@@ -1,4 +1,3 @@
-// File: api-gateway/src/middlewares/rateLimit.js
 "use strict";
 
 const rateLimit = require("express-rate-limit");
@@ -6,6 +5,10 @@ const logger = require("../logger");
 
 /**
  * 🔎 IP client robuste (Render + Cloudflare + proxies)
+ * - Priorité: CF-Connecting-IP (quand Cloudflare est devant)
+ * - Sinon: X-Forwarded-For (première IP)
+ * - Sinon: X-Real-IP
+ * - Fallback: req.ip
  */
 function getClientIp(req) {
   const cf = req.headers["cf-connecting-ip"];
@@ -29,6 +32,10 @@ const isLoginPath = (req) =>
   req.originalUrl?.startsWith("/api/v1/auth/login") ||
   req.originalUrl?.startsWith("/api/v1/auth/login-2fa");
 
+const isMePath = (req) =>
+  req.path === "/api/v1/users/me" ||
+  req.originalUrl?.startsWith("/api/v1/users/me");
+
 const readLoginIdentifier = (req) => {
   const raw =
     req.body?.emailOrPhone ||
@@ -39,55 +46,59 @@ const readLoginIdentifier = (req) => {
   return String(raw || "").trim().toLowerCase();
 };
 
-// ✅ Endpoints "bruyants" (chargement app/web)
-function isNoisyPath(req) {
-  const p = req.path || req.originalUrl || "";
+const setRetryAfter = (res, windowMs) => {
+  const retryAfterSec = Math.ceil((windowMs || 60000) / 1000);
+  try {
+    res.setHeader("Retry-After", String(retryAfterSec));
+  } catch {}
+};
 
-  // exact + prefixes
-  const noisyPrefixes = [
-    "/api/v1/users/me",
-    "/api/v1/notifications",
-    "/api/v1/balance",
-    "/api/v1/users/me/badges",
-    "/api/v1/vaults/me",
-    "/api/v1/vaults/withdrawals/me",
-  ];
-
-  return noisyPrefixes.some((x) => p === x || p.startsWith(x + "/"));
-}
-
-// 🔰 1) Bouclier global par IP (edge)
-// ✅ Ici on SKIP login + OPTIONS + endpoints bruyants
+/**
+ * 🔰 1) Bouclier global par IP
+ * But: protéger l’infra (DDoS, loops),
+ * MAIS on skip les routes très “bruyantes” et on laisse userLimiter faire le boulot.
+ */
 const globalIpLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 600,
+  windowMs: 60 * 1000, // 1 minute
+  max: 1200, // plus large pour éviter de casser mobile/admin (le userLimiter fera le vrai contrôle)
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.method === "OPTIONS" || isLoginPath(req) || isNoisyPath(req),
   keyGenerator: (req) => getClientIp(req),
+  skip: (req) => {
+    if (req.method === "OPTIONS") return true;
+    if (isLoginPath(req)) return true; // login géré par authLoginLimiter
+    if (isMePath(req)) return true; // /users/me géré par meLimiter + userLimiter
+    // routes souvent appelées au load
+    const noisy = [
+      "/api/v1/notifications",
+      "/api/v1/balance",
+      "/api/v1/rates",
+    ];
+    if (noisy.some((p) => req.originalUrl?.startsWith(p))) return true;
+    return false;
+  },
   handler: (req, res, _next, options) => {
     logger.warn("[RateLimit][global-ip] Limite atteinte", {
       ip: getClientIp(req),
       path: req.originalUrl,
       method: req.method,
     });
+    setRetryAfter(res, options.windowMs);
 
-    const retryAfterSec = Math.ceil((options.windowMs || 60000) / 1000);
-    try {
-      res.setHeader("Retry-After", String(retryAfterSec));
-    } catch {}
-
-    return res.status(options.statusCode).json({
+    return res.status(options.statusCode || 429).json({
       success: false,
       error: "Trop de requêtes depuis cette adresse IP. Réessaie dans un instant.",
     });
   },
 });
 
-// 🔐 2) Anti brute-force LOGIN (IP + identifiant)
+/**
+ * 🔐 2) Anti brute-force LOGIN (IP + identifiant)
+ * ✅ skipSuccessfulRequests => si login OK, ça ne compte pas.
+ */
 const authLoginLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: 8,
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 8, // 8 tentatives / 10 min / (ip + identifiant)
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.method === "OPTIONS",
@@ -101,17 +112,13 @@ const authLoginLimiter = rateLimit({
   },
 
   handler: (req, res, _next, options) => {
-    const retryAfterSec = Math.ceil((options.windowMs || 600000) / 1000);
-    try {
-      res.setHeader("Retry-After", String(retryAfterSec));
-    } catch {}
-
     logger.warn("[RateLimit][login] Limite atteinte", {
       ip: getClientIp(req),
       path: req.originalUrl,
       identifier: readLoginIdentifier(req) || null,
       method: req.method,
     });
+    setRetryAfter(res, options.windowMs);
 
     return res.status(429).json({
       success: false,
@@ -120,12 +127,14 @@ const authLoginLimiter = rateLimit({
   },
 });
 
-// ✅ 3) Limiteur dédié à /users/me (plus permissif)
-// - Monté après auth => req.user dispo
-// - Limite par user (fallback IP si besoin)
+/**
+ * 👤 3) Limiteur spécial /users/me
+ * Objectif: autoriser les refresh UI sans punir l’utilisateur.
+ * -> on limite par user si possible, sinon par IP.
+ */
 const meLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 900, // ✅ permissif (dashboard/app peut rafaler)
+  max: 120, // 120/min (safe pour admin + mobile)
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.method === "OPTIONS",
@@ -134,30 +143,28 @@ const meLimiter = rateLimit({
     return uid ? `me:${uid}` : `meip:${getClientIp(req)}`;
   },
   handler: (req, res, _next, options) => {
-    logger.warn("[RateLimit][users-me] Limite atteinte", {
+    logger.warn("[RateLimit][users/me] Limite atteinte", {
       userId: req.user && (req.user.id || req.user._id),
       ip: getClientIp(req),
       path: req.originalUrl,
       method: req.method,
     });
+    setRetryAfter(res, options.windowMs);
 
-    const retryAfterSec = Math.ceil((options.windowMs || 60000) / 1000);
-    try {
-      res.setHeader("Retry-After", String(retryAfterSec));
-    } catch {}
-
-    return res.status(options.statusCode).json({
+    return res.status(429).json({
       success: false,
-      error: "Trop de requêtes sur /users/me. Réessaie dans un instant.",
+      error: "Trop de requêtes sur votre profil. Réessaie dans un instant.",
     });
   },
 });
 
-// 👤 4) Rate limit global par utilisateur authentifié
-// ✅ IMPORTANT: ne plus skip /users/me ici (on veut limiter PAR USER, pas par IP)
+/**
+ * 👤 4) Rate limit par utilisateur authentifié (toutes les routes protégées)
+ * Objectif: limiter proprement le spam sans casser le load.
+ */
 const userLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 240,
+  max: 300, // 300/min par user (admin panels font beaucoup d'appels)
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.method === "OPTIONS" || !req.user,
@@ -172,13 +179,9 @@ const userLimiter = rateLimit({
       path: req.originalUrl,
       method: req.method,
     });
+    setRetryAfter(res, options.windowMs);
 
-    const retryAfterSec = Math.ceil((options.windowMs || 60000) / 1000);
-    try {
-      res.setHeader("Retry-After", String(retryAfterSec));
-    } catch {}
-
-    return res.status(options.statusCode).json({
+    return res.status(options.statusCode || 429).json({
       success: false,
       error: "Trop de requêtes pour ce compte. Réessaie dans un instant.",
     });
