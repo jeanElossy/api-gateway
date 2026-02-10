@@ -1,4 +1,3 @@
-// File: api-gateway/src/middlewares/auth.js
 "use strict";
 
 const jwt = require("jsonwebtoken");
@@ -17,10 +16,8 @@ const isTokenBlacklisted = async (_token) => false;
 const INTERNAL_ALLOWED_PREFIXES = [
   "/api/v1/internal",
   "/internal/transactions",
-  // si tu as d'autres routes internes:
-  // "/api/v1/admin/internal"
+  // ajoute ici tes autres routes internes si besoin
 ];
-
 
 function isInternalAllowedPath(req) {
   const p = String(req.path || "");
@@ -39,11 +36,38 @@ function getBearerToken(req) {
   return token;
 }
 
+/** ✅ Rend le gateway compatible avec le token du principal */
+function resolveUserIdFromPayload(p) {
+  return (
+    p?.id ||
+    p?._id ||
+    p?.sub ||
+    p?.user?.id ||
+    p?.user?._id ||
+    p?.userId ||
+    null
+  );
+}
+
+/** ✅ Unifie la clé JWT (priorité env, fallback config) */
+function getJwtSecret() {
+  return (
+    process.env.JWT_SECRET ||
+    process.env.PRINCIPAL_JWT_SECRET || // si tu utilises ce nom quelque part
+    config.jwtSecret ||
+    ""
+  );
+}
+
 const authMiddleware = async (req, res, next) => {
   try {
     // 1️⃣ Auth interne microservice (gateway -> services)
     // ✅ accepté seulement sur routes internes
-    const internalToken = req.headers["x-internal-token"];
+    const internalToken =
+      req.headers["x-internal-token"] ||
+      req.headers["x_internal_token"] ||
+      req.headers["x-internal"] ||
+      null;
 
     const expectedInternal =
       process.env.GATEWAY_INTERNAL_TOKEN ||
@@ -55,7 +79,7 @@ const authMiddleware = async (req, res, next) => {
     if (
       internalToken &&
       expectedInternal &&
-      String(internalToken) === String(expectedInternal) &&
+      String(internalToken).trim() === String(expectedInternal).trim() &&
       isInternalAllowedPath(req)
     ) {
       req.user = { system: true, role: "internal-service" };
@@ -79,10 +103,19 @@ const authMiddleware = async (req, res, next) => {
       });
     }
 
+    const secret = getJwtSecret();
+    if (!secret) {
+      logger?.error?.("[AUTH] JWT secret missing (JWT_SECRET/config.jwtSecret)");
+      return res.status(500).json({
+        success: false,
+        error: "Configuration JWT manquante (gateway)",
+      });
+    }
+
     let payload;
     try {
-      payload = jwt.verify(token, config.jwtSecret, {
-        algorithms: ["HS256", "HS512"],
+      payload = jwt.verify(token, secret, {
+        algorithms: ["HS256", "HS512"], // garde si tu utilises HS512, sinon mets juste ["HS256"]
       });
     } catch (err) {
       if (err?.name === "TokenExpiredError") {
@@ -100,10 +133,11 @@ const authMiddleware = async (req, res, next) => {
       throw err;
     }
 
-    if (!payload || !payload.id) {
+    const userId = resolveUserIdFromPayload(payload);
+    if (!userId) {
       return res.status(401).json({
         success: false,
-        error: "Token invalide (payload incomplet)",
+        error: "Token invalide (id/sub manquant)",
       });
     }
 
@@ -111,7 +145,7 @@ const authMiddleware = async (req, res, next) => {
     const usersConn = getUsersConnection();
     const User = getUserModel(usersConn);
 
-    const user = await User.findById(payload.id);
+    const user = await User.findById(userId);
     if (!user) {
       return res.status(401).json({
         success: false,

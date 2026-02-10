@@ -344,6 +344,20 @@ const openEndpoints = [
   "/api/v1/feedback/threads", // couvre threads + sous-routes (messages, rate, etc.)
 ];
 
+app.use((req, _res, next) => {
+  if (req.path.startsWith("/api/v1/transactions")) {
+    const hasAuth = !!req.headers.authorization;
+    logger.info?.("[DBG] /transactions auth header?", {
+      hasAuth,
+      authStart: hasAuth ? String(req.headers.authorization).slice(0, 18) : null,
+    });
+  }
+  next();
+});
+
+
+
+
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
 
