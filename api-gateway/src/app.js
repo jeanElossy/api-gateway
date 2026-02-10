@@ -152,7 +152,7 @@ if (config.rateLimit?.public) {
     standardHeaders: true,
     legacyHeaders: false,
     skip: (req) => req.method === "OPTIONS",
-    handler: (req, res) => {
+    handler: (_req, res) => {
       res.status(429).json({
         success: false,
         message: "Trop de requêtes (public). Réessaie dans un instant.",
@@ -212,11 +212,14 @@ app.get("/status", async (_req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// ✅ PROXY vers BACKEND PRINCIPAL (pour routes app)
+// ✅ PROXY vers BACKEND PRINCIPAL (pour routes app + web admin)
 // ─────────────────────────────────────────────────────────────
 const PRINCIPAL_BASE = config.principalUrl || process.env.PRINCIPAL_API_BASE_URL || "";
 
+// ✅ IMPORTANT: tout ce qui est “backend principal” doit être proxifié ici
+// (Ton Web Admin appelle /admin, /feedback, /jobs, /contact, /reports, /tools/fx, etc.)
 const PRINCIPAL_PREFIXES = [
+  // Auth & app core
   "/api/v1/auth",
   "/api/v1/users",
   "/api/v1/balance",
@@ -232,10 +235,21 @@ const PRINCIPAL_PREFIXES = [
   "/api/v1/verification",
   "/api/v1/kyc",
   "/api/v1/badges",
-  "/api/v1/moderation",
-  "/api/v1/announcements",
   "/api/v1/upload",
   "/api/v1/rates",
+
+  // ✅ Web Admin & features appelés par ton src/tools/api.jsx
+  "/api/v1/admin",         // web admin (users, kyc, jobs admin, etc.)
+  "/api/v1/feedback",      // feedback threads + admin feedback
+  "/api/v1/contact",       // contact (public)
+  "/api/v1/reports",       // reports (public)
+  "/api/v1/jobs",          // jobs public + admin jobs
+  "/api/v1/support",       // si existant côté principal
+  "/api/v1/tools",         // IMPORTANT: /tools/fx/convert
+
+  // Moderation & announcements (si gérés par principal chez toi)
+  "/api/v1/moderation",
+  "/api/v1/announcements",
 ];
 
 function makePrincipalProxy() {
@@ -297,6 +311,8 @@ function makePrincipalProxy() {
 const principalProxy = makePrincipalProxy();
 
 // ─────────── AUTH GLOBAL GATEWAY ───────────
+// ✅ Ici on déclare ce qui doit rester accessible SANS auth côté gateway
+// (ex: login/register, public routes, simulate, rate, + les endpoints publics jobs/contact/feedback/reports)
 const openEndpoints = [
   "/",
   "/api/v1",
@@ -304,14 +320,28 @@ const openEndpoints = [
   "/status",
   "/docs",
   "/openapi.json",
+
+  // auth & verification
   "/api/v1/auth",
   "/api/v1/verification",
+
+  // public readonly (HMAC)
   "/api/v1/public",
+
+  // simulate / rate (gateway)
   "/api/v1/fees/simulate",
   "/api/v1/commissions/simulate",
   "/api/v1/exchange-rates/rate",
+
+  // internal
   "/internal/transactions",
   "/api/v1/internal",
+
+  // ✅ Public app endpoints utilisés par le Web Admin via publicApi
+  "/api/v1/jobs",
+  "/api/v1/contact",
+  "/api/v1/reports",
+  "/api/v1/feedback/threads", // couvre threads + sous-routes (messages, rate, etc.)
 ];
 
 app.use((req, res, next) => {
@@ -347,6 +377,7 @@ const skipUserLimiterPrefixes = [
   "/api/v1/vaults/me",
   "/api/v1/notifications",
 ];
+
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   if (skipUserLimiterPrefixes.some((p) => req.path === p || req.path.startsWith(p + "/"))) {
@@ -357,7 +388,7 @@ app.use((req, res, next) => {
 
 // ─────────── DB READY STATE (bloque UNIQUEMENT routes DB du GATEWAY) ───────────
 const mongoRequiredPrefixes = [
-  "/api/v1/admin",
+  "/api/v1/admin", // ⚠️ ici c’est l’admin TRANSACTIONS gateway (/api/v1/admin/transactions) + autres routes gateway admin si tu en as
   "/api/v1/aml",
   "/api/v1/fees",
   "/api/v1/commissions",
@@ -393,8 +424,11 @@ app.use("/api/v1/fx-rules", fxRulesRoutes);
 app.use("/api/v1/phone-verification", phoneVerificationRoutes);
 
 // ✅ PROXY FINAL: routes du backend principal
+// (IMPORTANT: on le monte APRÈS les routes gateway natives pour éviter d’écraser /admin/transactions etc.)
 if (principalProxy) {
-  PRINCIPAL_PREFIXES.forEach((prefix) => {
+  // dédoublonnage par sécurité (au cas où)
+  const uniq = Array.from(new Set(PRINCIPAL_PREFIXES));
+  uniq.forEach((prefix) => {
     app.use(prefix, principalProxy);
   });
 }
