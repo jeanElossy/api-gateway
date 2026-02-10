@@ -6,10 +6,6 @@ const logger = require("../logger");
 
 /**
  * 🔎 IP client robuste (Render + Cloudflare + proxies)
- * - Priorité: CF-Connecting-IP (quand Cloudflare est devant)
- * - Sinon: X-Forwarded-For (première IP)
- * - Sinon: X-Real-IP
- * - Fallback: req.ip
  */
 function getClientIp(req) {
   const cf = req.headers["cf-connecting-ip"];
@@ -43,14 +39,31 @@ const readLoginIdentifier = (req) => {
   return String(raw || "").trim().toLowerCase();
 };
 
-// 🔰 1) Bouclier global par IP
-// ✅ IMPORTANT: on limite par IP client réelle, pas req.ip brute.
+// ✅ Endpoints "bruyants" (chargement app/web)
+function isNoisyPath(req) {
+  const p = req.path || req.originalUrl || "";
+
+  // exact + prefixes
+  const noisyPrefixes = [
+    "/api/v1/users/me",
+    "/api/v1/notifications",
+    "/api/v1/balance",
+    "/api/v1/users/me/badges",
+    "/api/v1/vaults/me",
+    "/api/v1/vaults/withdrawals/me",
+  ];
+
+  return noisyPrefixes.some((x) => p === x || p.startsWith(x + "/"));
+}
+
+// 🔰 1) Bouclier global par IP (edge)
+// ✅ Ici on SKIP login + OPTIONS + endpoints bruyants
 const globalIpLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 600, // ✅ un peu plus large (mobile burst + admin)
+  windowMs: 60 * 1000,
+  max: 600,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.method === "OPTIONS" || isLoginPath(req), // login géré par authLoginLimiter
+  skip: (req) => req.method === "OPTIONS" || isLoginPath(req) || isNoisyPath(req),
   keyGenerator: (req) => getClientIp(req),
   handler: (req, res, _next, options) => {
     logger.warn("[RateLimit][global-ip] Limite atteinte", {
@@ -73,12 +86,11 @@ const globalIpLimiter = rateLimit({
 
 // 🔐 2) Anti brute-force LOGIN (IP + identifiant)
 const authLoginLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000, // 10 minutes
-  max: 8, // 8 tentatives / 10 min / (ip + identifiant)
+  windowMs: 10 * 60 * 1000,
+  max: 8,
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.method === "OPTIONS",
-  // ✅ si login OK (<400), ne compte pas
   skipSuccessfulRequests: true,
   requestWasSuccessful: (_req, res) => res.statusCode < 400,
 
@@ -108,10 +120,44 @@ const authLoginLimiter = rateLimit({
   },
 });
 
-// 👤 3) Rate limit par utilisateur authentifié
+// ✅ 3) Limiteur dédié à /users/me (plus permissif)
+// - Monté après auth => req.user dispo
+// - Limite par user (fallback IP si besoin)
+const meLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 900, // ✅ permissif (dashboard/app peut rafaler)
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => {
+    const uid = req.user?.id || req.user?._id;
+    return uid ? `me:${uid}` : `meip:${getClientIp(req)}`;
+  },
+  handler: (req, res, _next, options) => {
+    logger.warn("[RateLimit][users-me] Limite atteinte", {
+      userId: req.user && (req.user.id || req.user._id),
+      ip: getClientIp(req),
+      path: req.originalUrl,
+      method: req.method,
+    });
+
+    const retryAfterSec = Math.ceil((options.windowMs || 60000) / 1000);
+    try {
+      res.setHeader("Retry-After", String(retryAfterSec));
+    } catch {}
+
+    return res.status(options.statusCode).json({
+      success: false,
+      error: "Trop de requêtes sur /users/me. Réessaie dans un instant.",
+    });
+  },
+});
+
+// 👤 4) Rate limit global par utilisateur authentifié
+// ✅ IMPORTANT: ne plus skip /users/me ici (on veut limiter PAR USER, pas par IP)
 const userLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 240, // ✅ mobile fait plusieurs appels au chargement
+  windowMs: 60 * 1000,
+  max: 240,
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.method === "OPTIONS" || !req.user,
@@ -142,5 +188,6 @@ const userLimiter = rateLimit({
 module.exports = {
   globalIpLimiter,
   authLoginLimiter,
+  meLimiter,
   userLimiter,
 };
