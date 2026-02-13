@@ -1,3 +1,4 @@
+// File: src/middlewares/auth.js
 "use strict";
 
 const jwt = require("jsonwebtoken");
@@ -16,7 +17,10 @@ const isTokenBlacklisted = async (_token) => false;
 const INTERNAL_ALLOWED_PREFIXES = [
   "/api/v1/internal",
   "/internal/transactions",
-  // ajoute ici tes autres routes internes si besoin
+  "/api/v1/internal/transactions",
+
+  // ✅ important: autorise uniquement la partie "internal" des transactions
+  "/api/v1/transactions/internal",
 ];
 
 function isInternalAllowedPath(req) {
@@ -53,7 +57,7 @@ function resolveUserIdFromPayload(p) {
 function getJwtSecret() {
   return (
     process.env.JWT_SECRET ||
-    process.env.PRINCIPAL_JWT_SECRET || // si tu utilises ce nom quelque part
+    process.env.PRINCIPAL_JWT_SECRET ||
     config.jwtSecret ||
     ""
   );
@@ -115,7 +119,7 @@ const authMiddleware = async (req, res, next) => {
     let payload;
     try {
       payload = jwt.verify(token, secret, {
-        algorithms: ["HS256", "HS512"], // garde si tu utilises HS512, sinon mets juste ["HS256"]
+        algorithms: ["HS256", "HS512"],
       });
     } catch (err) {
       if (err?.name === "TokenExpiredError") {
