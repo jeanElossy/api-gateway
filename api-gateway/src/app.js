@@ -11,7 +11,11 @@ const morgan = require("morgan");
 const mongoose = require("mongoose");
 const axios = require("axios");
 const rateLimit = require("express-rate-limit");
-const { createProxyMiddleware, fixRequestBody } = require("http-proxy-middleware");
+const {
+  createProxyMiddleware,
+  fixRequestBody,
+  responseInterceptor,
+} = require("http-proxy-middleware");
 
 // ✅ Config
 const config = require("./config");
@@ -28,6 +32,7 @@ const {
   globalIpLimiter,
   authLoginLimiter,
   meLimiter,
+  announcementsLimiter,
   userLimiter,
 } = require("./middlewares/rateLimit");
 const { loggerMiddleware } = require("./middlewares/logger");
@@ -190,6 +195,9 @@ app.use(loggerMiddleware);
 app.use("/api/v1/auth/login", authLoginLimiter);
 app.use("/api/v1/auth/login-2fa", authLoginLimiter);
 
+// 3) announcements (public)
+app.use("/api/v1/announcements", announcementsLimiter);
+
 // 🛡️ Bouclier global IP (skip noisy géré dedans)
 app.use((req, res, next) => globalIpLimiter(req, res, next));
 
@@ -267,7 +275,13 @@ app.get("/status", async (_req, res) => {
 // ─────────────────────────────────────────────────────────────
 // ✅ PROXY vers BACKEND PRINCIPAL
 // ─────────────────────────────────────────────────────────────
-const PRINCIPAL_BASE = config.principalUrl || process.env.PRINCIPAL_API_BASE_URL || "";
+//
+// ⚠️ IMPORTANT:
+// Mets PRINCIPAL_URL sur l'Internal URL Render du service paynoval-backend
+// pour éviter les 429 Cloudflare/Front-door sur l'URL publique.
+//
+const PRINCIPAL_BASE =
+  config.principalUrl || process.env.PRINCIPAL_API_BASE_URL || "";
 
 const PRINCIPAL_PREFIXES = [
   "/api/v1/auth",
@@ -306,6 +320,8 @@ function makePrincipalProxy() {
     return null;
   }
 
+  const isHttp = /^http:\/\//i.test(PRINCIPAL_BASE);
+
   return createProxyMiddleware({
     target: PRINCIPAL_BASE,
     changeOrigin: true,
@@ -314,6 +330,12 @@ function makePrincipalProxy() {
     logLevel: process.env.NODE_ENV === "production" ? "warn" : "debug",
     proxyTimeout: 30000,
     timeout: 30000,
+
+    // ✅ si le target est http (souvent sur internal URL), on ne force pas TLS verify
+    secure: !isHttp,
+
+    // ✅ Permet de remplacer le body quand upstream renvoie HTML (Cloudflare challenge)
+    selfHandleResponse: true,
 
     onProxyReq: (proxyReq, req, res) => {
       if (res?.headersSent || res?.writableEnded) return;
@@ -337,7 +359,10 @@ function makePrincipalProxy() {
 
       if (config.principalInternalToken) {
         try {
-          proxyReq.setHeader("x-internal-token", String(config.principalInternalToken));
+          proxyReq.setHeader(
+            "x-internal-token",
+            String(config.principalInternalToken)
+          );
         } catch (_) {}
       }
 
@@ -345,6 +370,41 @@ function makePrincipalProxy() {
         proxyReq.setHeader("x-forwarded-service", "api-gateway");
       } catch (_) {}
     },
+
+    onProxyRes: responseInterceptor(async (responseBuffer, proxyRes, req, res) => {
+      const status = proxyRes.statusCode || 502;
+      const ct = String(proxyRes.headers["content-type"] || "");
+
+      // ✅ Cas typique: 429 + HTML "Just a moment..." (Cloudflare)
+      if (status === 429 && ct.includes("text/html")) {
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        return JSON.stringify({
+          success: false,
+          error: "UPSTREAM_RATE_LIMITED",
+          message:
+            "Le service principal a rejeté la requête (429). " +
+            "Cause probable: protection/anti-bot sur l'URL publique. " +
+            "Solution: utiliser l'Internal URL Render pour PRINCIPAL_URL.",
+          path: req.originalUrl,
+        });
+      }
+
+      // ✅ Cas 403 HTML aussi (challenge)
+      if (status === 403 && ct.includes("text/html")) {
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        return JSON.stringify({
+          success: false,
+          error: "UPSTREAM_FORBIDDEN",
+          message:
+            "Le service principal a renvoyé un challenge/protection (403). " +
+            "Utilise l'Internal URL Render pour PRINCIPAL_URL.",
+          path: req.originalUrl,
+        });
+      }
+
+      // Sinon => renvoyer tel quel
+      return responseBuffer;
+    }),
 
     onError: (err, req, res) => {
       logger.error("[PROXY principal] error", {
@@ -394,7 +454,9 @@ const openEndpoints = [
 ];
 
 app.use((req, res, next) => {
-  const isOpen = openEndpoints.some((ep) => req.path === ep || req.path.startsWith(ep + "/"));
+  const isOpen = openEndpoints.some(
+    (ep) => req.path === ep || req.path.startsWith(ep + "/")
+  );
   if (isOpen) return next();
   return authMiddleware(req, res, next);
 });

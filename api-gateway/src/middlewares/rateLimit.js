@@ -8,19 +8,22 @@ const logger = require("../logger");
  * - Priorité: CF-Connecting-IP
  * - Sinon: X-Forwarded-For (première IP)
  * - Sinon: X-Real-IP
- * - Sinon: req.ip (app.set("trust proxy", true) requis)
+ * - Sinon: req.ip (app.set("trust proxy", 1) requis)
  */
 function getClientIp(req) {
-  const cf = req.headers["cf-connecting-ip"];
+  const cf =
+    req.headers["cf-connecting-ip"] ||
+    req.headers["CF-Connecting-IP"] ||
+    req.headers["cf-connecting-ip".toUpperCase()];
   if (cf) return String(cf).trim();
 
-  const xff = req.headers["x-forwarded-for"];
+  const xff = req.headers["x-forwarded-for"] || req.headers["X-Forwarded-For"];
   if (xff) {
     const first = String(xff).split(",")[0]?.trim();
     if (first) return first;
   }
 
-  const xri = req.headers["x-real-ip"];
+  const xri = req.headers["x-real-ip"] || req.headers["X-Real-IP"];
   if (xri) return String(xri).trim();
 
   return String(req.ip || "").trim();
@@ -50,8 +53,14 @@ const readLoginIdentifier = (req) => {
   return String(raw || "").trim().toLowerCase();
 };
 
+/**
+ * ✅ Endpoints “noisy” (polling / refresh UI) :
+ * -> on les exclut du bouclier global IP pour éviter les 429,
+ * -> et on leur met (si besoin) un limiter dédié plus permissif.
+ */
 function isNoisyPath(req) {
   const url = req.originalUrl || req.path || "";
+
   // endpoints appelés au chargement (mobile/admin)
   const noisyPrefixes = [
     "/api/v1/users/me",
@@ -59,25 +68,29 @@ function isNoisyPath(req) {
     "/api/v1/balance",
     "/api/v1/rates",
     "/api/v1/badges",
+
+    // ✅ AJOUT: announcements est pollé très souvent (avec _ts)
+    "/api/v1/announcements",
   ];
+
   return noisyPrefixes.some((p) => url === p || url.startsWith(p + "/"));
 }
 
-/**
- * 🔰 1) Bouclier global par IP (protection infra)
- * Objectif: DDoS/loops -> mais NE DOIT PAS casser le "load" mobile/admin.
- * Donc: skip login + skip noisy (users/me, notifications, balance, etc.)
- */
+/* ------------------------------------------------------------------ */
+/* 1) Bouclier global par IP (protection infra)                         */
+/* Objectif: DDoS/loops -> mais NE DOIT PAS casser le "load" mobile.    */
+/* Donc: skip login + skip noisy (users/me, notifications, balance, etc)*/
+/* ------------------------------------------------------------------ */
 const globalIpLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 1200,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => getClientIp(req),
+  keyGenerator: (req) => `ip:${getClientIp(req)}`,
   skip: (req) => {
     if (req.method === "OPTIONS") return true;
     if (isLoginPath(req)) return true;
-    if (isNoisyPath(req)) return true;
+    if (isNoisyPath(req)) return true; // ✅ inclut announcements
     return false;
   },
   handler: (req, res, _next, options) => {
@@ -97,11 +110,11 @@ const globalIpLimiter = rateLimit({
   },
 });
 
-/**
- * 🔐 2) Anti brute-force LOGIN (IP + identifiant)
- * - Ne compte pas les succès
- * - Clé: ip + identifiant + path
- */
+/* ------------------------------------------------------------------ */
+/* 2) Anti brute-force LOGIN (IP + identifiant)                         */
+/* - Ne compte pas les succès                                           */
+/* - Clé: ip + identifiant + path                                       */
+/* ------------------------------------------------------------------ */
 const authLoginLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 12, // ✅ un peu plus permissif
@@ -116,7 +129,7 @@ const authLoginLimiter = rateLimit({
     const p = req.path || "login";
     return `login:${ip}:${id}:${p}`;
   },
-  handler: (req, res, _next, options) => {
+  handler: (req, res) => {
     logger.warn("[RateLimit][login] Limit hit", {
       ip: getClientIp(req),
       path: req.originalUrl,
@@ -124,7 +137,7 @@ const authLoginLimiter = rateLimit({
       method: req.method,
     });
 
-    const retryAfter = setRetryAfter(res, options.windowMs);
+    const retryAfter = setRetryAfter(res, 10 * 60 * 1000);
 
     return res.status(429).json({
       success: false,
@@ -134,11 +147,11 @@ const authLoginLimiter = rateLimit({
   },
 });
 
-/**
- * 👤 3) Limiteur dédié /users/me
- * - Plus permissif (refresh UI)
- * - Clé par user si dispo (après auth), sinon IP
- */
+/* ------------------------------------------------------------------ */
+/* 3) Limiteur dédié /users/me                                          */
+/* - Plus permissif (refresh UI)                                        */
+/* - Clé par user si dispo (après auth), sinon IP                       */
+/* ------------------------------------------------------------------ */
 const meLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 120,
@@ -167,11 +180,49 @@ const meLimiter = rateLimit({
   },
 });
 
-/**
- * 👤 4) Limiteur global par user (routes protégées)
- * - ne skip plus /users/me (tu as demandé ça)
- * - mais /users/me a déjà son limiter dédié => OK
- */
+/* ------------------------------------------------------------------ */
+/* 4) ✅ Limiteur dédié /announcements                                   */
+/* - Route publique (user=null) souvent pollée par l’app                */
+/* - Clé IP + platform + locale + audience                              */
+/* - Permissif (évite les 429) tout en gardant un garde-fou             */
+/* ------------------------------------------------------------------ */
+const announcementsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 240, // ✅ 240/min (~4 req/sec) : suffisant même si _ts spam
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => {
+    const ip = getClientIp(req);
+    const q = req.query || {};
+    const platform = String(q.platform || "").toLowerCase();
+    const locale = String(q.locale || "").toLowerCase();
+    const audience = String(q.audience || "").toLowerCase();
+    return `ann:${ip}:${platform}:${locale}:${audience}`;
+  },
+  handler: (req, res, _next, options) => {
+    logger.warn("[RateLimit][announcements] Limit hit", {
+      ip: getClientIp(req),
+      path: req.originalUrl,
+      method: req.method,
+      query: req.query || {},
+    });
+
+    const retryAfter = setRetryAfter(res, options.windowMs);
+
+    return res.status(429).json({
+      success: false,
+      error: "Trop de requêtes (announcements). Réessaie dans un instant.",
+      retryAfter,
+    });
+  },
+});
+
+/* ------------------------------------------------------------------ */
+/* 5) Limiteur global par user (routes protégées)                       */
+/* - /users/me a déjà son limiter dédié => OK                           */
+/* - /announcements est public => pas concerné                           */
+/* ------------------------------------------------------------------ */
 const userLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 300,
@@ -204,5 +255,6 @@ module.exports = {
   globalIpLimiter,
   authLoginLimiter,
   meLimiter,
+  announcementsLimiter, // ✅ AJOUT
   userLimiter,
 };
