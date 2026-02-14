@@ -7,7 +7,7 @@ const validateInternalToken = require("../src/middlewares/validateInternalToken"
 
 const {
   proxyLogInternalTransaction,
-} = require("../src/controllers/internalTransactionsProxy.controller");
+} = require("../controllers/internalTransactionsProxy.controller");
 
 // (Optionnel) notify versionné si tu le gardes:
 let notifyTransactionEvent = null;
