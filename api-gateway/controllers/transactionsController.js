@@ -235,10 +235,23 @@ function normalizeCurrencyCode(v, countryHint = "") {
 
 function toIdStr(v) {
   if (!v) return "";
-  try {
-    if (typeof v === "string") return v;
-    if (typeof v === "object" && v.toString) return v.toString();
-  } catch {}
+
+  // ✅ si c'est un doc/objet populé
+  if (typeof v === "object") {
+    const inner = v._id || v.id;
+    if (inner) return String(inner);
+
+    // parfois mongoose met un toString qui marche
+    try {
+      if (typeof v.toString === "function") {
+        const s = String(v.toString());
+        // évite "[object Object]"
+        if (s && s !== "[object Object]") return s;
+      }
+    } catch {}
+  }
+
+  if (typeof v === "string") return v;
   return String(v);
 }
 
@@ -282,6 +295,56 @@ function buildMoneyView(tx = {}, viewerUserId = null) {
   const m = tx.meta || {};
   const r = m?.recipientInfo || {};
 
+  // ✅ OVERRIDE cagnotte: ne dépend pas de directionForViewer
+  const entry = String(m?.entry || "").toLowerCase();
+  const countryHint0 = tx.country || m.country || r.country || "";
+
+  if (entry === "participant.debit") {
+    // Ce que l'utilisateur "voit" = débit réel enregistré dans la tx
+    const ccy =
+      normalizeCurrencyCode(m.walletCurrencyCode, countryHint0) ||
+      normalizeCurrencyCode(tx.currency, countryHint0) ||
+      normalizeCurrencyCode(m.payerCurrencyCode, countryHint0) ||
+      normalizeCurrencyCode(m.baseCurrencyCode, countryHint0);
+
+    const amt = nNum(m.amountDebitedWallet) ?? nNum(tx.amount) ?? nNum(m.amountPayer) ?? null;
+
+    const money = {
+      source: amt != null && ccy ? { amount: amt, currency: ccy } : null,
+      feeSource: null,
+      target: null,
+      fxRateSourceToTarget: null,
+    };
+
+    return {
+      money,
+      viewerCurrencyCode: money.source?.currency || null,
+      amountViewer: money.source?.amount ?? null,
+      direction: "debit",
+      countryHint: countryHint0,
+    };
+  }
+
+  if (entry === "admin.fee.credit") {
+    const ccy = normalizeCurrencyCode(m.adminCurrencyCode, countryHint0) || normalizeCurrencyCode(tx.currency, countryHint0) || "CAD";
+    const amt = nNum(m.feeAmountAdmin) ?? nNum(tx.amount) ?? null;
+
+    const money = {
+      source: null,
+      feeSource: null,
+      target: amt != null && ccy ? { amount: amt, currency: ccy } : null,
+      fxRateSourceToTarget: null,
+    };
+
+    return {
+      money,
+      viewerCurrencyCode: money.target?.currency || null,
+      amountViewer: money.target?.amount ?? null,
+      direction: "credit",
+      countryHint: countryHint0,
+    };
+  }
+
   const countryHint = tx.country || m.country || r.country || "";
 
   const sourceCurrency =
@@ -296,6 +359,7 @@ function buildMoneyView(tx = {}, viewerUserId = null) {
     normalizeCurrencyCode(m.senderCurrencySymbol, countryHint) ||
     normalizeCurrencyCode(tx.currency, countryHint);
 
+  // ✅ FIX: fallback targetCurrency -> sourceCurrency (monodevise safe)
   const targetCurrency =
     normalizeCurrencyCode(tx.currencyTarget, countryHint) ||
     normalizeCurrencyCode(m.currencyTarget, countryHint) ||
@@ -303,6 +367,7 @@ function buildMoneyView(tx = {}, viewerUserId = null) {
     normalizeCurrencyCode(r.localCurrencyCode, countryHint) ||
     normalizeCurrencyCode(m.localCurrencySymbol, countryHint) ||
     normalizeCurrencyCode(r.localCurrencySymbol, countryHint) ||
+    sourceCurrency ||
     null;
 
   const amountSource =
@@ -314,6 +379,7 @@ function buildMoneyView(tx = {}, viewerUserId = null) {
     nNum(r.amount) ??
     nNum(tx.amount);
 
+  // ✅ FIX: fallback amountTarget -> amountSource (si rien n'est fourni)
   const amountTarget =
     nNum(tx.amountTarget) ??
     nNum(m.amountTarget) ??
@@ -322,6 +388,7 @@ function buildMoneyView(tx = {}, viewerUserId = null) {
     nNum(m.amountCreator) ??
     nNum(r.amountCreator) ??
     nNum(tx.netAmount) ??
+    amountSource ??
     null;
 
   const feeSource =
@@ -350,7 +417,14 @@ function buildMoneyView(tx = {}, viewerUserId = null) {
   };
 
   const direction = computeDirectionForViewer(tx, viewerUserId);
-  const viewerAtom = direction === "credit" ? money.target : direction === "debit" ? money.source : null;
+
+  // ✅ FIX: si direction inconnue, on fallback sur source (évite amountViewer=null)
+  const viewerAtom =
+    direction === "credit"
+      ? money.target
+      : direction === "debit"
+      ? money.source
+      : money.source || money.target || null;
 
   const viewerCurrencyCode = viewerAtom?.currency || money.source?.currency || money.target?.currency || null;
   const amountViewer = viewerAtom?.amount ?? null;
@@ -501,10 +575,10 @@ function auditForwardHeaders(req) {
     String(incomingAuth).trim().toLowerCase() !== "null";
 
   const reqId = req.headers["x-request-id"] || req.id || safeUUID();
-  const userId = getUserId(req) || req.headers["x-user-id"] || "";
+  const userIdRaw = getUserId(req) || req.headers["x-user-id"] || "";
+  const userId = String(userIdRaw || ""); // ✅ FIX: always string
 
-  const internalToken =
-    process.env.GATEWAY_INTERNAL_TOKEN || process.env.INTERNAL_TOKEN || config.internalToken || "";
+  const internalToken = process.env.GATEWAY_INTERNAL_TOKEN || process.env.INTERNAL_TOKEN || config.internalToken || "";
 
   const headers = {
     Accept: "application/json",
@@ -942,12 +1016,11 @@ exports.initiateTransaction = async (req, res) => {
   const funds = req.body?.funds;
   const destination = req.body?.destination;
 
-  let providerSelected = normalizeProviderForRouting(resolveProvider(req, computeProviderSelected(actionTx, funds, destination)));
+  let providerSelected = normalizeProviderForRouting(
+    resolveProvider(req, computeProviderSelected(actionTx, funds, destination))
+  );
 
-  if (
-    String(funds || "").toLowerCase() === "mobilemoney" ||
-    String(destination || "").toLowerCase() === "mobilemoney"
-  ) {
+  if (String(funds || "").toLowerCase() === "mobilemoney" || String(destination || "").toLowerCase() === "mobilemoney") {
     providerSelected = "mobilemoney";
   }
 
@@ -990,11 +1063,7 @@ exports.initiateTransaction = async (req, res) => {
         const mongoUp = mongoose.connection.readyState === 1;
         if (mongoUp && TrustedDepositNumber) {
           try {
-            const trustedDoc = await TrustedDepositNumber.findOne({
-              userId,
-              phoneE164,
-              status: "trusted",
-            }).lean();
+            const trustedDoc = await TrustedDepositNumber.findOne({ userId, phoneE164, status: "trusted" }).lean();
             trusted = !!trustedDoc;
           } catch {
             trusted = false;
@@ -1109,8 +1178,7 @@ exports.initiateTransaction = async (req, res) => {
       "Erreur interne provider";
 
     if (status === 429) {
-      error =
-        "Trop de requêtes vers le service de paiement PayNoval. Merci de patienter quelques instants avant de réessayer.";
+      error = "Trop de requêtes vers le service de paiement PayNoval. Merci de patienter quelques instants avant de réessayer.";
     }
 
     return res.status(status).json({ success: false, error });
@@ -1290,9 +1358,7 @@ exports.logInternalTransaction = async (req, res) => {
       return res.status(400).json({ success: false, error: "amount invalide ou manquant." });
     }
 
-    const countryHint =
-      req.body?.country || meta?.country || meta?.recipientInfo?.country || meta?.recipientInfo?.pays || "";
-
+    const countryHint = req.body?.country || meta?.country || meta?.recipientInfo?.country || meta?.recipientInfo?.pays || "";
     const legacyCurrency = normalizeCurrencyCode(currency, countryHint) || null;
 
     const outMeta = typeof meta === "object" && meta ? { ...meta } : {};
