@@ -1,35 +1,28 @@
-/**
- * Middleware pour exiger un rôle utilisateur précis
- * Si l'utilisateur est "user", on ne fait pas de vérification et on laisse passer
- */
+// File: src/middlewares/authz.js
+"use strict";
+
 const requireRole = (roles = []) => (req, res, next) => {
-  const userRole = req.user?.role;
+  const role = String(req.user?.role || "").toLowerCase();
 
-  console.log('User role:', userRole);
-
-  if (!userRole) {
+  if (!role) {
     return res.status(403).json({ success: false, error: "Accès interdit (non authentifié)" });
   }
 
-  // Si l'utilisateur est un "user", on laisse passer
-  if (userRole.toLowerCase() === 'user') {
-    return next();
-  }
+  // internal-service optionnel (si tu veux l’autoriser sur certaines routes)
+  if (role === "internal-service") return next();
 
-  // Sinon, on vérifie si son rôle est dans la liste
-  if (!roles.includes(userRole)) {
+  // Si aucune contrainte de rôle => ok
+  if (!Array.isArray(roles) || roles.length === 0) return next();
+
+  const allowed = roles.map(r => String(r).toLowerCase());
+  if (!allowed.includes(role)) {
     return res.status(403).json({ success: false, error: "Accès interdit (rôle insuffisant)" });
   }
 
-  next();
+  return next();
 };
 
-// Alias classiques
-const requireAdmin = requireRole(['admin', 'superadmin']);
-const requireSuperadmin = requireRole(['superadmin']);
+const requireAdmin = requireRole(["admin", "superadmin"]);
+const requireSuperadmin = requireRole(["superadmin"]);
 
-module.exports = {
-  requireRole,
-  requireAdmin,
-  requireSuperadmin,
-};
+module.exports = { requireRole, requireAdmin, requireSuperadmin };
