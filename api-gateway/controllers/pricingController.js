@@ -8,7 +8,8 @@ const {
   roundMoney,
   normalizeCountryISO2,
 } = require("../src/services/pricingEngine");
-const { getMarketRate } = require("../src/services/fxService");
+
+const { getExchangeRate } = require("../src/services/exchangeRateService"); // ✅ direct JS (pas HTTP)
 const { getAdjustedRate } = require("../src/services/fxRulesService");
 
 const LOCK_TTL_MIN = Number(process.env.PRICING_LOCK_TTL_MIN || 10);
@@ -42,9 +43,26 @@ function normCountryForRules(country) {
   return (iso2 || String(country)).toLowerCase();
 }
 
+function pickRequestId(req) {
+  return (
+    req.get("x-request-id") ||
+    req.get("x-correlation-id") ||
+    req.get("x-amzn-trace-id") ||
+    null
+  );
+}
+
+async function getMarketRateDirect(from, to, { requestId } = {}) {
+  // getExchangeRate renvoie souvent { rate, source, stale... }
+  const out = await getExchangeRate(from, to, { requestId });
+  const rate = Number(out?.rate ?? out);
+  return Number.isFinite(rate) ? rate : null;
+}
+
 exports.quote = async (req, res, next) => {
   try {
     const body = pickBody(req);
+    const requestId = pickRequestId(req);
 
     const request = {
       txType: normalizeTxType(body.txType),
@@ -65,7 +83,7 @@ exports.quote = async (req, res, next) => {
     const quote = await computeQuote({
       req: request,
       rules,
-      getMarketRate: async (from, to) => getMarketRate(from, to),
+      getMarketRate: async (from, to) => getMarketRateDirect(from, to, { requestId }),
     });
 
     // 2) applique FxRule admin global sur le taux final
@@ -103,6 +121,16 @@ exports.quote = async (req, res, next) => {
         details: e.details,
       });
     }
+
+    // ✅ si FX indisponible, renvoyer 503 propre (pas 502)
+    if (e && (e.status === 503 || e.message === "FX rate unavailable")) {
+      return res.status(503).json({
+        ok: false,
+        error: "FX rate unavailable",
+        details: e.details || null,
+      });
+    }
+
     return next(e);
   }
 };
@@ -113,6 +141,7 @@ exports.lock = async (req, res, next) => {
     if (!userId) return res.status(401).json({ ok: false, message: "Unauthorized" });
 
     const body = pickBody(req);
+    const requestId = pickRequestId(req);
 
     const request = {
       txType: normalizeTxType(body.txType),
@@ -129,7 +158,7 @@ exports.lock = async (req, res, next) => {
     const computed = await computeQuote({
       req: request,
       rules,
-      getMarketRate: async (from, to) => getMarketRate(from, to),
+      getMarketRate: async (from, to) => getMarketRateDirect(from, to, { requestId }),
     });
 
     const adjusted = await getAdjustedRate({
@@ -185,6 +214,15 @@ exports.lock = async (req, res, next) => {
         details: e.details,
       });
     }
+
+    if (e && (e.status === 503 || e.message === "FX rate unavailable")) {
+      return res.status(503).json({
+        ok: false,
+        error: "FX rate unavailable",
+        details: e.details || null,
+      });
+    }
+
     return next(e);
   }
 };

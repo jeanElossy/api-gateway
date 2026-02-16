@@ -264,10 +264,28 @@ function computeFee(amount, feeCfg, fromCurrency) {
 }
 
 /**
+ * ✅ Fallback peg XOF/EUR (utile si provider down)
+ * Par défaut: 1 EUR = 655.957 XOF
+ */
+function pegRate(from, to) {
+  const PEG_XOF_PER_EUR = Number(process.env.PEG_XOF_PER_EUR || 655.957);
+
+  const f = upper(from);
+  const t = upper(to);
+
+  if (!Number.isFinite(PEG_XOF_PER_EUR) || PEG_XOF_PER_EUR <= 0) return null;
+
+  if (f === "XOF" && t === "EUR") return 1 / PEG_XOF_PER_EUR;
+  if (f === "EUR" && t === "XOF") return PEG_XOF_PER_EUR;
+
+  return null;
+}
+
+/**
  * @param {object} params
  * @param {object} params.req { txType, amount, fromCurrency, toCurrency, country?, operator? }
  * @param {Array} params.rules PricingRule[] déjà chargées
- * @param {function} params.getMarketRate async (from, to) => number
+ * @param {function} params.getMarketRate async (from, to) => number|null
  */
 async function computeQuote({ req, rules, getMarketRate }) {
   const amount = Number(req.amount);
@@ -316,7 +334,6 @@ async function computeQuote({ req, rules, getMarketRate }) {
         amount,
         fromCurrency,
         toCurrency,
-        // on renvoie iso2 si possible (sinon raw upper)
         country: countryISO2 || (req.country ? upper(stripAccents(req.country)) : null),
         operator: operator || null,
       },
@@ -351,10 +368,19 @@ async function computeQuote({ req, rules, getMarketRate }) {
       throw err;
     }
   } else {
+    // ✅ récupère la rate depuis service (sans self-call HTTP)
     marketRate = await getMarketRate(fromCurrency, toCurrency);
+
+    // ✅ fallback peg XOF/EUR si rate indispo
     if (!Number.isFinite(marketRate) || marketRate <= 0) {
-      const err = new Error("Market rate unavailable");
-      err.status = 502;
+      const peg = pegRate(fromCurrency, toCurrency);
+      if (Number.isFinite(peg) && peg > 0) marketRate = peg;
+    }
+
+    if (!Number.isFinite(marketRate) || marketRate <= 0) {
+      const err = new Error("FX rate unavailable");
+      err.status = 503; // ✅ plus logique que 502
+      err.details = { fromCurrency, toCurrency, fxMode };
       throw err;
     }
 

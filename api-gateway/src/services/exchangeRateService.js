@@ -23,7 +23,7 @@ const PAYNOVAL_BACKEND_URL = normalizePrincipalBase(
 );
 
 // ─────────────────────────────────────────────
-// Internal token normalization (IMPORTANT)
+// Internal token normalization
 // ─────────────────────────────────────────────
 const PRINCIPAL_INTERNAL_TOKEN = String(
   process.env.PRINCIPAL_INTERNAL_TOKEN ||
@@ -32,16 +32,31 @@ const PRINCIPAL_INTERNAL_TOKEN = String(
     ""
 ).trim();
 
+/**
+ * PRINCIPAL_AUTH_MODE:
+ * - "internal" (default): envoie seulement x-internal-token
+ * - "bearer": envoie seulement Authorization: Bearer
+ * - "both": envoie les deux
+ */
+const PRINCIPAL_AUTH_MODE = String(process.env.PRINCIPAL_AUTH_MODE || "internal")
+  .trim()
+  .toLowerCase();
+
 // ─────────────────────────────────────────────
 // External provider config
 // ─────────────────────────────────────────────
-const FX_API_BASE_URL = String(process.env.FX_API_BASE_URL || "https://v6.exchangerate-api.com/v6").replace(/\/+$/, "");
+const FX_API_BASE_URL = String(
+  process.env.FX_API_BASE_URL || "https://v6.exchangerate-api.com/v6"
+).replace(/\/+$/, "");
 const FX_API_KEY = String(process.env.FX_API_KEY || process.env.EXCHANGE_RATE_API_KEY || "").trim();
 const FX_CROSS = String(process.env.FX_CROSS || "USD").toUpperCase();
 
 const FX_CACHE_TTL_MS = Number(process.env.FX_CACHE_TTL_MS || 10 * 60 * 1000);
 const FX_FAIL_COOLDOWN_MS = Number(process.env.FX_FAIL_COOLDOWN_MS || 10 * 60 * 1000);
 const FX_DB_SNAPSHOT_MAX_AGE_MS = Number(process.env.FX_DB_SNAPSHOT_MAX_AGE_MS || 24 * 60 * 60 * 1000);
+
+// Optional peg fallback (XOF/EUR)
+const PEG_XOF_PER_EUR = Number(process.env.PEG_XOF_PER_EUR || 655.957);
 
 const pairCache = new LRUCache({ max: 1000, ttl: FX_CACHE_TTL_MS });
 const failCache = new LRUCache({ max: 1000, ttl: FX_FAIL_COOLDOWN_MS });
@@ -54,8 +69,10 @@ console.log("[FX] exchangeRateService initialisé", {
   FX_CACHE_TTL_MS,
   FX_FAIL_COOLDOWN_MS,
   hasPrincipalToken: !!PRINCIPAL_INTERNAL_TOKEN,
-  principalTokenLen: PRINCIPAL_INTERNAL_TOKEN.length, // ✅ safe
+  principalTokenLen: PRINCIPAL_INTERNAL_TOKEN.length,
   FX_DB_SNAPSHOT_MAX_AGE_MS,
+  PRINCIPAL_AUTH_MODE,
+  hasPeg: Number.isFinite(PEG_XOF_PER_EUR) && PEG_XOF_PER_EUR > 0,
 });
 
 function normalizeCcy(input) {
@@ -94,7 +111,7 @@ function getCooldown(key) {
 }
 
 // ─────────────────────────────────────────────
-// Snapshot DB fallback (schema compatible)
+// Snapshot DB fallback
 // ─────────────────────────────────────────────
 async function getSnapshotFromDb(fromCur, toCur) {
   try {
@@ -154,11 +171,46 @@ async function saveSnapshotToDb(fromCur, toCur, rate) {
 }
 
 // ─────────────────────────────────────────────
-// 1) Fetch from backend principal (internalProtect)
+// Peg fallback (XOF/EUR)
+// ─────────────────────────────────────────────
+function pegRate(fromCur, toCur) {
+  if (!Number.isFinite(PEG_XOF_PER_EUR) || PEG_XOF_PER_EUR <= 0) return null;
+  if (fromCur === "XOF" && toCur === "EUR") return 1 / PEG_XOF_PER_EUR;
+  if (fromCur === "EUR" && toCur === "XOF") return PEG_XOF_PER_EUR;
+  return null;
+}
+
+// ─────────────────────────────────────────────
+// Anti loop guard (principal == gateway)
+// ─────────────────────────────────────────────
+function tryGetHost(url) {
+  try {
+    return new URL(String(url)).host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function isProbablyLoopToSelf() {
+  const principalHost = tryGetHost(PAYNOVAL_BACKEND_URL);
+  const gatewayHost = tryGetHost(process.env.PUBLIC_BASE_URL || process.env.GATEWAY_PUBLIC_URL || "");
+  if (!principalHost || !gatewayHost) return false;
+  return principalHost === gatewayHost;
+}
+
+// ─────────────────────────────────────────────
+// 1) Fetch from backend principal
 // ─────────────────────────────────────────────
 async function fetchFromBackendPrincipal(fromCur, toCur, { requestId } = {}) {
   if (!PAYNOVAL_BACKEND_URL) {
     throw new Error("PAYNOVAL_BACKEND_URL manquant");
+  }
+
+  // anti-boucle si tu as mis une URL du gateway par erreur
+  if (isProbablyLoopToSelf()) {
+    const e = new Error("Loop guard: PAYNOVAL_BACKEND_URL semble pointer vers le gateway");
+    e.status = 500;
+    throw e;
   }
 
   const url = `${PAYNOVAL_BACKEND_URL}/exchange-rates/rate`;
@@ -168,44 +220,70 @@ async function fetchFromBackendPrincipal(fromCur, toCur, { requestId } = {}) {
     "User-Agent": "PayNoval-Gateway/1.0",
   };
 
-  // ✅ BLINDAGE: on envoie les 2 formats
   if (PRINCIPAL_INTERNAL_TOKEN) {
-    headers["x-internal-token"] = PRINCIPAL_INTERNAL_TOKEN;
-    headers["Authorization"] = `Bearer ${PRINCIPAL_INTERNAL_TOKEN}`;
+    if (PRINCIPAL_AUTH_MODE === "both" || PRINCIPAL_AUTH_MODE === "internal") {
+      headers["x-internal-token"] = PRINCIPAL_INTERNAL_TOKEN;
+    }
+    if (PRINCIPAL_AUTH_MODE === "both" || PRINCIPAL_AUTH_MODE === "bearer") {
+      headers["Authorization"] = `Bearer ${PRINCIPAL_INTERNAL_TOKEN}`;
+    }
   }
 
   if (requestId) headers["x-request-id"] = requestId;
 
-  const { data } = await axios.get(url, {
+  const resp = await axios.get(url, {
     params: { from: fromCur, to: toCur },
     headers,
     timeout: 12000,
-    validateStatus: (s) => s >= 200 && s < 500, // on gère 401/403 proprement
+    validateStatus: () => true, // on gère status nous-mêmes
   });
 
-  if (data?.success === false && (data?.error || data?.message)) {
-    const e = new Error(String(data.error || data.message));
-    e.status = 401;
-    e.backendData = data;
+  const status = resp.status;
+  const data = resp.data;
+
+  // si principal renvoie html / string
+  const isJsonLike = data && typeof data === "object";
+
+  // 401/403 => auth KO (on fallback)
+  if (status === 401 || status === 403) {
+    const e = new Error("Backend principal FX: unauthorized");
+    e.status = status;
+    e.backendData = isJsonLike ? data : { raw: String(data).slice(0, 200) };
     throw e;
   }
 
-  // backend principal peut renvoyer rate à la racine OU dans data.rate
-  const rate = Number(data?.data?.rate ?? data?.rate);
+  // 404 ou 5xx => fallback
+  if (status === 404 || status >= 500) {
+    const e = new Error(`Backend principal FX: http_${status}`);
+    e.status = status;
+    e.backendData = isJsonLike ? data : { raw: String(data).slice(0, 200) };
+    throw e;
+  }
 
-  if (!data?.success || !Number.isFinite(rate) || rate <= 0) {
-    const e = new Error("Backend principal FX: taux invalide");
+  // erreurs applicatives
+  if (isJsonLike && data?.success === false && (data?.error || data?.message)) {
+    const e = new Error(String(data.error || data.message));
     e.status = 502;
     e.backendData = data;
     throw e;
   }
 
+  // récup rate (root ou data.rate)
+  const rate = Number((isJsonLike ? (data?.data?.rate ?? data?.rate) : null));
+
+  if (!Number.isFinite(rate) || rate <= 0) {
+    const e = new Error("Backend principal FX: taux invalide");
+    e.status = 502;
+    e.backendData = isJsonLike ? data : { raw: String(data).slice(0, 200) };
+    throw e;
+  }
+
   return {
     rate,
-    source: `backend:${data?.data?.source || data?.source || "fx"}`,
-    stale: !!(data?.data?.stale ?? data?.stale),
-    provider: data?.data?.provider || data?.provider,
-    asOfDate: data?.data?.asOfDate || data?.asOfDate,
+    source: `backend:${(isJsonLike ? (data?.data?.source || data?.source) : null) || "fx"}`,
+    stale: !!(isJsonLike ? (data?.data?.stale ?? data?.stale) : false),
+    provider: isJsonLike ? (data?.data?.provider || data?.provider) : undefined,
+    asOfDate: isJsonLike ? (data?.data?.asOfDate || data?.asOfDate) : undefined,
   };
 }
 
@@ -213,7 +291,6 @@ async function fetchFromBackendPrincipal(fromCur, toCur, { requestId } = {}) {
 // 2) Fetch from external provider (pivot)
 // ─────────────────────────────────────────────
 async function fetchFromExternalProvider(fromCur, toCur) {
-  // 1) provider avec clé (pivot)
   const computeFromRates = (rates, providerName) => {
     const rFrom = Number(rates?.[fromCur]);
     const rTo = Number(rates?.[toCur]);
@@ -228,7 +305,7 @@ async function fetchFromExternalProvider(fromCur, toCur) {
     };
   };
 
-  // A) clé dispo → exchangerate-api
+  // A) exchangerate-api (clé)
   if (FX_API_KEY && FX_API_KEY !== "REPLACE_ME") {
     const url = `${FX_API_BASE_URL}/${FX_API_KEY}/latest/${encodeURIComponent(FX_CROSS)}`;
     try {
@@ -243,14 +320,14 @@ async function fetchFromExternalProvider(fromCur, toCur) {
     } catch (err) {
       const status = err?.response?.status;
       const errorType = err?.response?.data?.["error-type"];
-      // si 429 -> on tombe sur fallback sans clé
+      // si quota, on tombe sur fallback
       if (!(status === 429 || errorType === "quota-reached")) {
-        // autres erreurs : on tente aussi fallback
+        // autres erreurs: on tente fallback aussi
       }
     }
   }
 
-  // B) fallback sans clé → open.er-api (pivot)
+  // B) open.er-api (sans clé)
   const fallbackUrl = `https://open.er-api.com/v6/latest/${encodeURIComponent(FX_CROSS)}`;
   const { data: data2 } = await axios.get(fallbackUrl, { timeout: 15000 });
   const rates2 = data2?.conversion_rates || data2?.rates || null;
@@ -263,8 +340,6 @@ async function fetchFromExternalProvider(fromCur, toCur) {
 
   return computeFromRates(rates2, "open.er-api");
 }
-
-
 
 // ─────────────────────────────────────────────
 // Public API: getExchangeRate
@@ -284,6 +359,10 @@ async function getExchangeRate(from, to, opts = {}) {
   const cached = pairCache.get(pairKey);
   if (cached) return cached;
 
+  // 0) peg XOF/EUR (si dispo) — utile pour ne pas casser les tests
+  const peg = pegRate(fromCur, toCur);
+  // (on ne retourne pas immédiatement: on le garde comme dernier recours)
+
   // cooldown pair
   const blocked = getCooldown(pairKey);
   if (blocked) {
@@ -297,6 +376,12 @@ async function getExchangeRate(from, to, opts = {}) {
         retryAfterSec: blocked.retryAfterSec,
         nextTryAt: blocked.nextTryAt,
       };
+      pairCache.set(pairKey, out);
+      return out;
+    }
+
+    if (Number.isFinite(peg) && peg > 0) {
+      const out = { rate: peg, source: "peg-xof-eur", stale: true, warning: "fx_cooldown_peg_fallback" };
       pairCache.set(pairKey, out);
       return out;
     }
@@ -355,7 +440,18 @@ async function getExchangeRate(from, to, opts = {}) {
 
     const snap2 = await getSnapshotFromDb(fromCur, toCur);
     if (snap2 && typeof snap2.rate === "number" && snap2.rate > 0) {
-      const out = { rate: Number(snap2.rate), source: "db-snapshot", stale: true, warning: "fx_fallback_snapshot_used" };
+      const out = {
+        rate: Number(snap2.rate),
+        source: "db-snapshot",
+        stale: true,
+        warning: "fx_fallback_snapshot_used",
+      };
+      pairCache.set(pairKey, out);
+      return out;
+    }
+
+    if (Number.isFinite(peg) && peg > 0) {
+      const out = { rate: peg, source: "peg-xof-eur", stale: true, warning: "fx_provider_down_peg_fallback" };
       pairCache.set(pairKey, out);
       return out;
     }
