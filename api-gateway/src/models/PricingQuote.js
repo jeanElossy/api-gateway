@@ -1,4 +1,5 @@
-// File: src/models/PricingQuote.js
+
+
 "use strict";
 
 const mongoose = require("mongoose");
@@ -56,17 +57,19 @@ const PricingQuoteSchema = new mongoose.Schema(
       netTo: { type: Number, required: true },
     },
 
+    // ✅ on garde souple car computeQuote peut renvoyer différentes formes
     ruleApplied: {
-      ruleId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "PricingRule",
-        required: true,
-      },
-      version: { type: Number, required: true, default: 1 },
-      priority: { type: Number, default: 0 },
+      type: Object,
+      default: null,
     },
 
     fxRuleApplied: {
+      type: Object,
+      default: null,
+    },
+
+    // ✅ utile pour audit mobile/admin
+    debug: {
       type: Object,
       default: null,
     },
