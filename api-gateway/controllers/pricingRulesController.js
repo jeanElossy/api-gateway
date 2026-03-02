@@ -2,6 +2,7 @@
 
 const mongoose = require("mongoose");
 const PricingRule = require("../src/models/PricingRule");
+const { getExchangeRate } = require("../src/services/exchangeRateService");
 
 function toBool(v, defaultValue = undefined) {
   if (v === undefined || v === null || v === "") return defaultValue;
@@ -138,6 +139,77 @@ function removeUndefined(obj) {
   return out;
 }
 
+async function buildFxPreview(item) {
+  try {
+    const from = item?.scope?.fromCurrency;
+    const to = item?.scope?.toCurrency;
+    if (!from || !to) {
+      return {
+        marketRate: null,
+        clientRate: null,
+        inverseMarketRate: null,
+        inverseClientRate: null,
+        source: null,
+      };
+    }
+
+    const fxRes = await getExchangeRate(from, to);
+    const marketRate = Number(fxRes?.rate ?? fxRes);
+    const source = fxRes?.source || null;
+
+    if (!Number.isFinite(marketRate) || marketRate <= 0) {
+      return {
+        marketRate: null,
+        clientRate: null,
+        inverseMarketRate: null,
+        inverseClientRate: null,
+        source,
+      };
+    }
+
+    const mode = String(item?.fx?.mode || "PASS_THROUGH").toUpperCase();
+    let clientRate = marketRate;
+
+    if (mode === "OVERRIDE") {
+      const out = Number(item?.fx?.overrideRate);
+      if (Number.isFinite(out) && out > 0) clientRate = out;
+    } else if (mode === "MARKUP_PERCENT") {
+      const pct = Number(item?.fx?.markupPercent || 0);
+      clientRate = marketRate * (1 - pct / 100);
+    } else if (mode === "DELTA_PERCENT") {
+      const pct = Number(item?.fx?.percent || 0);
+      clientRate = marketRate * (1 + pct / 100);
+    } else if (mode === "DELTA_ABS") {
+      clientRate = marketRate + Number(item?.fx?.deltaAbs || 0);
+    }
+
+    if (!Number.isFinite(clientRate) || clientRate <= 0) {
+      clientRate = null;
+    }
+
+    return {
+      marketRate,
+      clientRate,
+      inverseMarketRate: Number.isFinite(marketRate) && marketRate > 0 ? 1 / marketRate : null,
+      inverseClientRate: Number.isFinite(clientRate) && clientRate > 0 ? 1 / clientRate : null,
+      source,
+      fxMode: mode,
+      markupPercent: Number(item?.fx?.markupPercent || 0),
+      percent: Number(item?.fx?.percent || 0),
+      deltaAbs: Number(item?.fx?.deltaAbs || 0),
+      overrideRate: item?.fx?.overrideRate ?? null,
+    };
+  } catch {
+    return {
+      marketRate: null,
+      clientRate: null,
+      inverseMarketRate: null,
+      inverseClientRate: null,
+      source: null,
+    };
+  }
+}
+
 exports.listPricingRules = async (req, res) => {
   try {
     const {
@@ -195,7 +267,7 @@ exports.listPricingRules = async (req, res) => {
     const sortField = allowedSortFields.has(String(sortBy)) ? String(sortBy) : "priority";
     const sortDir = String(sortOrder).toLowerCase() === "asc" ? 1 : -1;
 
-    const [items, total] = await Promise.all([
+    const [itemsRaw, total] = await Promise.all([
       PricingRule.find(filter)
         .sort({ [sortField]: sortDir, updatedAt: -1, _id: -1 })
         .skip(skip)
@@ -203,6 +275,13 @@ exports.listPricingRules = async (req, res) => {
         .lean(),
       PricingRule.countDocuments(filter),
     ]);
+
+    const items = await Promise.all(
+      itemsRaw.map(async (item) => ({
+        ...item,
+        fxPreview: await buildFxPreview(item),
+      }))
+    );
 
     return res.status(200).json({
       success: true,
@@ -247,7 +326,10 @@ exports.getPricingRuleById = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      data: item,
+      data: {
+        ...item,
+        fxPreview: await buildFxPreview(item),
+      },
     });
   } catch (error) {
     console.error("[pricingRules.getById] error:", error);

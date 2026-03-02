@@ -12,7 +12,6 @@ const {
 } = require("../src/services/pricingEngine");
 
 const { getExchangeRate } = require("../src/services/exchangeRateService");
-const { getAdjustedRate } = require("../src/services/fxRulesService");
 
 const LOCK_TTL_MIN = Number(process.env.PRICING_LOCK_TTL_MIN || 10);
 
@@ -59,12 +58,6 @@ function normalizeCountryForStore(country) {
   return upper(iso2 || country);
 }
 
-function normalizeCountryForRules(country) {
-  if (!country) return "";
-  const iso2 = normalizeCountryISO2(country);
-  return lower(iso2 || country);
-}
-
 function pickRequestId(req) {
   return (
     req.get("x-request-id") ||
@@ -72,11 +65,6 @@ function pickRequestId(req) {
     req.get("x-amzn-trace-id") ||
     null
   );
-}
-
-function isPositiveNumber(v) {
-  const n = Number(v);
-  return Number.isFinite(n) && n > 0;
 }
 
 async function getMarketRateDirect(from, to, { requestId } = {}) {
@@ -93,7 +81,6 @@ function buildRequest(body = {}) {
     fromCurrency: upper(body.fromCurrency),
     toCurrency: upper(body.toCurrency),
 
-    // ✅ country = destination/general country
     country: normalizeCountryForStore(body.country),
     operator: body.operator ? lower(body.operator) : null,
     provider: body.provider ? lower(body.provider) : null,
@@ -113,35 +100,7 @@ function validateRequest(request) {
   return null;
 }
 
-function buildFxContext(request) {
-  return {
-    txType: upper(request.txType || ""),
-    method: upper(request.method || ""),
-    provider: lower(request.provider || ""),
-
-    // ✅ scope général = country destination
-    country: normalizeCountryForRules(request.country),
-    fromCountry: normalizeCountryForRules(request.fromCountry),
-    toCountry: normalizeCountryForRules(request.toCountry),
-
-    fromCurrency: upper(request.fromCurrency || ""),
-    toCurrency: upper(request.toCurrency || ""),
-    amount: Number(request.amount || 0),
-  };
-}
-
-function recomputeNetTo(result, request) {
-  const netFrom = Number(result?.netFrom || 0);
-  const appliedRate = Number(result?.appliedRate || 0);
-
-  if (!Number.isFinite(netFrom) || !Number.isFinite(appliedRate)) {
-    return result?.netTo ?? 0;
-  }
-
-  return roundMoney(netFrom * appliedRate, request.toCurrency);
-}
-
-function buildDebugPayload({ request, quote, adjusted, requestId }) {
+function buildDebugPayload({ request, quote, requestId }) {
   const fee = Number(quote?.result?.fee || 0);
   const grossFrom = Number(quote?.result?.grossFrom || request?.amount || 0);
   const netFrom = Number(quote?.result?.netFrom || 0);
@@ -149,6 +108,8 @@ function buildDebugPayload({ request, quote, adjusted, requestId }) {
     quote?.result?.marketRate != null ? Number(quote.result.marketRate) : null;
   const appliedRate =
     quote?.result?.appliedRate != null ? Number(quote.result.appliedRate) : null;
+  const netTo = Number(quote?.result?.netTo || 0);
+  const fxRevenue = Number(quote?.result?.fxRevenue || 0);
 
   return {
     requestId: requestId || null,
@@ -178,7 +139,7 @@ function buildDebugPayload({ request, quote, adjusted, requestId }) {
     },
 
     feeRuleApplied: quote?.ruleApplied || null,
-    fxRuleApplied: adjusted?.info || quote?.fxRuleApplied || null,
+    fxRuleApplied: quote?.fxRuleApplied || null,
 
     fxComputation: {
       marketRate,
@@ -187,7 +148,12 @@ function buildDebugPayload({ request, quote, adjusted, requestId }) {
         Number.isFinite(marketRate) && Number.isFinite(appliedRate)
           ? appliedRate - marketRate
           : null,
-      netTo: Number(quote?.result?.netTo || 0),
+      netTo,
+      fxRevenue,
+      formula:
+        Number.isFinite(netFrom) && Number.isFinite(appliedRate)
+          ? `${netFrom} * ${appliedRate} = ${netTo}`
+          : null,
     },
 
     feeBreakdown: quote?.result?.feeBreakdown || null,
@@ -203,34 +169,9 @@ async function computeFullQuote({ request, requestId }) {
     getMarketRate: async (from, to) => getMarketRateDirect(from, to, { requestId }),
   });
 
-  const baseRate = Number(quote?.result?.appliedRate);
-  const adjusted = await getAdjustedRate({
-    baseRate,
-    context: buildFxContext(request),
-  });
-
-  if (adjusted?.rate && isPositiveNumber(adjusted.rate)) {
-    quote.result.marketRate =
-      quote.result.marketRate != null
-        ? Number(quote.result.marketRate)
-        : Number.isFinite(baseRate)
-        ? baseRate
-        : null;
-
-    quote.result.appliedRate = Number(adjusted.rate);
-    quote.result.netTo = recomputeNetTo(quote.result, request);
-    quote.fxRuleApplied = adjusted.info || null;
-  } else {
-    if (quote.result.marketRate == null && Number.isFinite(baseRate)) {
-      quote.result.marketRate = baseRate;
-    }
-    quote.fxRuleApplied = adjusted?.info || null;
-  }
-
   quote.debug = buildDebugPayload({
     request,
     quote,
-    adjusted,
     requestId,
   });
 
