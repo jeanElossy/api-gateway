@@ -2,7 +2,7 @@
 "use strict";
 
 const mongoose = require("mongoose");
-const PricingRule = require("../models/PricingRule");
+const PricingRule = require("../src/models/PricingRule");
 
 function toBool(v, defaultValue = undefined) {
   if (v === undefined || v === null || v === "") return defaultValue;

@@ -12,8 +12,8 @@ const {
   deletePricingRule,
 } = require("../controllers/pricingRulesController");
 
-const { protect } = require("../middlewares/auth");
-const { requireRole } = require("../middlewares/authz");
+const { protect } = require("../src/middlewares/auth");
+const { requireRole } = require("../src/middlewares/authz");
 
 router.get("/", protect, requireRole(["admin", "superadmin"]), listPricingRules);
 router.post("/", protect, requireRole(["admin", "superadmin"]), createPricingRule);
