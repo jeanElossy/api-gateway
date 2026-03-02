@@ -56,7 +56,7 @@ const fxRulesRoutes = require("../routes/fxRules");
 const publicRoutes = require("../routes/publicRoutes");
 const requirePublicSignature = require("./middlewares/requirePublicSignature");
 
-const pricingRulesRoutes = require("./routes/pricingRulesRoutes");
+const pricingRulesRoutes = require("../routes/pricingRulesRoutes");
 
 const app = express();
 
