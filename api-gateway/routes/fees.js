@@ -1,4 +1,4 @@
-
+// File: src/routes/feesRoutes.js
 "use strict";
 
 const express = require("express");
@@ -8,6 +8,7 @@ const config = require("../src/config");
 const requireAdmin = require("../src/middlewares/requireAdmin");
 const feesCtrl = require("../controllers/feesController");
 
+// ✅ simulate accessible avant protection admin
 router.get("/simulate", feesCtrl.simulateFee);
 
 const requireInternalOrAdmin = (req, res, next) => {
@@ -18,16 +19,21 @@ const requireInternalOrAdmin = (req, res, next) => {
     config.internalToken ||
     "";
 
-  if (internalHeader && expectedInternal && internalHeader === expectedInternal) return next();
+  if (internalHeader && expectedInternal && internalHeader === expectedInternal) {
+    return next();
+  }
+
   return requireAdmin(req, res, next);
 };
 
+// ✅ CRUD protégé
 router.use(requireInternalOrAdmin);
 
 router.get("/", feesCtrl.getFees);
 router.get("/:id", feesCtrl.getFeeById);
 router.post("/", feesCtrl.createFee);
 router.put("/:id", feesCtrl.updateFee);
+router.patch("/:id", feesCtrl.updateFee);
 router.delete("/:id", feesCtrl.deleteFee);
 
 module.exports = router;

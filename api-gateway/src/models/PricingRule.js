@@ -1,11 +1,12 @@
+// File: src/models/PricingRule.js
 "use strict";
 
 const mongoose = require("mongoose");
 
 const AmountRangeSchema = new mongoose.Schema(
   {
-    min: { type: Number, default: 0 },
-    max: { type: Number, default: null }, // null = no max
+    min: { type: Number, default: 0, min: 0 },
+    max: { type: Number, default: null }, // null = pas de max
   },
   { _id: false }
 );
@@ -14,13 +15,13 @@ const FeeSchema = new mongoose.Schema(
   {
     mode: {
       type: String,
-      enum: ["NONE", "PERCENT", "FIXED", "MIXED"],
+      enum: ["NONE", "FIXED", "PERCENT", "MIXED"],
       default: "NONE",
     },
-    percent: { type: Number, default: 0 }, // ex 1.5
-    fixed: { type: Number, default: 0 }, // montant en fromCurrency
-    minFee: { type: Number, default: null },
-    maxFee: { type: Number, default: null },
+    fixed: { type: Number, default: 0, min: 0 },
+    percent: { type: Number, default: 0, min: 0 },
+    minFee: { type: Number, default: null, min: 0 },
+    maxFee: { type: Number, default: null, min: 0 },
   },
   { _id: false }
 );
@@ -29,57 +30,284 @@ const FxSchema = new mongoose.Schema(
   {
     mode: {
       type: String,
-      enum: ["MARKET", "OVERRIDE", "MARKUP"],
-      default: "MARKET",
+      enum: ["PASS_THROUGH", "OVERRIDE", "MARKUP_PERCENT", "DELTA_PERCENT", "DELTA_ABS"],
+      default: "PASS_THROUGH",
     },
-    overrideRate: { type: Number, default: null }, // ex 650.12
-    markupPercent: { type: Number, default: 0 }, // ex +1.2%
+    overrideRate: { type: Number, default: null },
+    markupPercent: { type: Number, default: 0 },
+    percent: { type: Number, default: 0 },
+    deltaAbs: { type: Number, default: 0 },
+    notes: { type: String, default: "" },
+  },
+  { _id: false }
+);
+
+const ScopeSchema = new mongoose.Schema(
+  {
+    txType: {
+      type: String,
+      enum: ["TRANSFER", "DEPOSIT", "WITHDRAW", "ALL"],
+      default: "ALL",
+      index: true,
+    },
+
+    method: {
+      type: String,
+      enum: ["MOBILEMONEY", "BANK", "CARD", "INTERNAL", "ALL"],
+      default: "ALL",
+      index: true,
+    },
+
+    provider: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      default: "all",
+      index: true,
+    },
+
+    country: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: "ALL",
+      index: true,
+    },
+
+    fromCountry: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: "ALL",
+      index: true,
+    },
+
+    toCountry: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: "ALL",
+      index: true,
+    },
+
+    fromCurrency: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      required: true,
+      index: true,
+    },
+
+    toCurrency: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      required: true,
+      index: true,
+    },
   },
   { _id: false }
 );
 
 const PricingRuleSchema = new mongoose.Schema(
   {
-    active: { type: Boolean, default: true, index: true },
-    priority: { type: Number, default: 0, index: true },
-
-    scope: {
-      txType: {
-        type: String,
-        enum: ["TRANSFER", "DEPOSIT", "WITHDRAW"],
-        required: true,
-        index: true,
-      },
-      fromCurrency: { type: String, required: true, uppercase: true, index: true },
-      toCurrency: { type: String, required: true, uppercase: true, index: true },
-
-      // optionnels
-      countries: [{ type: String, uppercase: true }], // ex ["CI","SN"]
-      operators: [{ type: String }], // ex ["ORANGE","MTN","WAVE"]
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 160,
+      index: true,
     },
 
-    amountRange: { type: AmountRangeSchema, default: () => ({ min: 0, max: null }) },
+    code: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      maxlength: 80,
+      sparse: true,
+      index: true,
+    },
 
-    fee: { type: FeeSchema, default: () => ({ mode: "NONE" }) },
-    fx: { type: FxSchema, default: () => ({ mode: "MARKET" }) },
+    description: {
+      type: String,
+      trim: true,
+      default: "",
+      maxlength: 500,
+    },
 
-    version: { type: Number, default: 1 },
+    notes: {
+      type: String,
+      trim: true,
+      default: "",
+    },
 
-    notes: { type: String, default: "" },
-    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
-    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    active: {
+      type: Boolean,
+      default: true,
+      index: true,
+    },
+
+    priority: {
+      type: Number,
+      default: 0,
+      index: true,
+    },
+
+    category: {
+      type: String,
+      enum: ["fee", "fx", "pricing", "other"],
+      default: "pricing",
+      index: true,
+    },
+
+    service: {
+      type: String,
+      trim: true,
+      default: "all",
+      index: true,
+    },
+
+    scope: {
+      type: ScopeSchema,
+      required: true,
+    },
+
+    countries: [
+      {
+        type: String,
+        trim: true,
+        uppercase: true,
+      },
+    ],
+
+    operators: [
+      {
+        type: String,
+        trim: true,
+        lowercase: true,
+      },
+    ],
+
+    amountRange: {
+      type: AmountRangeSchema,
+      default: () => ({ min: 0, max: null }),
+    },
+
+    fee: {
+      type: FeeSchema,
+      default: () => ({ mode: "NONE" }),
+    },
+
+    fx: {
+      type: FxSchema,
+      default: () => ({ mode: "PASS_THROUGH" }),
+    },
+
+    startsAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+
+    endsAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+
+    version: {
+      type: Number,
+      default: 1,
+    },
+
+    metadata: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
+
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    versionKey: false,
+  }
 );
 
-// Index utile pour la recherche de règles
-PricingRuleSchema.index({
-  active: 1,
-  "scope.txType": 1,
-  "scope.fromCurrency": 1,
-  "scope.toCurrency": 1,
-  priority: -1,
-  updatedAt: -1,
+PricingRuleSchema.index(
+  {
+    active: 1,
+    "scope.txType": 1,
+    "scope.method": 1,
+    "scope.provider": 1,
+    "scope.country": 1,
+    "scope.fromCountry": 1,
+    "scope.toCountry": 1,
+    "scope.fromCurrency": 1,
+    "scope.toCurrency": 1,
+    priority: -1,
+    updatedAt: -1,
+  },
+  { name: "pricing_rule_match_idx" }
+);
+
+PricingRuleSchema.pre("validate", function (next) {
+  try {
+    if (this.code) this.code = String(this.code).trim().toUpperCase();
+
+    if (this.scope) {
+      if (this.scope.provider) this.scope.provider = String(this.scope.provider).trim().toLowerCase();
+      if (this.scope.country) this.scope.country = String(this.scope.country).trim().toUpperCase();
+      if (this.scope.fromCountry) this.scope.fromCountry = String(this.scope.fromCountry).trim().toUpperCase();
+      if (this.scope.toCountry) this.scope.toCountry = String(this.scope.toCountry).trim().toUpperCase();
+      if (this.scope.fromCurrency) this.scope.fromCurrency = String(this.scope.fromCurrency).trim().toUpperCase();
+      if (this.scope.toCurrency) this.scope.toCurrency = String(this.scope.toCurrency).trim().toUpperCase();
+    }
+
+    if (Array.isArray(this.countries)) {
+      this.countries = this.countries.map((x) => String(x).trim().toUpperCase()).filter(Boolean);
+    }
+
+    if (Array.isArray(this.operators)) {
+      this.operators = this.operators.map((x) => String(x).trim().toLowerCase()).filter(Boolean);
+    }
+
+    if (this.startsAt && this.endsAt && this.endsAt < this.startsAt) {
+      return next(new Error("endsAt must be greater than or equal to startsAt"));
+    }
+
+    if (
+      this.amountRange &&
+      this.amountRange.max != null &&
+      this.amountRange.min > this.amountRange.max
+    ) {
+      return next(new Error("amountRange.min cannot be greater than amountRange.max"));
+    }
+
+    if (
+      this.fee &&
+      this.fee.minFee != null &&
+      this.fee.maxFee != null &&
+      this.fee.minFee > this.fee.maxFee
+    ) {
+      return next(new Error("fee.minFee cannot be greater than fee.maxFee"));
+    }
+
+    next();
+  } catch (err) {
+    next(err);
+  }
 });
 
-module.exports = mongoose.model("PricingRule", PricingRuleSchema);
+module.exports =
+  mongoose.models.PricingRule ||
+  mongoose.model("PricingRule", PricingRuleSchema);

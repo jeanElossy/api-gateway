@@ -1,3 +1,4 @@
+// File: src/routes/fxRules
 "use strict";
 
 const express = require("express");
@@ -14,7 +15,10 @@ const requireInternalOrAdmin = (req, res, next) => {
     config.internalToken ||
     "";
 
-  if (internalHeader && expectedInternal && internalHeader === expectedInternal) return next();
+  if (internalHeader && expectedInternal && internalHeader === expectedInternal) {
+    return next();
+  }
+
   return requireAdmin(req, res, next);
 };
 
@@ -24,6 +28,7 @@ router.get("/", ctrl.list);
 router.get("/:id", ctrl.getById);
 router.post("/", ctrl.create);
 router.put("/:id", ctrl.update);
+router.patch("/:id", ctrl.update);
 router.delete("/:id", ctrl.remove);
 
 module.exports = router;

@@ -56,6 +56,8 @@ const fxRulesRoutes = require("../routes/fxRules");
 const publicRoutes = require("../routes/publicRoutes");
 const requirePublicSignature = require("./middlewares/requirePublicSignature");
 
+const pricingRulesRoutes = require("./routes/pricingRulesRoutes");
+
 const app = express();
 
 try {
@@ -617,6 +619,10 @@ app.use("/api/v1/commissions", commissionsRoutes);
 app.use("/api/v1/pricing", pricingRoutes);
 app.use("/api/v1/fx-rules", fxRulesRoutes);
 app.use("/api/v1/phone-verification", phoneVerificationRoutes);
+
+
+// ✅ Pricing Rules
+app.use("/api/v1/pricing-rules", pricingRulesRoutes);
 
 // ✅ PROXY FINAL: routes du backend principal
 if (principalProxy) {
