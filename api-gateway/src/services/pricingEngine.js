@@ -29,10 +29,33 @@ function normalizeTxType(v) {
   if (raw === "TRANSFER" || raw === "DEPOSIT" || raw === "WITHDRAW") return raw;
 
   const low = lower(v);
-  if (low === "send" || low === "p2p" || low === "transfer" || low === "transfert")
+  if (low === "send" || low === "p2p" || low === "transfer" || low === "transfert") {
     return "TRANSFER";
-  if (low === "deposit" || low === "topup" || low === "cashin") return "DEPOSIT";
-  if (low === "withdraw" || low === "withdrawal" || low === "cashout") return "WITHDRAW";
+  }
+  if (low === "deposit" || low === "topup" || low === "cashin") {
+    return "DEPOSIT";
+  }
+  if (low === "withdraw" || low === "withdrawal" || low === "cashout" || low === "retrait") {
+    return "WITHDRAW";
+  }
+
+  return raw;
+}
+
+/**
+ * ✅ Normalisation method robuste
+ */
+function normalizeMethod(v) {
+  const raw = upper(v);
+  if (!raw) return "";
+
+  if (["MOBILEMONEY", "BANK", "CARD", "INTERNAL"].includes(raw)) return raw;
+
+  const low = lower(v);
+  if (["mobilemoney", "mobile_money", "mm"].includes(low)) return "MOBILEMONEY";
+  if (["bank", "wire", "virement", "transfer_bank"].includes(low)) return "BANK";
+  if (["card", "visa", "mastercard"].includes(low)) return "CARD";
+  if (["internal", "wallet", "paynoval"].includes(low)) return "INTERNAL";
 
   return raw;
 }
@@ -127,10 +150,21 @@ function inRange(amount, range) {
   const a = Number(amount);
   const min = Number(range?.min ?? 0);
   const max = range?.max == null ? null : Number(range.max);
+
   if (!Number.isFinite(a)) return false;
   if (a < min) return false;
   if (max != null && a > max) return false;
   return true;
+}
+
+function isWildcardUpper(v) {
+  const s = upper(v);
+  return !s || s === "ALL" || s === "*";
+}
+
+function isWildcardLower(v) {
+  const s = lower(v);
+  return !s || s === "all" || s === "*";
 }
 
 function matchesOptionalList(value, list) {
@@ -150,32 +184,63 @@ function matchesCountries(reqCountry, ruleCountries) {
   return tokens.some((t) => matchesOptionalList(t, ruleCountries));
 }
 
+function matchScopeUpper(reqVal, ruleVal) {
+  if (isWildcardUpper(ruleVal)) return true;
+  return upper(reqVal) === upper(ruleVal);
+}
+
+function matchScopeLower(reqVal, ruleVal) {
+  if (isWildcardLower(ruleVal)) return true;
+  return lower(reqVal) === lower(ruleVal);
+}
+
+function matchScopeCountry(reqVal, ruleVal) {
+  if (isWildcardUpper(ruleVal) || isWildcardLower(ruleVal)) return true;
+
+  const reqIso = normalizeCountryISO2(reqVal);
+  const ruleIso = normalizeCountryISO2(ruleVal);
+
+  if (reqIso && ruleIso) return reqIso === ruleIso;
+
+  return upper(stripAccents(reqVal)) === upper(stripAccents(ruleVal));
+}
+
+function computeSpecificity(rule) {
+  let score = 0;
+  const sc = rule?.scope || {};
+
+  if (!isWildcardUpper(sc.txType)) score += 60;
+  if (!isWildcardUpper(sc.method)) score += 50;
+  if (!isWildcardLower(sc.provider)) score += 45;
+  if (!isWildcardUpper(sc.country)) score += 30;
+  if (!isWildcardUpper(sc.fromCountry)) score += 35;
+  if (!isWildcardUpper(sc.toCountry)) score += 35;
+  if (!isWildcardUpper(sc.fromCurrency)) score += 25;
+  if (!isWildcardUpper(sc.toCurrency)) score += 25;
+
+  if (Array.isArray(rule?.countries) && rule.countries.length) score += 15;
+  if (Array.isArray(rule?.operators) && rule.operators.length) score += 10;
+
+  if (rule?.amountRange?.min != null) score += 5;
+  if (rule?.amountRange?.max != null) score += 5;
+
+  return score;
+}
+
 /**
- * Match scope principal PricingRule
+ * ✅ Sélectionne la meilleure règle avec vrai matching de scope
  */
-function matchesScopeField(reqValue, ruleValue) {
-  const r = upper(ruleValue || "ALL");
-  if (!r || r === "ALL" || r === "*") return true;
-  return upper(reqValue) === r;
-}
-
-function matchesScopeProvider(reqValue, ruleValue) {
-  const r = lower(ruleValue || "all");
-  if (!r || r === "all" || r === "*") return true;
-  return lower(reqValue) === r;
-}
-
 function pickBestRule(rules, req) {
   const txType = normalizeTxType(req.txType);
-  const method = upper(req.method || "");
+  const method = normalizeMethod(req.method);
   const fromCurrency = upper(req.fromCurrency);
   const toCurrency = upper(req.toCurrency);
-  const provider = lower(req.provider || "");
 
   const reqCountryRaw = req.country ? String(req.country) : null;
   const reqFromCountryRaw = req.fromCountry ? String(req.fromCountry) : null;
   const reqToCountryRaw = req.toCountry ? String(req.toCountry) : null;
 
+  const provider = req.provider ? lower(req.provider) : "";
   const operator =
     req.operator != null && String(req.operator).trim()
       ? lower(stripAccents(req.operator))
@@ -186,49 +251,41 @@ function pickBestRule(rules, req) {
   const candidates = (rules || []).filter((r) => {
     if (!r?.active) return false;
 
-    const scope = r?.scope || {};
+    const sc = r?.scope || {};
 
-    if (!matchesScopeField(txType, scope.txType)) return false;
-    if (!matchesScopeField(method, scope.method)) return false;
-    if (!matchesScopeProvider(provider, scope.provider)) return false;
+    if (!matchScopeUpper(txType, sc.txType)) return false;
+    if (!matchScopeUpper(method, sc.method)) return false;
 
-    if (!matchesScopeField(fromCurrency, scope.fromCurrency)) return false;
-    if (!matchesScopeField(toCurrency, scope.toCurrency)) return false;
+    if (!matchScopeLower(provider, sc.provider)) return false;
 
-    if (scope.country && upper(scope.country) !== "ALL") {
-      const iso = normalizeCountryISO2(reqCountryRaw || "");
-      if (!iso || upper(scope.country) !== upper(iso)) return false;
-    }
+    if (!matchScopeUpper(fromCurrency, sc.fromCurrency)) return false;
+    if (!matchScopeUpper(toCurrency, sc.toCurrency)) return false;
 
-    if (scope.fromCountry && upper(scope.fromCountry) !== "ALL") {
-      const iso = normalizeCountryISO2(reqFromCountryRaw || "");
-      if (!iso || upper(scope.fromCountry) !== upper(iso)) return false;
-    }
-
-    if (scope.toCountry && upper(scope.toCountry) !== "ALL") {
-      const iso = normalizeCountryISO2(reqToCountryRaw || "");
-      if (!iso || upper(scope.toCountry) !== upper(iso)) return false;
-    }
+    if (!matchScopeCountry(reqCountryRaw, sc.country)) return false;
+    if (!matchScopeCountry(reqFromCountryRaw, sc.fromCountry)) return false;
+    if (!matchScopeCountry(reqToCountryRaw, sc.toCountry)) return false;
 
     if (!inRange(amount, r?.amountRange)) return false;
 
     if (!matchesCountries(reqCountryRaw, r?.countries)) return false;
-
-    if (Array.isArray(r?.operators) && r.operators.length > 0) {
-      if (!operator) return false;
-      const operatorMatched = r.operators.some(
-        (x) => lower(stripAccents(x)) === operator
-      );
-      if (!operatorMatched) return false;
-    }
+    if (!matchesOptionalList(operator, r?.operators)) return false;
 
     return true;
   });
 
   candidates.sort((a, b) => {
+    const sa = computeSpecificity(a);
+    const sb = computeSpecificity(b);
+    if (sb !== sa) return sb - sa;
+
     const pa = Number(a?.priority ?? 0);
     const pb = Number(b?.priority ?? 0);
     if (pb !== pa) return pb - pa;
+
+    const raMin = Number(a?.amountRange?.min ?? 0);
+    const rbMin = Number(b?.amountRange?.min ?? 0);
+    if (rbMin !== raMin) return rbMin - raMin;
+
     const ua = new Date(a?.updatedAt || 0).getTime();
     const ub = new Date(b?.updatedAt || 0).getTime();
     return ub - ua;
@@ -243,10 +300,14 @@ function computeFee(amount, feeCfg, fromCurrency) {
   const fixed = Number(feeCfg?.fixed ?? 0);
 
   let feeRaw = 0;
-  if (mode === "PERCENT") feeRaw = (Number(amount) * percent) / 100;
-  else if (mode === "FIXED") feeRaw = fixed;
-  else if (mode === "MIXED") feeRaw = (Number(amount) * percent) / 100 + fixed;
-  else feeRaw = 0;
+
+  if (mode === "PERCENT") {
+    feeRaw = (Number(amount) * percent) / 100;
+  } else if (mode === "FIXED") {
+    feeRaw = fixed;
+  } else if (mode === "MIXED") {
+    feeRaw = (Number(amount) * percent) / 100 + fixed;
+  }
 
   let fee = feeRaw;
 
@@ -272,7 +333,7 @@ function computeFee(amount, feeCfg, fromCurrency) {
 }
 
 /**
- * Fallback peg XOF/EUR
+ * ✅ fallback peg XOF/EUR
  */
 function pegRate(from, to) {
   const PEG_XOF_PER_EUR = Number(process.env.PEG_XOF_PER_EUR || 655.957);
@@ -289,126 +350,6 @@ function pegRate(from, to) {
 }
 
 /**
- * ✅ Applique la logique FX de PricingRule
- * IMPORTANT:
- * - le taux est exprimé en "toCurrency par 1 fromCurrency"
- * - donc une marge plateforme = taux moins favorable au client
- */
-function applyPricingRuleFx({ marketRate, fxCfg }) {
-  const base = Number(marketRate);
-  const mode = upper(fxCfg?.mode || "PASS_THROUGH");
-
-  if (!Number.isFinite(base) || base <= 0) {
-    const err = new Error("Invalid marketRate");
-    err.status = 500;
-    throw err;
-  }
-
-  if (mode === "PASS_THROUGH") {
-    return {
-      appliedRate: base,
-      fxRuleApplied: {
-        mode: "PASS_THROUGH",
-        baseRate: base,
-        adjustedRate: base,
-      },
-    };
-  }
-
-  if (mode === "OVERRIDE") {
-    const out = Number(fxCfg?.overrideRate);
-    if (!Number.isFinite(out) || out <= 0) {
-      const err = new Error("Invalid overrideRate");
-      err.status = 500;
-      throw err;
-    }
-    return {
-      appliedRate: out,
-      fxRuleApplied: {
-        mode: "OVERRIDE",
-        baseRate: base,
-        adjustedRate: out,
-        overrideRate: out,
-      },
-    };
-  }
-
-  if (mode === "MARKUP_PERCENT") {
-    const mp = Number(fxCfg?.markupPercent ?? 0);
-    const out = base * (1 - mp / 100);
-
-    if (!Number.isFinite(out) || out <= 0) {
-      const err = new Error("Invalid markup-adjusted rate");
-      err.status = 500;
-      throw err;
-    }
-
-    return {
-      appliedRate: out,
-      fxRuleApplied: {
-        mode: "MARKUP_PERCENT",
-        baseRate: base,
-        adjustedRate: out,
-        markupPercent: mp,
-        strategy: "PLATFORM_GAIN_REDUCES_CLIENT_RATE",
-      },
-    };
-  }
-
-  if (mode === "DELTA_PERCENT") {
-    const pct = Number(fxCfg?.percent ?? 0);
-    const out = base * (1 + pct / 100);
-
-    if (!Number.isFinite(out) || out <= 0) {
-      const err = new Error("Invalid delta-percent-adjusted rate");
-      err.status = 500;
-      throw err;
-    }
-
-    return {
-      appliedRate: out,
-      fxRuleApplied: {
-        mode: "DELTA_PERCENT",
-        baseRate: base,
-        adjustedRate: out,
-        percent: pct,
-      },
-    };
-  }
-
-  if (mode === "DELTA_ABS") {
-    const deltaAbs = Number(fxCfg?.deltaAbs ?? 0);
-    const out = base + deltaAbs;
-
-    if (!Number.isFinite(out) || out <= 0) {
-      const err = new Error("Invalid delta-abs-adjusted rate");
-      err.status = 500;
-      throw err;
-    }
-
-    return {
-      appliedRate: out,
-      fxRuleApplied: {
-        mode: "DELTA_ABS",
-        baseRate: base,
-        adjustedRate: out,
-        deltaAbs,
-      },
-    };
-  }
-
-  return {
-    appliedRate: base,
-    fxRuleApplied: {
-      mode: "PASS_THROUGH",
-      baseRate: base,
-      adjustedRate: base,
-      fallbackFromUnknownMode: mode,
-    },
-  };
-}
-
-/**
  * @param {object} params
  * @param {object} params.req
  * @param {Array} params.rules
@@ -420,7 +361,7 @@ async function computeQuote({ req, rules, getMarketRate }) {
   const toCurrency = upper(req.toCurrency);
 
   const txType = normalizeTxType(req.txType);
-  const method = upper(req.method || "");
+  const method = normalizeMethod(req.method);
 
   const countryISO2 = req.country ? normalizeCountryISO2(req.country) : null;
   const fromCountryISO2 = req.fromCountry ? normalizeCountryISO2(req.fromCountry) : null;
@@ -433,7 +374,7 @@ async function computeQuote({ req, rules, getMarketRate }) {
 
   const provider =
     req.provider != null && String(req.provider).trim()
-      ? lower(req.provider)
+      ? lower(stripAccents(req.provider))
       : null;
 
   if (!Number.isFinite(amount) || amount <= 0) {
@@ -441,11 +382,13 @@ async function computeQuote({ req, rules, getMarketRate }) {
     err.status = 400;
     throw err;
   }
+
   if (!fromCurrency || !toCurrency) {
     const err = new Error("Missing currency");
     err.status = 400;
     throw err;
   }
+
   if (!txType) {
     const err = new Error("Missing txType");
     err.status = 400;
@@ -474,10 +417,8 @@ async function computeQuote({ req, rules, getMarketRate }) {
         fromCurrency,
         toCurrency,
         country: countryISO2 || (req.country ? upper(stripAccents(req.country)) : null),
-        fromCountry:
-          fromCountryISO2 || (req.fromCountry ? upper(stripAccents(req.fromCountry)) : null),
-        toCountry:
-          toCountryISO2 || (req.toCountry ? upper(stripAccents(req.toCountry)) : null),
+        fromCountry: fromCountryISO2 || (req.fromCountry ? upper(stripAccents(req.fromCountry)) : null),
+        toCountry: toCountryISO2 || (req.toCountry ? upper(stripAccents(req.toCountry)) : null),
         provider: provider || null,
         operator: operator || null,
       },
@@ -488,7 +429,6 @@ async function computeQuote({ req, rules, getMarketRate }) {
     throw err;
   }
 
-  // Fees
   const { fee, breakdown } = computeFee(amount, rule.fee, fromCurrency);
   const grossFrom = roundMoney(amount, fromCurrency);
   const netFrom = roundMoney(grossFrom - fee, fromCurrency);
@@ -499,25 +439,51 @@ async function computeQuote({ req, rules, getMarketRate }) {
     throw err;
   }
 
-  // FX
-  let marketRate = await getMarketRate(fromCurrency, toCurrency);
+  const fxMode = upper(rule?.fx?.mode || "PASS_THROUGH");
+  let marketRate = null;
+  let appliedRate = null;
 
-  if (!Number.isFinite(marketRate) || marketRate <= 0) {
-    const peg = pegRate(fromCurrency, toCurrency);
-    if (Number.isFinite(peg) && peg > 0) marketRate = peg;
+  if (fxMode === "OVERRIDE") {
+    appliedRate = Number(rule?.fx?.overrideRate);
+    if (!Number.isFinite(appliedRate) || appliedRate <= 0) {
+      const err = new Error("Invalid overrideRate");
+      err.status = 500;
+      throw err;
+    }
+  } else {
+    marketRate = await getMarketRate(fromCurrency, toCurrency);
+
+    if (!Number.isFinite(marketRate) || marketRate <= 0) {
+      const peg = pegRate(fromCurrency, toCurrency);
+      if (Number.isFinite(peg) && peg > 0) marketRate = peg;
+    }
+
+    if (!Number.isFinite(marketRate) || marketRate <= 0) {
+      const err = new Error("FX rate unavailable");
+      err.status = 503;
+      err.details = { fromCurrency, toCurrency, fxMode };
+      throw err;
+    }
+
+    if (fxMode === "MARKUP_PERCENT") {
+      const mp = Number(rule?.fx?.markupPercent ?? 0);
+      appliedRate = marketRate * (1 - mp / 100);
+    } else if (fxMode === "DELTA_PERCENT") {
+      const p = Number(rule?.fx?.percent ?? 0);
+      appliedRate = marketRate * (1 + p / 100);
+    } else if (fxMode === "DELTA_ABS") {
+      const d = Number(rule?.fx?.deltaAbs ?? 0);
+      appliedRate = marketRate + d;
+    } else {
+      appliedRate = marketRate;
+    }
   }
 
-  if (!Number.isFinite(marketRate) || marketRate <= 0) {
-    const err = new Error("FX rate unavailable");
-    err.status = 503;
-    err.details = { fromCurrency, toCurrency };
+  if (!Number.isFinite(appliedRate) || appliedRate <= 0) {
+    const err = new Error("Invalid appliedRate");
+    err.status = 500;
     throw err;
   }
-
-  const { appliedRate, fxRuleApplied } = applyPricingRuleFx({
-    marketRate,
-    fxCfg: rule.fx,
-  });
 
   const netToRaw = netFrom * appliedRate;
   const netTo = roundMoney(netToRaw, toCurrency);
@@ -525,34 +491,30 @@ async function computeQuote({ req, rules, getMarketRate }) {
   return {
     request: {
       txType,
-      method: method || null,
+      method,
       amount: grossFrom,
       fromCurrency,
       toCurrency,
       country: countryISO2 || (req.country ? upper(stripAccents(req.country)) : null),
-      fromCountry:
-        fromCountryISO2 || (req.fromCountry ? upper(stripAccents(req.fromCountry)) : null),
-      toCountry:
-        toCountryISO2 || (req.toCountry ? upper(stripAccents(req.toCountry)) : null),
+      fromCountry: fromCountryISO2 || (req.fromCountry ? upper(stripAccents(req.fromCountry)) : null),
+      toCountry: toCountryISO2 || (req.toCountry ? upper(stripAccents(req.toCountry)) : null),
       provider: provider || null,
       operator: operator || null,
     },
     result: {
-      marketRate: Number(marketRate),
+      marketRate: marketRate == null ? null : Number(marketRate),
       appliedRate: Number(appliedRate),
       fee,
       feeBreakdown: breakdown,
       grossFrom,
       netFrom,
       netTo,
-      fxRevenue: roundMoney(netFrom * (Number(marketRate) - Number(appliedRate)), toCurrency),
     },
     ruleApplied: {
       ruleId: rule._id,
       version: Number(rule.version ?? 1),
       priority: Number(rule.priority ?? 0),
     },
-    fxRuleApplied,
   };
 }
 
@@ -561,5 +523,6 @@ module.exports = {
   roundMoney,
   decimalsForCurrency,
   normalizeTxType,
+  normalizeMethod,
   normalizeCountryISO2,
 };
