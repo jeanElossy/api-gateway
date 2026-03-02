@@ -1,4 +1,3 @@
-// File: src/controllers/fxRulesController.js
 "use strict";
 
 const FxRule = require("../src/models/FxRule");
@@ -9,7 +8,7 @@ const lower = (v) => normStr(v).toLowerCase();
 
 function normalizeTxType(v) {
   const raw = upper(v);
-  if (!raw) return "";
+  if (!raw || raw === "ALL") return "";
 
   if (["TRANSFER", "DEPOSIT", "WITHDRAW"].includes(raw)) return raw;
 
@@ -23,7 +22,7 @@ function normalizeTxType(v) {
 
 function normalizeMethod(v) {
   const raw = upper(v);
-  if (!raw) return "";
+  if (!raw || raw === "ALL") return "";
 
   if (["MOBILEMONEY", "BANK", "CARD", "INTERNAL"].includes(raw)) return raw;
 
@@ -34,6 +33,12 @@ function normalizeMethod(v) {
   if (["internal", "wallet", "paynoval"].includes(low)) return "INTERNAL";
 
   return raw;
+}
+
+function normalizeScopeLower(v) {
+  const s = lower(v || "");
+  if (!s || s === "all" || s === "*") return "";
+  return s;
 }
 
 function toBool(v, defaultValue = undefined) {
@@ -54,10 +59,10 @@ function buildPayload(body = {}) {
     txType: normalizeTxType(body.txType || ""),
     method: normalizeMethod(body.method || ""),
 
-    provider: lower(body.provider || ""),
-    country: lower(body.country || ""),
-    fromCountry: lower(body.fromCountry || ""),
-    toCountry: lower(body.toCountry || ""),
+    provider: normalizeScopeLower(body.provider || ""),
+    country: normalizeScopeLower(body.country || ""),
+    fromCountry: normalizeScopeLower(body.fromCountry || ""),
+    toCountry: normalizeScopeLower(body.toCountry || ""),
 
     fromCurrency: upper(body.fromCurrency || ""),
     toCurrency: upper(body.toCurrency || ""),
@@ -113,19 +118,19 @@ exports.list = async (req, res) => {
     if (activeParsed !== undefined) q.active = activeParsed;
 
     if (req.query.provider !== undefined && req.query.provider !== "") {
-      q.provider = lower(req.query.provider);
+      q.provider = normalizeScopeLower(req.query.provider);
     }
 
     if (req.query.country !== undefined && req.query.country !== "") {
-      q.country = lower(req.query.country);
+      q.country = normalizeScopeLower(req.query.country);
     }
 
     if (req.query.fromCountry !== undefined && req.query.fromCountry !== "") {
-      q.fromCountry = lower(req.query.fromCountry);
+      q.fromCountry = normalizeScopeLower(req.query.fromCountry);
     }
 
     if (req.query.toCountry !== undefined && req.query.toCountry !== "") {
-      q.toCountry = lower(req.query.toCountry);
+      q.toCountry = normalizeScopeLower(req.query.toCountry);
     }
 
     if (req.query.fromCurrency !== undefined && req.query.fromCurrency !== "") {

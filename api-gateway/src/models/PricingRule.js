@@ -1,4 +1,3 @@
-// File: src/models/PricingRule.js
 "use strict";
 
 const mongoose = require("mongoose");
@@ -6,7 +5,7 @@ const mongoose = require("mongoose");
 const AmountRangeSchema = new mongoose.Schema(
   {
     min: { type: Number, default: 0, min: 0 },
-    max: { type: Number, default: null }, // null = pas de max
+    max: { type: Number, default: null },
   },
   { _id: false }
 );

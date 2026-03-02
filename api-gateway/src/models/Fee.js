@@ -1,4 +1,3 @@
-// File: src/models/Fee.js
 "use strict";
 
 const mongoose = require("mongoose");
@@ -9,7 +8,6 @@ const feeSchema = new mongoose.Schema(
     slug: { type: String, trim: true, lowercase: true, index: true },
     description: { type: String, default: "", trim: true },
 
-    // ✅ type d’opération
     txType: {
       type: String,
       trim: true,
@@ -19,7 +17,6 @@ const feeSchema = new mongoose.Schema(
       index: true,
     },
 
-    // ✅ méthode
     method: {
       type: String,
       trim: true,
@@ -29,34 +26,38 @@ const feeSchema = new mongoose.Schema(
       index: true,
     },
 
-    // ✅ provider / opérateur
     provider: { type: String, trim: true, lowercase: true, default: "", index: true },
 
-    // ✅ pays source / destination
     country: { type: String, trim: true, lowercase: true, default: "", index: true },
     toCountry: { type: String, trim: true, lowercase: true, default: "", index: true },
 
-    // ✅ devise source / destination
     currency: { type: String, trim: true, uppercase: true, default: "XOF", index: true },
     toCurrency: { type: String, trim: true, uppercase: true, default: "", index: true },
 
-    // ✅ type de frais
-    type: { type: String, enum: ["fixed", "percent"], default: "fixed", index: true },
+    // ✅ fixed / percent / mixed
+    type: {
+      type: String,
+      enum: ["fixed", "percent", "mixed"],
+      default: "fixed",
+      index: true,
+    },
 
-    // montant fixe OU pourcentage
+    // Pour fixed = montant fixe
+    // Pour percent = % de base
+    // Pour mixed = % de base
     amount: { type: Number, required: true, min: 0 },
 
-    // garde-fous
+    // ✅ partie fixe dédiée pour mixed
+    fixedAmount: { type: Number, default: 0, min: 0 },
+
     minFee: { type: Number, default: null, min: 0 },
     maxFee: { type: Number, default: null, min: 0 },
 
-    // plage d'application
     minAmount: { type: Number, default: 0, min: 0 },
     maxAmount: { type: Number, default: null, min: 0 },
 
-    // ✅ ajustements admin
-    extraPercent: { type: Number, default: 0 }, // ex: +0.3 ou -0.2
-    extraFixed: { type: Number, default: 0 },   // ex: +200 ou -100
+    extraPercent: { type: Number, default: 0 },
+    extraFixed: { type: Number, default: 0 },
 
     active: { type: Boolean, default: true, index: true },
     priority: { type: Number, default: 0, index: true },
@@ -90,6 +91,7 @@ feeSchema.pre("validate", function (next) {
     if (this.toCurrency) this.toCurrency = String(this.toCurrency).trim().toUpperCase();
     if (this.txType) this.txType = String(this.txType).trim().toUpperCase();
     if (this.method) this.method = String(this.method).trim().toUpperCase();
+    if (this.type) this.type = String(this.type).trim().toLowerCase();
 
     if (
       this.maxAmount !== null &&
@@ -115,7 +117,6 @@ feeSchema.pre("validate", function (next) {
   }
 });
 
-// Auto-slug si non fourni
 feeSchema.pre("save", function (next) {
   if (!this.slug) {
     const parts = [
@@ -128,6 +129,7 @@ feeSchema.pre("save", function (next) {
       this.toCurrency || "anytocurrency",
       this.type || "fixed",
       String(this.amount ?? 0),
+      String(this.fixedAmount ?? 0),
     ];
 
     this.slug = parts.join("-").replace(/\s+/g, "-").toLowerCase();

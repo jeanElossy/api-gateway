@@ -1,4 +1,3 @@
-// File: src/controllers/pricingRulesController.js
 "use strict";
 
 const mongoose = require("mongoose");
@@ -37,6 +36,20 @@ function normalizeArray(arr, transform = (x) => x) {
   return arr.map(transform).filter(Boolean);
 }
 
+function normalizeScopeUpperAll(v, fallback = "ALL") {
+  const s = cleanString(v, fallback);
+  if (!s) return fallback;
+  if (String(s).trim().toLowerCase() === "all") return "ALL";
+  return String(s).trim().toUpperCase();
+}
+
+function normalizeScopeLowerAll(v, fallback = "all") {
+  const s = cleanString(v, fallback);
+  if (!s) return fallback;
+  if (String(s).trim().toLowerCase() === "all") return "all";
+  return String(s).trim().toLowerCase();
+}
+
 function pickPayload(body = {}) {
   const scopeIn = body.scope || {};
 
@@ -48,17 +61,17 @@ function pickPayload(body = {}) {
     active: toBool(body.active, true),
     priority: toNum(body.priority, 0),
     category: cleanString(body.category, "pricing"),
-    service: cleanString(body.service, "all"),
+    service: normalizeScopeLowerAll(body.service, "all"),
 
     scope: {
-      txType: cleanString(scopeIn.txType || body.txType, "ALL"),
-      method: cleanString(scopeIn.method || body.method, "ALL"),
-      provider: cleanString(scopeIn.provider || body.provider, "all"),
-      country: cleanString(scopeIn.country || body.country, "ALL"),
-      fromCountry: cleanString(scopeIn.fromCountry || body.fromCountry, "ALL"),
-      toCountry: cleanString(scopeIn.toCountry || body.toCountry, "ALL"),
-      fromCurrency: cleanString(scopeIn.fromCurrency || body.fromCurrency),
-      toCurrency: cleanString(scopeIn.toCurrency || body.toCurrency),
+      txType: normalizeScopeUpperAll(scopeIn.txType || body.txType, "ALL"),
+      method: normalizeScopeUpperAll(scopeIn.method || body.method, "ALL"),
+      provider: normalizeScopeLowerAll(scopeIn.provider || body.provider, "all"),
+      country: normalizeScopeUpperAll(scopeIn.country || body.country, "ALL"),
+      fromCountry: normalizeScopeUpperAll(scopeIn.fromCountry || body.fromCountry, "ALL"),
+      toCountry: normalizeScopeUpperAll(scopeIn.toCountry || body.toCountry, "ALL"),
+      fromCurrency: normalizeScopeUpperAll(scopeIn.fromCurrency || body.fromCurrency),
+      toCurrency: normalizeScopeUpperAll(scopeIn.toCurrency || body.toCurrency),
     },
 
     countries: normalizeArray(body.countries, (x) => String(x).trim().toUpperCase()),
@@ -73,7 +86,7 @@ function pickPayload(body = {}) {
     },
 
     fee: {
-      mode: cleanString(body.fee?.mode || body.feeMode, "NONE"),
+      mode: normalizeScopeUpperAll(body.fee?.mode || body.feeMode, "NONE"),
       fixed: toNum(body.fee?.fixed ?? body.feeFixed, 0),
       percent: toNum(body.fee?.percent ?? body.feePercent, 0),
       minFee:
@@ -87,7 +100,7 @@ function pickPayload(body = {}) {
     },
 
     fx: {
-      mode: cleanString(body.fx?.mode || body.fxMode, "PASS_THROUGH"),
+      mode: normalizeScopeUpperAll(body.fx?.mode || body.fxMode, "PASS_THROUGH"),
       overrideRate:
         body.fx?.overrideRate === null || body.fxOverrideRate === null
           ? null
@@ -100,7 +113,6 @@ function pickPayload(body = {}) {
 
     startsAt: toDateOrNull(body.startsAt),
     endsAt: toDateOrNull(body.endsAt),
-
     version: toNum(body.version, 1),
 
     metadata:
@@ -179,14 +191,7 @@ exports.listPricingRules = async (req, res) => {
     if (feeMode) filter["fee.mode"] = String(feeMode).trim().toUpperCase();
     if (fxMode) filter["fx.mode"] = String(fxMode).trim().toUpperCase();
 
-    const allowedSortFields = new Set([
-      "createdAt",
-      "updatedAt",
-      "name",
-      "priority",
-      "active",
-    ]);
-
+    const allowedSortFields = new Set(["createdAt", "updatedAt", "name", "priority", "active"]);
     const sortField = allowedSortFields.has(String(sortBy)) ? String(sortBy) : "priority";
     const sortDir = String(sortOrder).toLowerCase() === "asc" ? 1 : -1;
 

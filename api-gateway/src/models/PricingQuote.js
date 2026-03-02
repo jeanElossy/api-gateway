@@ -1,5 +1,3 @@
-
-
 "use strict";
 
 const mongoose = require("mongoose");
@@ -57,7 +55,6 @@ const PricingQuoteSchema = new mongoose.Schema(
       netTo: { type: Number, required: true },
     },
 
-    // ✅ on garde souple car computeQuote peut renvoyer différentes formes
     ruleApplied: {
       type: Object,
       default: null,
@@ -68,7 +65,6 @@ const PricingQuoteSchema = new mongoose.Schema(
       default: null,
     },
 
-    // ✅ utile pour audit mobile/admin
     debug: {
       type: Object,
       default: null,
@@ -86,7 +82,6 @@ const PricingQuoteSchema = new mongoose.Schema(
   }
 );
 
-// TTL: expire automatiquement quand expiresAt est dépassé
 PricingQuoteSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 module.exports =

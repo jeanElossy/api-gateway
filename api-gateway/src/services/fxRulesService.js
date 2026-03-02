@@ -1,4 +1,3 @@
-// File: src/services/fxRulesService.js
 "use strict";
 
 const FxRule = require("../models/FxRule");
@@ -11,8 +10,9 @@ function toLower(v) {
   return String(v || "").trim().toLowerCase();
 }
 
-function isEmpty(v) {
-  return !String(v || "").trim();
+function isWildcard(v) {
+  const s = String(v || "").trim().toLowerCase();
+  return s === "" || s === "all" || s === "*";
 }
 
 function inRange(amount, minAmount, maxAmount) {
@@ -29,28 +29,28 @@ function inRange(amount, minAmount, maxAmount) {
 }
 
 function matchOptionalLower(val, ruleVal) {
-  if (isEmpty(ruleVal)) return true;
+  if (isWildcard(ruleVal)) return true;
   return toLower(val) === toLower(ruleVal);
 }
 
 function matchOptionalUpper(val, ruleVal) {
-  if (isEmpty(ruleVal)) return true;
+  if (isWildcard(ruleVal)) return true;
   return toUpper(val) === toUpper(ruleVal);
 }
 
 function computeSpecificityScore(rule, ctx) {
   let score = 0;
 
-  if (!isEmpty(rule.txType) && matchOptionalUpper(ctx.txType, rule.txType)) score += 50;
-  if (!isEmpty(rule.method) && matchOptionalUpper(ctx.method, rule.method)) score += 45;
-  if (!isEmpty(rule.provider) && matchOptionalLower(ctx.provider, rule.provider)) score += 40;
+  if (!isWildcard(rule.txType) && matchOptionalUpper(ctx.txType, rule.txType)) score += 50;
+  if (!isWildcard(rule.method) && matchOptionalUpper(ctx.method, rule.method)) score += 45;
+  if (!isWildcard(rule.provider) && matchOptionalLower(ctx.provider, rule.provider)) score += 40;
 
-  if (!isEmpty(rule.country) && matchOptionalLower(ctx.country, rule.country)) score += 30;
-  if (!isEmpty(rule.fromCountry) && matchOptionalLower(ctx.fromCountry, rule.fromCountry)) score += 35;
-  if (!isEmpty(rule.toCountry) && matchOptionalLower(ctx.toCountry, rule.toCountry)) score += 35;
+  if (!isWildcard(rule.country) && matchOptionalLower(ctx.country, rule.country)) score += 30;
+  if (!isWildcard(rule.fromCountry) && matchOptionalLower(ctx.fromCountry, rule.fromCountry)) score += 35;
+  if (!isWildcard(rule.toCountry) && matchOptionalLower(ctx.toCountry, rule.toCountry)) score += 35;
 
-  if (!isEmpty(rule.fromCurrency) && matchOptionalUpper(ctx.fromCurrency, rule.fromCurrency)) score += 25;
-  if (!isEmpty(rule.toCurrency) && matchOptionalUpper(ctx.toCurrency, rule.toCurrency)) score += 25;
+  if (!isWildcard(rule.fromCurrency) && matchOptionalUpper(ctx.fromCurrency, rule.fromCurrency)) score += 25;
+  if (!isWildcard(rule.toCurrency) && matchOptionalUpper(ctx.toCurrency, rule.toCurrency)) score += 25;
 
   if (rule.minAmount != null) score += 5;
   if (rule.maxAmount != null) score += 5;
@@ -105,7 +105,7 @@ function applyFxRule(baseRate, rule) {
     };
   }
 
-  if (!rule || rule.mode === "PASS_THROUGH") {
+  if (!rule || String(rule.mode || "").toUpperCase() === "PASS_THROUGH") {
     return {
       rate: b,
       info: {
