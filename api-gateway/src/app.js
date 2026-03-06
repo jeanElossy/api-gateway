@@ -507,6 +507,7 @@ if (principalSocketProxy) {
 }
 
 // ─────────── AUTH GLOBAL GATEWAY ───────────
+
 const openEndpoints = [
   "/",
   "/api/v1",
@@ -514,28 +515,25 @@ const openEndpoints = [
   "/status",
   "/docs",
   "/openapi.json",
-
-  "/socket.io", // ✅ important
-
+  "/socket.io",
   "/api/v1/auth",
   "/api/v1/verification",
-
   "/api/v1/public",
-
   "/api/v1/fees/simulate",
   "/api/v1/commissions/simulate",
   "/api/v1/exchange-rates/rate",
-
+  "/api/v1/pricing",
   "/internal/transactions",
   "/api/v1/internal",
-
   "/api/v1/transactions/internal",
-
   "/api/v1/jobs",
   "/api/v1/contact",
   "/api/v1/reports",
   "/api/v1/feedback/threads",
 ];
+
+
+
 
 app.use((req, res, next) => {
   const isOpen = openEndpoints.some(
