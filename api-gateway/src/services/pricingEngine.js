@@ -212,9 +212,12 @@ function computeSpecificity(rule) {
   if (!isWildcardUpper(sc.txType)) score += 60;
   if (!isWildcardUpper(sc.method)) score += 50;
   if (!isWildcardLower(sc.provider)) score += 45;
-  if (!isWildcardUpper(sc.country)) score += 30;
+
+  // NOTE: country est moins important que corridor
+  if (!isWildcardUpper(sc.country)) score += 20;
   if (!isWildcardUpper(sc.fromCountry)) score += 35;
   if (!isWildcardUpper(sc.toCountry)) score += 35;
+
   if (!isWildcardUpper(sc.fromCurrency)) score += 25;
   if (!isWildcardUpper(sc.toCurrency)) score += 25;
 
@@ -229,6 +232,7 @@ function computeSpecificity(rule) {
 
 /**
  * ✅ Sélectionne la meilleure règle avec vrai matching de scope
+ * ✅ Fix: corridor fromCountry/toCountry prioritaire => country devient optionnel
  */
 function pickBestRule(rules, req) {
   const txType = normalizeTxType(req.txType);
@@ -261,9 +265,20 @@ function pickBestRule(rules, req) {
     if (!matchScopeUpper(fromCurrency, sc.fromCurrency)) return false;
     if (!matchScopeUpper(toCurrency, sc.toCurrency)) return false;
 
-    if (!matchScopeCountry(reqCountryRaw, sc.country)) return false;
-    if (!matchScopeCountry(reqFromCountryRaw, sc.fromCountry)) return false;
-    if (!matchScopeCountry(reqToCountryRaw, sc.toCountry)) return false;
+    // ✅ corridor prioritaire si défini
+    const hasFromCountryRule = !isWildcardUpper(sc.fromCountry) && !isWildcardLower(sc.fromCountry);
+    const hasToCountryRule = !isWildcardUpper(sc.toCountry) && !isWildcardLower(sc.toCountry);
+    const hasExplicitCorridor = hasFromCountryRule || hasToCountryRule;
+
+    if (hasExplicitCorridor) {
+      // match corridor strict
+      if (!matchScopeCountry(reqFromCountryRaw, sc.fromCountry)) return false;
+      if (!matchScopeCountry(reqToCountryRaw, sc.toCountry)) return false;
+      // country devient facultatif (beaucoup d'admins l'utilisent comme "pays source")
+    } else {
+      // pas de corridor => match sur country
+      if (!matchScopeCountry(reqCountryRaw, sc.country)) return false;
+    }
 
     if (!inRange(amount, r?.amountRange)) return false;
 
@@ -417,7 +432,8 @@ async function computeQuote({ req, rules, getMarketRate }) {
         fromCurrency,
         toCurrency,
         country: countryISO2 || (req.country ? upper(stripAccents(req.country)) : null),
-        fromCountry: fromCountryISO2 || (req.fromCountry ? upper(stripAccents(req.fromCountry)) : null),
+        fromCountry:
+          fromCountryISO2 || (req.fromCountry ? upper(stripAccents(req.fromCountry)) : null),
         toCountry: toCountryISO2 || (req.toCountry ? upper(stripAccents(req.toCountry)) : null),
         provider: provider || null,
         operator: operator || null,
@@ -467,6 +483,7 @@ async function computeQuote({ req, rules, getMarketRate }) {
 
     if (fxMode === "MARKUP_PERCENT") {
       const mp = Number(rule?.fx?.markupPercent ?? 0);
+      // ✅ plateforme gagne => taux client plus bas que marché
       appliedRate = marketRate * (1 - mp / 100);
     } else if (fxMode === "DELTA_PERCENT") {
       const p = Number(rule?.fx?.percent ?? 0);
@@ -496,7 +513,8 @@ async function computeQuote({ req, rules, getMarketRate }) {
       fromCurrency,
       toCurrency,
       country: countryISO2 || (req.country ? upper(stripAccents(req.country)) : null),
-      fromCountry: fromCountryISO2 || (req.fromCountry ? upper(stripAccents(req.fromCountry)) : null),
+      fromCountry:
+        fromCountryISO2 || (req.fromCountry ? upper(stripAccents(req.fromCountry)) : null),
       toCountry: toCountryISO2 || (req.toCountry ? upper(stripAccents(req.toCountry)) : null),
       provider: provider || null,
       operator: operator || null,
