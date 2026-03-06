@@ -53,6 +53,38 @@ const PricingQuoteSchema = new mongoose.Schema(
       grossFrom: { type: Number, required: true },
       netFrom: { type: Number, required: true },
       netTo: { type: Number, required: true },
+
+      /**
+       * ✅ Revenu frais pour l’admin
+       * - amount = frais dans la devise source
+       * - amountCAD = frais convertis en CAD
+       */
+      feeRevenue: {
+        sourceCurrency: { type: String, default: null, uppercase: true },
+        amount: { type: Number, default: 0 },
+        adminCurrency: { type: String, default: "CAD", uppercase: true },
+        amountCAD: { type: Number, default: 0 },
+        conversionRateToCAD: { type: Number, default: 0 },
+        calculatedAt: { type: Date, default: null },
+      },
+
+      /**
+       * ✅ Revenu FX pour l’admin
+       * - amount = gain FX dans la devise de réception
+       * - amountCAD = gain FX converti en CAD
+       */
+      fxRevenue: {
+        toCurrency: { type: String, default: null, uppercase: true },
+        amount: { type: Number, default: 0 },
+        rawAmount: { type: Number, default: 0 },
+        idealNetTo: { type: Number, default: 0 },
+        actualNetTo: { type: Number, default: 0 },
+
+        adminCurrency: { type: String, default: "CAD", uppercase: true },
+        amountCAD: { type: Number, default: 0 },
+        conversionRateToCAD: { type: Number, default: 0 },
+        calculatedAt: { type: Date, default: null },
+      },
     },
 
     ruleApplied: {
