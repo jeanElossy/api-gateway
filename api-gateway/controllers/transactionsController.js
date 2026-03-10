@@ -45,15 +45,16 @@ function sendProxyError(res, err, fallbackMessage = "Erreur interne provider") {
 
   if (err?.isProviderCooldown || err?.isCloudflareChallenge) {
     const cd = err.cooldown || null;
+    const message =
+      "Service PayNoval temporairement indisponible (cooldown anti Cloudflare/429). Réessaye dans quelques instants.";
+
     return res.status(503).json({
       success: false,
-      message:
-        "Service PayNoval temporairement indisponible (cooldown anti Cloudflare/429). Réessaye dans quelques instants.",
-      error:
-        "Service PayNoval temporairement indisponible (cooldown anti Cloudflare/429). Réessaye dans quelques instants.",
+      message,
+      error: message,
       details: err.isCloudflareChallenge
-        ? "cloudflare_challenge"
-        : "provider_cooldown",
+        ? ["cloudflare_challenge"]
+        : ["provider_cooldown"],
       retryAfterSec: cd?.retryAfterSec,
     });
   }
@@ -74,6 +75,8 @@ function sendProxyError(res, err, fallbackMessage = "Erreur interne provider") {
 
   const details = Array.isArray(err?.response?.data?.details)
     ? err.response.data.details
+    : Array.isArray(err?.details)
+    ? err.details
     : [];
 
   return res.status(status).json({
@@ -89,18 +92,22 @@ exports.getTransaction = async (req, res) => {
     console.log("[Gateway][Controller][getTransaction] request", {
       params: req?.params,
       query: req?.query,
+      userId: req?.user?._id || req?.user?.id || null,
     });
 
     const out = await getTransactionOrThrow(req);
 
     console.log("[Gateway][Controller][getTransaction] success", {
       status: out?.status || 200,
-      body: out?.body,
+      hasBody: !!out?.body,
     });
 
     return res.status(out.status || 200).json(out.body);
   } catch (err) {
-    console.error("[Gateway][Controller][getTransaction] error", buildErrorDetails(err));
+    console.error(
+      "[Gateway][Controller][getTransaction] error",
+      buildErrorDetails(err)
+    );
     return sendProxyError(res, err, "Erreur lors du proxy GET transaction");
   }
 };
@@ -109,6 +116,7 @@ exports.listTransactions = async (req, res) => {
   try {
     console.log("[Gateway][Controller][listTransactions] request", {
       query: req?.query,
+      userId: req?.user?._id || req?.user?.id || null,
     });
 
     const out = await listTransactionsOrFallback(req);
@@ -125,7 +133,10 @@ exports.listTransactions = async (req, res) => {
 
     return res.status(out.status || 200).json(out.body);
   } catch (err) {
-    console.error("[Gateway][Controller][listTransactions] error", buildErrorDetails(err));
+    console.error(
+      "[Gateway][Controller][listTransactions] error",
+      buildErrorDetails(err)
+    );
 
     return res.status(500).json({
       success: false,
@@ -148,6 +159,7 @@ exports.initiateTransaction = async (req, res) => {
 
     console.log("[Gateway][Controller][initiateTransaction] success", {
       status: out?.status || 200,
+      hasBody: !!out?.body,
       body: out?.body,
     });
 
@@ -174,12 +186,15 @@ exports.confirmTransaction = async (req, res) => {
 
     console.log("[Gateway][Controller][confirmTransaction] success", {
       status: out?.status || 200,
-      body: out?.body,
+      hasBody: !!out?.body,
     });
 
     return res.status(out.status || 200).json(out.body);
   } catch (err) {
-    console.error("[Gateway][Controller][confirmTransaction] error", buildErrorDetails(err));
+    console.error(
+      "[Gateway][Controller][confirmTransaction] error",
+      buildErrorDetails(err)
+    );
     return sendProxyError(res, err, "Erreur interne provider (confirm)");
   }
 };
@@ -196,12 +211,15 @@ exports.cancelTransaction = async (req, res) => {
 
     console.log("[Gateway][Controller][cancelTransaction] success", {
       status: out?.status || 200,
-      body: out?.body,
+      hasBody: !!out?.body,
     });
 
     return res.status(out.status || 200).json(out.body);
   } catch (err) {
-    console.error("[Gateway][Controller][cancelTransaction] error", buildErrorDetails(err));
+    console.error(
+      "[Gateway][Controller][cancelTransaction] error",
+      buildErrorDetails(err)
+    );
     return sendProxyError(res, err, "Erreur interne provider (cancel)");
   }
 };
@@ -218,12 +236,15 @@ exports.refundTransaction = async (req, res) => {
 
     console.log("[Gateway][Controller][refundTransaction] success", {
       status: out?.status || 200,
-      body: out?.body,
+      hasBody: !!out?.body,
     });
 
     return res.status(out.status || 200).json(out.body);
   } catch (err) {
-    console.error("[Gateway][Controller][refundTransaction] error", buildErrorDetails(err));
+    console.error(
+      "[Gateway][Controller][refundTransaction] error",
+      buildErrorDetails(err)
+    );
     return sendProxyError(res, err, "Erreur proxy refund");
   }
 };
@@ -240,12 +261,15 @@ exports.reassignTransaction = async (req, res) => {
 
     console.log("[Gateway][Controller][reassignTransaction] success", {
       status: out?.status || 200,
-      body: out?.body,
+      hasBody: !!out?.body,
     });
 
     return res.status(out.status || 200).json(out.body);
   } catch (err) {
-    console.error("[Gateway][Controller][reassignTransaction] error", buildErrorDetails(err));
+    console.error(
+      "[Gateway][Controller][reassignTransaction] error",
+      buildErrorDetails(err)
+    );
     return sendProxyError(res, err, "Erreur proxy reassign");
   }
 };
@@ -262,12 +286,15 @@ exports.validateTransaction = async (req, res) => {
 
     console.log("[Gateway][Controller][validateTransaction] success", {
       status: out?.status || 200,
-      body: out?.body,
+      hasBody: !!out?.body,
     });
 
     return res.status(out.status || 200).json(out.body);
   } catch (err) {
-    console.error("[Gateway][Controller][validateTransaction] error", buildErrorDetails(err));
+    console.error(
+      "[Gateway][Controller][validateTransaction] error",
+      buildErrorDetails(err)
+    );
     return sendProxyError(res, err, "Erreur proxy validate");
   }
 };
@@ -284,12 +311,15 @@ exports.archiveTransaction = async (req, res) => {
 
     console.log("[Gateway][Controller][archiveTransaction] success", {
       status: out?.status || 200,
-      body: out?.body,
+      hasBody: !!out?.body,
     });
 
     return res.status(out.status || 200).json(out.body);
   } catch (err) {
-    console.error("[Gateway][Controller][archiveTransaction] error", buildErrorDetails(err));
+    console.error(
+      "[Gateway][Controller][archiveTransaction] error",
+      buildErrorDetails(err)
+    );
     return sendProxyError(res, err, "Erreur proxy archive");
   }
 };
@@ -306,12 +336,15 @@ exports.relaunchTransaction = async (req, res) => {
 
     console.log("[Gateway][Controller][relaunchTransaction] success", {
       status: out?.status || 200,
-      body: out?.body,
+      hasBody: !!out?.body,
     });
 
     return res.status(out.status || 200).json(out.body);
   } catch (err) {
-    console.error("[Gateway][Controller][relaunchTransaction] error", buildErrorDetails(err));
+    console.error(
+      "[Gateway][Controller][relaunchTransaction] error",
+      buildErrorDetails(err)
+    );
     return sendProxyError(res, err, "Erreur proxy relaunch");
   }
 };
@@ -326,12 +359,15 @@ exports.logInternalTransaction = async (req, res) => {
 
     console.log("[Gateway][Controller][logInternalTransaction] success", {
       status: out?.status || 201,
-      body: out?.body,
+      hasBody: !!out?.body,
     });
 
     return res.status(out.status || 201).json(out.body);
   } catch (err) {
-    console.error("[Gateway][Controller][logInternalTransaction] error", buildErrorDetails(err));
+    console.error(
+      "[Gateway][Controller][logInternalTransaction] error",
+      buildErrorDetails(err)
+    );
 
     const status = err?.status || 500;
     const message = err?.message || "Erreur lors de la création du log interne.";

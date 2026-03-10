@@ -97,20 +97,20 @@ const COUNTRY_ALIASES = {
   "cote d ivoire": "CI",
   "cote divoire": "CI",
   "ivory coast": "CI",
-  "france": "FR",
-  "belgique": "BE",
-  "belgium": "BE",
-  "allemagne": "DE",
-  "germany": "DE",
-  "canada": "CA",
-  "usa": "US",
-  "us": "US",
+  france: "FR",
+  belgique: "BE",
+  belgium: "BE",
+  allemagne: "DE",
+  germany: "DE",
+  canada: "CA",
+  usa: "US",
+  us: "US",
   "united states": "US",
-  "senegal": "SN",
-  "mali": "ML",
+  senegal: "SN",
+  mali: "ML",
   "burkina faso": "BF",
-  "cameroun": "CM",
-  "cameroon": "CM",
+  cameroun: "CM",
+  cameroon: "CM",
 };
 
 function normalizeCountry(v) {
@@ -267,7 +267,7 @@ async function fetchCanonicalTransaction(req, transactionId) {
 
     return extracted;
   } catch (err) {
-    console.log("[Gateway][fetchCanonicalTransaction] failed", {
+    console.error("[Gateway][fetchCanonicalTransaction] failed", {
       transactionId,
       message: err?.message,
       status: err?.status || err?.response?.status,
@@ -350,7 +350,8 @@ function buildStrictInitiateBody(rawBody = {}, flow, provider) {
   const amountSource = Number(body.amountSource ?? body.amount ?? 0) || 0;
   const feeSource = Number(body.feeSource ?? body.transactionFees ?? 0) || 0;
   const amountTarget = Number(body.amountTarget ?? body.localAmount ?? 0) || 0;
-  const exchangeRate = Number(body.fxRateSourceToTarget ?? body.exchangeRate ?? 0) || 0;
+  const exchangeRate =
+    Number(body.fxRateSourceToTarget ?? body.exchangeRate ?? 0) || 0;
 
   const strictBody = cleanUndefinedDeep({
     ...body,
@@ -532,7 +533,7 @@ async function dispatchToProvider({ req, provider, serviceUrl, endpoint, body })
 
     return out;
   } catch (err) {
-    console.log("[Gateway][dispatchToProvider] failed", {
+    console.error("[Gateway][dispatchToProvider] failed", {
       provider,
       endpoint,
       serviceUrl,
@@ -597,7 +598,10 @@ async function routeInitiateByFlow(req) {
     const strictBody = buildStrictInitiateBody(bodyWithSecurity, flow, provider);
 
     console.log("[Gateway][routeInitiateByFlow][strictBody]", strictBody);
-    console.log("[Gateway][routeInitiateByFlow][strictBody.json]", toSafeJson(strictBody));
+    console.log(
+      "[Gateway][routeInitiateByFlow][strictBody.json]",
+      toSafeJson(strictBody)
+    );
 
     if (!strictBody.effectivePricingId) {
       const e = new Error("pricingId ou quoteId requis");
@@ -646,7 +650,7 @@ async function routeInitiateByFlow(req) {
       body: strictBody,
     });
   } catch (err) {
-    console.log("[Gateway][routeInitiateByFlow] failed", {
+    console.error("[Gateway][routeInitiateByFlow] failed", {
       message: err?.message,
       status: err?.status || err?.response?.status,
       payload: err?.payload,
@@ -685,7 +689,7 @@ async function routeActionByFlow(req, action) {
       body: ctx.body,
     });
   } catch (err) {
-    console.log("[Gateway][routeActionByFlow] failed", {
+    console.error("[Gateway][routeActionByFlow] failed", {
       action,
       message: err?.message,
       status: err?.status || err?.response?.status,
