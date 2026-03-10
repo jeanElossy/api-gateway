@@ -718,7 +718,7 @@ const fxRulesRoutes = require("../routes/fxRules");
 const publicRoutes = require("../routes/publicRoutes");
 const requirePublicSignature = require("./middlewares/requirePublicSignature");
 const pricingRulesRoutes = require("../routes/pricingRulesRoutes");
-const providerWebhooksRoutes = require("./routes/providerWebhooks");
+const providerWebhooksRoutes = require("../routes/providerWebhookRoutes");
 
 const app = express();
 
