@@ -1409,7 +1409,7 @@ const {
   forwardSimpleActionOrThrow,
   forwardAdminActionOrThrow,
   logInternalTransactionOrThrow,
-} = require("../services/transactions/orchestrator");
+} = require("../src/services/transactions/orchestrator");
 
 function sendProxyError(res, err, fallbackMessage = "Erreur interne provider") {
   if (err?.payload && typeof err.payload === "object") {
