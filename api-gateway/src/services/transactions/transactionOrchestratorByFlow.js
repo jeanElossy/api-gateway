@@ -21,6 +21,7 @@
  * - normalisation method / txType
  * - support pricingId OU quoteId
  * - support payload mobile "souple" -> payload TX Core "strict"
+ * - logs détaillés gateway
  * --------------------------------------------------------------------------
  */
 
@@ -66,6 +67,14 @@ function upper(v) {
 
 function isNil(v) {
   return v === undefined || v === null;
+}
+
+function toSafeJson(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return "[unserializable]";
+  }
 }
 
 function cleanUndefinedDeep(value) {
@@ -233,6 +242,11 @@ async function fetchCanonicalTransaction(req, transactionId) {
     transactionId
   )}`;
 
+  console.log("[Gateway][fetchCanonicalTransaction] start", {
+    transactionId,
+    url,
+  });
+
   try {
     const response = await safeAxiosRequest({
       method: "get",
@@ -241,16 +255,33 @@ async function fetchCanonicalTransaction(req, transactionId) {
       timeout: 10000,
     });
 
-    return extractCanonicalTx(response.data || {});
-  } catch {
+    const extracted = extractCanonicalTx(response.data || {});
+
+    console.log("[Gateway][fetchCanonicalTransaction] success", {
+      transactionId,
+      found: !!extracted,
+      provider: extracted?.provider,
+      flow: extracted?.flow,
+      status: extracted?.status,
+    });
+
+    return extracted;
+  } catch (err) {
+    console.log("[Gateway][fetchCanonicalTransaction] failed", {
+      transactionId,
+      message: err?.message,
+      status: err?.status || err?.response?.status,
+      responseData: err?.response?.data,
+    });
     return null;
   }
 }
 
 function normalizeRecipientInfo(body = {}) {
-  const original = body?.recipientInfo && typeof body.recipientInfo === "object"
-    ? body.recipientInfo
-    : {};
+  const original =
+    body?.recipientInfo && typeof body.recipientInfo === "object"
+      ? body.recipientInfo
+      : {};
 
   const email = lower(body?.toEmail || original?.email || original?.mail || "");
   let name = norm(
@@ -268,8 +299,7 @@ function normalizeRecipientInfo(body = {}) {
     ...original,
     email: email || undefined,
     name: name || undefined,
-    accountHolderName:
-      norm(original?.accountHolderName || name) || undefined,
+    accountHolderName: norm(original?.accountHolderName || name) || undefined,
     holder: norm(original?.holder) || undefined,
     bankName: norm(original?.bankName) || undefined,
     country: norm(original?.country) || undefined,
@@ -277,11 +307,7 @@ function normalizeRecipientInfo(body = {}) {
     operator: norm(original?.operator) || undefined,
     phone: norm(original?.phone) || undefined,
     numero: norm(original?.numero) || undefined,
-    summary:
-      norm(original?.summary) ||
-      name ||
-      email ||
-      undefined,
+    summary: norm(original?.summary) || name || email || undefined,
   });
 }
 
@@ -290,7 +316,9 @@ function buildStrictInitiateBody(rawBody = {}, flow, provider) {
 
   const funds = lower(body.funds);
   const destination = lower(body.destination);
-  const normalizedProvider = lower(provider || body.provider || funds || destination || "paynoval");
+  const normalizedProvider = lower(
+    provider || body.provider || funds || destination || "paynoval"
+  );
 
   const method = normalizeMethod(body.method, {
     funds,
@@ -304,9 +332,17 @@ function buildStrictInitiateBody(rawBody = {}, flow, provider) {
   const quoteId = norm(body.quoteId);
   const effectivePricingId = pricingId || quoteId;
 
-  const country = normalizeCountry(body.country || body.toCountry || body.destinationCountry);
-  const fromCountry = normalizeCountry(body.fromCountry || body.sourceCountry);
-  const toCountry = normalizeCountry(body.toCountry || body.destinationCountry || body.country);
+  const country = normalizeCountry(
+    body.country || body.toCountry || body.destinationCountry
+  );
+
+  const fromCountry = normalizeCountry(
+    body.fromCountry || body.sourceCountry || body.country
+  );
+
+  const toCountry = normalizeCountry(
+    body.toCountry || body.destinationCountry || body.country
+  );
 
   const recipientInfo = normalizeRecipientInfo(body);
   const toEmail = lower(body.toEmail || recipientInfo?.email || "");
@@ -352,8 +388,12 @@ function buildStrictInitiateBody(rawBody = {}, flow, provider) {
     currency: upper(body.currency || body.currencySource || ""),
     currencySource: upper(body.currencySource || body.currency || ""),
     currencyTarget: upper(body.currencyTarget || body.localCurrencyCode || ""),
-    senderCurrencyCode: upper(body.senderCurrencyCode || body.currencySource || body.currency || ""),
-    localCurrencyCode: upper(body.localCurrencyCode || body.currencyTarget || ""),
+    senderCurrencyCode: upper(
+      body.senderCurrencyCode || body.currencySource || body.currency || ""
+    ),
+    localCurrencyCode: upper(
+      body.localCurrencyCode || body.currencyTarget || ""
+    ),
 
     meta: cleanUndefinedDeep({
       ...(body.meta || {}),
@@ -379,6 +419,11 @@ async function resolveRouteContextForAction(req, action) {
       ? normalizeSecurityFields(req.body || {})
       : { ...(req.body || {}) };
 
+  console.log("[Gateway][resolveRouteContextForAction] input", {
+    action,
+    body,
+  });
+
   const transactionId = getTransactionIdFromReq(req);
   const canonicalTx = transactionId
     ? await fetchCanonicalTransaction(req, transactionId)
@@ -396,6 +441,17 @@ async function resolveRouteContextForAction(req, action) {
   });
 
   const serviceUrl = getTargetService(provider);
+
+  console.log("[Gateway][resolveRouteContextForAction] resolved", {
+    action,
+    transactionId,
+    flow,
+    provider,
+    serviceUrl,
+    canonicalFound: !!canonicalTx,
+    canonicalProvider: canonicalTx?.provider,
+    canonicalFlow: canonicalTx?.flow,
+  });
 
   if (!serviceUrl) {
     const e = new Error(`Aucun service configuré pour le provider: ${provider}`);
@@ -417,122 +473,228 @@ async function resolveRouteContextForAction(req, action) {
 }
 
 async function dispatchToProvider({ req, provider, serviceUrl, endpoint, body }) {
-  switch (provider) {
-    case "mobilemoney":
-      return postToMobileMoneyService({
-        req,
-        serviceUrl,
-        endpoint,
-        body,
-      });
+  console.log("[Gateway][dispatchToProvider] start", {
+    provider,
+    serviceUrl,
+    endpoint,
+    body,
+  });
 
-    case "bank":
-      return postToBankService({
-        req,
-        serviceUrl,
-        endpoint,
-        body,
-      });
+  try {
+    let out;
 
-    case "stripe":
-    case "visa_direct":
-      return postToCardService({
-        req,
-        serviceUrl,
-        endpoint,
-        body,
-      });
+    switch (provider) {
+      case "mobilemoney":
+        out = await postToMobileMoneyService({
+          req,
+          serviceUrl,
+          endpoint,
+          body,
+        });
+        break;
 
-    case "paynoval":
-    default:
-      return postToPaynovalService({
-        req,
-        serviceUrl,
-        endpoint,
-        body,
-      });
+      case "bank":
+        out = await postToBankService({
+          req,
+          serviceUrl,
+          endpoint,
+          body,
+        });
+        break;
+
+      case "stripe":
+      case "visa_direct":
+        out = await postToCardService({
+          req,
+          serviceUrl,
+          endpoint,
+          body,
+        });
+        break;
+
+      case "paynoval":
+      default:
+        out = await postToPaynovalService({
+          req,
+          serviceUrl,
+          endpoint,
+          body,
+        });
+        break;
+    }
+
+    console.log("[Gateway][dispatchToProvider] success", {
+      provider,
+      endpoint,
+      status: out?.status,
+      body: out?.body,
+    });
+
+    return out;
+  } catch (err) {
+    console.log("[Gateway][dispatchToProvider] failed", {
+      provider,
+      endpoint,
+      serviceUrl,
+      message: err?.message,
+      status: err?.status || err?.response?.status,
+      payload: err?.payload,
+      responseData: err?.response?.data,
+      stack: err?.stack,
+      body,
+    });
+    throw err;
   }
 }
 
 async function routeInitiateByFlow(req) {
-  normalizeMobileMoneyProviderInBody(req);
+  try {
+    normalizeMobileMoneyProviderInBody(req);
 
-  const flow = resolveTransactionFlow(req.body || {});
-  const userId = getUserId(req);
+    console.log("[Gateway][routeInitiateByFlow] raw body", req.body);
 
-  if (!userId) {
-    const e = new Error("Non autorisé (utilisateur manquant).");
-    e.status = 401;
-    throw e;
+    const flow = resolveTransactionFlow(req.body || {});
+    const userId = getUserId(req);
+
+    console.log("[Gateway][routeInitiateByFlow] resolved flow", {
+      flow,
+      userId,
+    });
+
+    if (!userId) {
+      const e = new Error("Non autorisé (utilisateur manquant).");
+      e.status = 401;
+      throw e;
+    }
+
+    if (flow === TRANSACTION_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL) {
+      console.log("[Gateway][routeInitiateByFlow] enforceDepositPhoneTrust start");
+      await enforceDepositPhoneTrust(req);
+      console.log("[Gateway][routeInitiateByFlow] enforceDepositPhoneTrust success");
+    }
+
+    const bodyWithSecurity = normalizeSecurityFields(req.body || {});
+    const provider = getProviderForFlow({
+      flow,
+      body: bodyWithSecurity,
+      canonicalTx: null,
+    });
+    const serviceUrl = getTargetService(provider);
+
+    console.log("[Gateway][routeInitiateByFlow] provider resolved", {
+      flow,
+      provider,
+      serviceUrl,
+      bodyWithSecurity,
+    });
+
+    if (!serviceUrl) {
+      const e = new Error(`Aucun service configuré pour le provider: ${provider}`);
+      e.status = 400;
+      throw e;
+    }
+
+    const strictBody = buildStrictInitiateBody(bodyWithSecurity, flow, provider);
+
+    console.log("[Gateway][routeInitiateByFlow][strictBody]", strictBody);
+    console.log("[Gateway][routeInitiateByFlow][strictBody.json]", toSafeJson(strictBody));
+
+    if (!strictBody.effectivePricingId) {
+      const e = new Error("pricingId ou quoteId requis");
+      e.status = 400;
+      throw e;
+    }
+
+    if (!strictBody.amount || strictBody.amount <= 0) {
+      const e = new Error("Montant invalide");
+      e.status = 400;
+      throw e;
+    }
+
+    if (!strictBody.fromCountry || !strictBody.toCountry) {
+      const e = new Error("Pays source/destination invalides");
+      e.status = 400;
+      throw e;
+    }
+
+    if (
+      flow === TRANSACTION_FLOWS.PAYNOVAL_INTERNAL_TRANSFER &&
+      !strictBody.toEmail
+    ) {
+      const e = new Error("Email du destinataire requis pour un transfert interne");
+      e.status = 400;
+      throw e;
+    }
+
+    req.transactionFlow = flow;
+    req.providerSelected = provider;
+    req.routedProvider = provider;
+    req.body = strictBody;
+
+    console.log("[Gateway][routeInitiateByFlow] dispatching", {
+      flow,
+      provider,
+      serviceUrl,
+      endpoint: "/transactions/initiate",
+    });
+
+    return await dispatchToProvider({
+      req,
+      provider,
+      serviceUrl,
+      endpoint: "/transactions/initiate",
+      body: strictBody,
+    });
+  } catch (err) {
+    console.log("[Gateway][routeInitiateByFlow] failed", {
+      message: err?.message,
+      status: err?.status || err?.response?.status,
+      payload: err?.payload,
+      responseData: err?.response?.data,
+      stack: err?.stack,
+      requestBody: req?.body,
+    });
+    throw err;
   }
-
-  if (flow === TRANSACTION_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL) {
-    await enforceDepositPhoneTrust(req);
-  }
-
-  const bodyWithSecurity = normalizeSecurityFields(req.body || {});
-  const provider = getProviderForFlow({ flow, body: bodyWithSecurity, canonicalTx: null });
-  const serviceUrl = getTargetService(provider);
-
-  if (!serviceUrl) {
-    const e = new Error(`Aucun service configuré pour le provider: ${provider}`);
-    e.status = 400;
-    throw e;
-  }
-
-  const strictBody = buildStrictInitiateBody(bodyWithSecurity, flow, provider);
-
-  if (!strictBody.effectivePricingId) {
-    const e = new Error("pricingId ou quoteId requis");
-    e.status = 400;
-    throw e;
-  }
-
-  if (!strictBody.amount || strictBody.amount <= 0) {
-    const e = new Error("Montant invalide");
-    e.status = 400;
-    throw e;
-  }
-
-  if (!strictBody.fromCountry || !strictBody.toCountry) {
-    const e = new Error("Pays source/destination invalides");
-    e.status = 400;
-    throw e;
-  }
-
-  if (
-    flow === TRANSACTION_FLOWS.PAYNOVAL_INTERNAL_TRANSFER &&
-    !strictBody.toEmail
-  ) {
-    const e = new Error("Email du destinataire requis pour un transfert interne");
-    e.status = 400;
-    throw e;
-  }
-
-  req.transactionFlow = flow;
-  req.providerSelected = provider;
-  req.routedProvider = provider;
-  req.body = strictBody;
-
-  return dispatchToProvider({
-    req,
-    provider,
-    serviceUrl,
-    endpoint: "/transactions/initiate",
-    body: strictBody,
-  });
 }
 
 async function routeActionByFlow(req, action) {
-  const ctx = await resolveRouteContextForAction(req, action);
+  try {
+    console.log("[Gateway][routeActionByFlow] start", {
+      action,
+      body: req?.body,
+      params: req?.params,
+      query: req?.query,
+    });
 
-  return dispatchToProvider({
-    req,
-    provider: ctx.provider,
-    serviceUrl: ctx.serviceUrl,
-    endpoint: `/transactions/${action}`,
-    body: ctx.body,
-  });
+    const ctx = await resolveRouteContextForAction(req, action);
+
+    console.log("[Gateway][routeActionByFlow] ctx", {
+      action,
+      flow: ctx.flow,
+      provider: ctx.provider,
+      serviceUrl: ctx.serviceUrl,
+      body: ctx.body,
+    });
+
+    return await dispatchToProvider({
+      req,
+      provider: ctx.provider,
+      serviceUrl: ctx.serviceUrl,
+      endpoint: `/transactions/${action}`,
+      body: ctx.body,
+    });
+  } catch (err) {
+    console.log("[Gateway][routeActionByFlow] failed", {
+      action,
+      message: err?.message,
+      status: err?.status || err?.response?.status,
+      payload: err?.payload,
+      responseData: err?.response?.data,
+      stack: err?.stack,
+    });
+    throw err;
+  }
 }
 
 module.exports = {
