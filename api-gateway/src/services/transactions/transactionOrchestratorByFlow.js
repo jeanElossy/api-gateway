@@ -14,6 +14,13 @@
  *   1) de la transaction canonique
  *   2) du flow
  *   3) du body en dernier recours
+ *
+ * Correctifs robustesse :
+ * - normalisation des security fields
+ * - normalisation des pays (FR, CI, ...)
+ * - normalisation method / txType
+ * - support pricingId OU quoteId
+ * - support payload mobile "souple" -> payload TX Core "strict"
  * --------------------------------------------------------------------------
  */
 
@@ -43,6 +50,107 @@ const { postToCardService } = require("./providerAdapters/cardAdapter");
 
 function cleanBaseUrl(url) {
   return String(url || "").replace(/\/+$/, "");
+}
+
+function norm(v) {
+  return String(v || "").trim();
+}
+
+function lower(v) {
+  return norm(v).toLowerCase();
+}
+
+function upper(v) {
+  return norm(v).toUpperCase();
+}
+
+function isNil(v) {
+  return v === undefined || v === null;
+}
+
+function cleanUndefinedDeep(value) {
+  if (Array.isArray(value)) {
+    return value.map(cleanUndefinedDeep);
+  }
+
+  if (!value || typeof value !== "object") return value;
+
+  const out = {};
+  for (const [key, val] of Object.entries(value)) {
+    if (isNil(val)) continue;
+    out[key] = cleanUndefinedDeep(val);
+  }
+  return out;
+}
+
+const COUNTRY_ALIASES = {
+  "cote d'ivoire": "CI",
+  "cote d ivoire": "CI",
+  "cote divoire": "CI",
+  "ivory coast": "CI",
+  "france": "FR",
+  "belgique": "BE",
+  "belgium": "BE",
+  "allemagne": "DE",
+  "germany": "DE",
+  "canada": "CA",
+  "usa": "US",
+  "us": "US",
+  "united states": "US",
+  "senegal": "SN",
+  "mali": "ML",
+  "burkina faso": "BF",
+  "cameroun": "CM",
+  "cameroon": "CM",
+};
+
+function normalizeCountry(v) {
+  const raw = lower(v)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  if (!raw) return "";
+
+  if (/^[A-Z]{2}$/i.test(norm(v))) {
+    return upper(v);
+  }
+
+  if (COUNTRY_ALIASES[raw]) {
+    return COUNTRY_ALIASES[raw];
+  }
+
+  return upper(raw);
+}
+
+function normalizeTxType(v) {
+  const txType = upper(v);
+  if (txType === "DEPOSIT") return "DEPOSIT";
+  if (txType === "WITHDRAW") return "WITHDRAW";
+  return "TRANSFER";
+}
+
+function normalizeMethod(v, { funds = "", destination = "", provider = "" } = {}) {
+  const method = upper(v);
+  const f = lower(funds);
+  const d = lower(destination);
+  const p = lower(provider);
+
+  if (method === "INTERNAL") return "INTERNAL";
+
+  if (f === "paynoval" && d === "paynoval") {
+    return "INTERNAL";
+  }
+
+  if (method === "BANK") return "BANK";
+  if (method === "CARD") return "CARD";
+  if (method === "MOBILEMONEY") return "MOBILEMONEY";
+  if (method === "MOBILE_MONEY") return "MOBILEMONEY";
+
+  if (d === "bank" || p === "bank") return "BANK";
+  if (d === "mobilemoney" || p === "mobilemoney") return "MOBILEMONEY";
+  if (d === "stripe" || p === "stripe" || p === "visa_direct") return "CARD";
+
+  return method || "INTERNAL";
 }
 
 function normalizeSecurityFields(body = {}) {
@@ -139,12 +247,137 @@ async function fetchCanonicalTransaction(req, transactionId) {
   }
 }
 
+function normalizeRecipientInfo(body = {}) {
+  const original = body?.recipientInfo && typeof body.recipientInfo === "object"
+    ? body.recipientInfo
+    : {};
+
+  const email = lower(body?.toEmail || original?.email || original?.mail || "");
+  let name = norm(
+    original?.name ||
+      original?.accountHolderName ||
+      original?.holder ||
+      ""
+  );
+
+  if (email && name && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(name)) {
+    name = "";
+  }
+
+  return cleanUndefinedDeep({
+    ...original,
+    email: email || undefined,
+    name: name || undefined,
+    accountHolderName:
+      norm(original?.accountHolderName || name) || undefined,
+    holder: norm(original?.holder) || undefined,
+    bankName: norm(original?.bankName) || undefined,
+    country: norm(original?.country) || undefined,
+    generic: norm(original?.generic) || undefined,
+    operator: norm(original?.operator) || undefined,
+    phone: norm(original?.phone) || undefined,
+    numero: norm(original?.numero) || undefined,
+    summary:
+      norm(original?.summary) ||
+      name ||
+      email ||
+      undefined,
+  });
+}
+
+function buildStrictInitiateBody(rawBody = {}, flow, provider) {
+  const body = normalizeSecurityFields(rawBody || {});
+
+  const funds = lower(body.funds);
+  const destination = lower(body.destination);
+  const normalizedProvider = lower(provider || body.provider || funds || destination || "paynoval");
+
+  const method = normalizeMethod(body.method, {
+    funds,
+    destination,
+    provider: normalizedProvider,
+  });
+
+  const txType = normalizeTxType(body.txType);
+
+  const pricingId = norm(body.pricingId);
+  const quoteId = norm(body.quoteId);
+  const effectivePricingId = pricingId || quoteId;
+
+  const country = normalizeCountry(body.country || body.toCountry || body.destinationCountry);
+  const fromCountry = normalizeCountry(body.fromCountry || body.sourceCountry);
+  const toCountry = normalizeCountry(body.toCountry || body.destinationCountry || body.country);
+
+  const recipientInfo = normalizeRecipientInfo(body);
+  const toEmail = lower(body.toEmail || recipientInfo?.email || "");
+
+  const amountSource = Number(body.amountSource ?? body.amount ?? 0) || 0;
+  const feeSource = Number(body.feeSource ?? body.transactionFees ?? 0) || 0;
+  const amountTarget = Number(body.amountTarget ?? body.localAmount ?? 0) || 0;
+  const exchangeRate = Number(body.fxRateSourceToTarget ?? body.exchangeRate ?? 0) || 0;
+
+  const strictBody = cleanUndefinedDeep({
+    ...body,
+
+    provider: normalizedProvider,
+    funds,
+    destination,
+    method,
+    txType,
+
+    pricingId: pricingId || undefined,
+    quoteId: quoteId || undefined,
+    effectivePricingId: effectivePricingId || undefined,
+
+    country: country || undefined,
+    fromCountry: fromCountry || undefined,
+    toCountry: toCountry || undefined,
+    sourceCountry: fromCountry || undefined,
+    destinationCountry: toCountry || undefined,
+    targetCountry: toCountry || undefined,
+
+    toEmail: toEmail || undefined,
+    recipientInfo,
+
+    securityQuestion: norm(body.securityQuestion) || undefined,
+    securityAnswer: norm(body.securityAnswer) || undefined,
+
+    amount: amountSource,
+    amountSource,
+    feeSource,
+    amountTarget,
+    exchangeRate,
+    fxRateSourceToTarget: exchangeRate,
+
+    currency: upper(body.currency || body.currencySource || ""),
+    currencySource: upper(body.currencySource || body.currency || ""),
+    currencyTarget: upper(body.currencyTarget || body.localCurrencyCode || ""),
+    senderCurrencyCode: upper(body.senderCurrencyCode || body.currencySource || body.currency || ""),
+    localCurrencyCode: upper(body.localCurrencyCode || body.currencyTarget || ""),
+
+    meta: cleanUndefinedDeep({
+      ...(body.meta || {}),
+      flow:
+        body?.meta?.flow ||
+        (flow === TRANSACTION_FLOWS.PAYNOVAL_INTERNAL_TRANSFER
+          ? "PAYNOVAL_TO_PAYNOVAL"
+          : "EXTERNAL"),
+      pricingId: pricingId || undefined,
+      quoteId: quoteId || undefined,
+      effectivePricingId: effectivePricingId || undefined,
+    }),
+  });
+
+  return strictBody;
+}
+
 async function resolveRouteContextForAction(req, action) {
   normalizeMobileMoneyProviderInBody(req);
 
-  const body = action === "confirm"
-    ? normalizeSecurityFields(req.body || {})
-    : { ...(req.body || {}) };
+  const body =
+    action === "confirm"
+      ? normalizeSecurityFields(req.body || {})
+      : { ...(req.body || {}) };
 
   const transactionId = getTransactionIdFromReq(req);
   const canonicalTx = transactionId
@@ -237,8 +470,8 @@ async function routeInitiateByFlow(req) {
     await enforceDepositPhoneTrust(req);
   }
 
-  const body = normalizeSecurityFields(req.body || {});
-  const provider = getProviderForFlow({ flow, body, canonicalTx: null });
+  const bodyWithSecurity = normalizeSecurityFields(req.body || {});
+  const provider = getProviderForFlow({ flow, body: bodyWithSecurity, canonicalTx: null });
   const serviceUrl = getTargetService(provider);
 
   if (!serviceUrl) {
@@ -247,16 +480,46 @@ async function routeInitiateByFlow(req) {
     throw e;
   }
 
+  const strictBody = buildStrictInitiateBody(bodyWithSecurity, flow, provider);
+
+  if (!strictBody.effectivePricingId) {
+    const e = new Error("pricingId ou quoteId requis");
+    e.status = 400;
+    throw e;
+  }
+
+  if (!strictBody.amount || strictBody.amount <= 0) {
+    const e = new Error("Montant invalide");
+    e.status = 400;
+    throw e;
+  }
+
+  if (!strictBody.fromCountry || !strictBody.toCountry) {
+    const e = new Error("Pays source/destination invalides");
+    e.status = 400;
+    throw e;
+  }
+
+  if (
+    flow === TRANSACTION_FLOWS.PAYNOVAL_INTERNAL_TRANSFER &&
+    !strictBody.toEmail
+  ) {
+    const e = new Error("Email du destinataire requis pour un transfert interne");
+    e.status = 400;
+    throw e;
+  }
+
   req.transactionFlow = flow;
   req.providerSelected = provider;
   req.routedProvider = provider;
+  req.body = strictBody;
 
   return dispatchToProvider({
     req,
     provider,
     serviceUrl,
     endpoint: "/transactions/initiate",
-    body,
+    body: strictBody,
   });
 }
 
@@ -274,6 +537,11 @@ async function routeActionByFlow(req, action) {
 
 module.exports = {
   normalizeSecurityFields,
+  normalizeCountry,
+  normalizeMethod,
+  normalizeTxType,
+  normalizeRecipientInfo,
+  buildStrictInitiateBody,
   getProviderForFlow,
   fetchCanonicalTransaction,
   resolveRouteContextForAction,
