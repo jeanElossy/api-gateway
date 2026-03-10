@@ -1,6 +1,22 @@
 // File: routes/transactions.js
 "use strict";
 
+/**
+ * --------------------------------------------------------------------------
+ * Gateway Transactions Routes
+ * --------------------------------------------------------------------------
+ * Rôle :
+ * - exposer les endpoints transactionnels au mobile/web/admin
+ * - protéger les routes user avec JWT
+ * - autoriser certaines routes techniques internes via x-internal-token
+ *
+ * IMPORTANT :
+ * - /internal/log = route technique interne seulement
+ * - toutes les autres routes = JWT requis
+ * - les actions admin = JWT + rôle admin/superadmin
+ * --------------------------------------------------------------------------
+ */
+
 const express = require("express");
 const crypto = require("crypto");
 
@@ -8,11 +24,8 @@ const amlMiddleware = require("../src/middlewares/aml");
 const validateTransaction = require("../src/middlewares/validateTransaction");
 const controller = require("../controllers/transactionsController");
 const { requireRole } = require("../src/middlewares/authz");
-
-// ✅ IMPORTANT: protège VRAIMENT les routes user
 const { protect } = require("../src/middlewares/auth");
 
-// ✅ config path robuste
 let config = null;
 try {
   config = require("../src/config");
@@ -22,62 +35,172 @@ try {
 
 const router = express.Router();
 
+/* -------------------------------------------------------------------------- */
+/* Helpers                                                                    */
+/* -------------------------------------------------------------------------- */
+
 /**
- * Vérification du token interne pour les appels techniques (GATEWAY)
+ * Récupère la première valeur d'un header si tableau, sinon string.
+ */
+function firstHeaderValue(v) {
+  if (Array.isArray(v)) return String(v[0] || "");
+  return String(v || "");
+}
+
+/**
+ * Compare 2 strings en timing-safe.
+ * Retourne false si tailles différentes ou si l'une des deux est vide.
+ */
+function safeEqualString(aRaw, bRaw) {
+  const a = Buffer.from(String(aRaw || "").trim(), "utf8");
+  const b = Buffer.from(String(bRaw || "").trim(), "utf8");
+
+  if (!a.length || !b.length) return false;
+  if (a.length !== b.length) return false;
+
+  try {
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Internal technical auth                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Vérification du token interne pour les appels techniques serveur-à-serveur.
+ *
+ * Sécurité :
  * - compare constant-time
- * - accepte string/array
+ * - supporte header string/array
+ * - n'accepte pas l'absence de secret côté serveur
+ *
+ * Usage :
+ * - réservé aux appels internes du gateway ou services de confiance
+ * - NE REMPLACE PAS un JWT user
  */
 function verifyInternalToken(req, res, next) {
-  const headerTokenRaw = req.headers["x-internal-token"];
-  const headerToken = Array.isArray(headerTokenRaw) ? headerTokenRaw[0] : headerTokenRaw || "";
+  const headerToken = firstHeaderValue(req.headers["x-internal-token"]);
 
   const expectedToken =
-    process.env.GATEWAY_INTERNAL_TOKEN || process.env.INTERNAL_TOKEN || config?.internalToken || "";
+    process.env.GATEWAY_INTERNAL_TOKEN ||
+    process.env.INTERNAL_TOKEN ||
+    config?.internalToken ||
+    "";
 
-  if (!expectedToken) {
-    return res
-      .status(401)
-      .json({ success: false, error: "Non autorisé (internal token absent côté serveur)." });
+  if (!String(expectedToken).trim()) {
+    return res.status(401).json({
+      success: false,
+      error: "Non autorisé (internal token absent côté serveur).",
+    });
   }
 
-  const a = Buffer.from(String(headerToken).trim());
-  const b = Buffer.from(String(expectedToken).trim());
-
-  const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+  const ok = safeEqualString(headerToken, expectedToken);
 
   if (!ok) {
-    return res.status(401).json({ success: false, error: "Non autorisé (internal token invalide)." });
+    return res.status(401).json({
+      success: false,
+      error: "Non autorisé (internal token invalide).",
+    });
   }
 
   return next();
 }
 
-// ✅ ROUTE INTERNE TECHNIQUE (NE DOIT PAS DEMANDER JWT)
-// /api/v1/transactions/internal/log
-router.post("/internal/log", verifyInternalToken, controller.logInternalTransaction);
+/* -------------------------------------------------------------------------- */
+/* Internal technical routes                                                  */
+/* -------------------------------------------------------------------------- */
 
-// ✅ TOUT LE RESTE => JWT OBLIGATOIRE (mobile/web user)
+/**
+ * Route technique interne.
+ * Ne doit pas demander de JWT user.
+ *
+ * Exemple :
+ * POST /api/v1/transactions/internal/log
+ */
+router.post(
+  "/internal/log",
+  verifyInternalToken,
+  controller.logInternalTransaction
+);
+
+/* -------------------------------------------------------------------------- */
+/* Protected user/admin routes                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Tout ce qui suit nécessite un JWT user valide.
+ */
 router.use(protect);
 
-// LIST toutes les transactions (proxy vers service + normalisation)
+/**
+ * LIST toutes les transactions
+ * Proxy vers le TX Core / service cible + normalisation gateway
+ */
 router.get("/", controller.listTransactions);
 
-// GET une transaction (proxy + normalisation)
+/**
+ * GET une transaction canonique
+ * Le gateway lit d'abord la transaction via le TX Core / PayNoval
+ */
 router.get("/:id", controller.getTransaction);
 
-// INITIATE : Validation + AML + proxy (OTP guard reste dans controller)
-router.post("/initiate", validateTransaction("initiate"), amlMiddleware, controller.initiateTransaction);
+/**
+ * INITIATE
+ * - validation d'entrée
+ * - AML middleware
+ * - routing flow-aware côté gateway
+ */
+router.post(
+  "/initiate",
+  validateTransaction("initiate"),
+  amlMiddleware,
+  controller.initiateTransaction
+);
 
-// CONFIRM (proxy)
-router.post("/confirm", validateTransaction("confirm"), controller.confirmTransaction);
+/**
+ * CONFIRM
+ * - validation d'entrée
+ * - routing flow-aware basé sur transaction canonique si transactionId fourni
+ */
+router.post(
+  "/confirm",
+  validateTransaction("confirm"),
+  controller.confirmTransaction
+);
 
-// CANCEL (proxy)
-router.post("/cancel", validateTransaction("cancel"), controller.cancelTransaction);
+/**
+ * CANCEL
+ * - validation d'entrée
+ * - routing flow-aware basé sur transaction canonique si transactionId fourni
+ */
+router.post(
+  "/cancel",
+  validateTransaction("cancel"),
+  controller.cancelTransaction
+);
 
-// REFUND : réservé admin/superadmin (proxy)
-router.post("/refund", requireRole(["admin", "superadmin"]), validateTransaction("refund"), controller.refundTransaction);
+/* -------------------------------------------------------------------------- */
+/* Admin routes                                                               */
+/* -------------------------------------------------------------------------- */
 
-// REASSIGN : réservé admin/superadmin (proxy)
+/**
+ * REFUND
+ * Réservé admin/superadmin
+ */
+router.post(
+  "/refund",
+  requireRole(["admin", "superadmin"]),
+  validateTransaction("refund"),
+  controller.refundTransaction
+);
+
+/**
+ * REASSIGN
+ * Réservé admin/superadmin
+ */
 router.post(
   "/reassign",
   requireRole(["admin", "superadmin"]),
@@ -85,7 +208,10 @@ router.post(
   controller.reassignTransaction
 );
 
-// VALIDATE : réservé admin/superadmin (proxy)
+/**
+ * VALIDATE
+ * Réservé admin/superadmin
+ */
 router.post(
   "/validate",
   requireRole(["admin", "superadmin"]),
@@ -93,7 +219,10 @@ router.post(
   controller.validateTransaction
 );
 
-// ARCHIVE : réservé admin/superadmin (proxy)
+/**
+ * ARCHIVE
+ * Réservé admin/superadmin
+ */
 router.post(
   "/archive",
   requireRole(["admin", "superadmin"]),
@@ -101,7 +230,10 @@ router.post(
   controller.archiveTransaction
 );
 
-// RELAUNCH : réservé admin/superadmin (proxy)
+/**
+ * RELAUNCH
+ * Réservé admin/superadmin
+ */
 router.post(
   "/relaunch",
   requireRole(["admin", "superadmin"]),

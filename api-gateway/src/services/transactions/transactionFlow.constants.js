@@ -1,0 +1,70 @@
+"use strict";
+
+/**
+ * Flows métier canoniques du gateway.
+ * Le flow décrit la nature métier de la transaction.
+ * Le provider n'est qu'un détail d'exécution.
+ */
+
+const TRANSACTION_FLOWS = Object.freeze({
+  PAYNOVAL_INTERNAL_TRANSFER: "PAYNOVAL_INTERNAL_TRANSFER",
+
+  MOBILEMONEY_COLLECTION_TO_PAYNOVAL: "MOBILEMONEY_COLLECTION_TO_PAYNOVAL",
+  PAYNOVAL_TO_MOBILEMONEY_PAYOUT: "PAYNOVAL_TO_MOBILEMONEY_PAYOUT",
+
+  CARD_TOPUP_TO_PAYNOVAL: "CARD_TOPUP_TO_PAYNOVAL",
+  PAYNOVAL_TO_CARD_PAYOUT: "PAYNOVAL_TO_CARD_PAYOUT",
+
+  BANK_TRANSFER_TO_PAYNOVAL: "BANK_TRANSFER_TO_PAYNOVAL",
+  PAYNOVAL_TO_BANK_PAYOUT: "PAYNOVAL_TO_BANK_PAYOUT",
+
+  UNKNOWN_FLOW: "UNKNOWN_FLOW",
+});
+
+const FLOW_TO_DEFAULT_PROVIDER = Object.freeze({
+  [TRANSACTION_FLOWS.PAYNOVAL_INTERNAL_TRANSFER]: "paynoval",
+
+  [TRANSACTION_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL]: "mobilemoney",
+  [TRANSACTION_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT]: "mobilemoney",
+
+  [TRANSACTION_FLOWS.CARD_TOPUP_TO_PAYNOVAL]: "stripe",
+  [TRANSACTION_FLOWS.PAYNOVAL_TO_CARD_PAYOUT]: "visa_direct",
+
+  [TRANSACTION_FLOWS.BANK_TRANSFER_TO_PAYNOVAL]: "bank",
+  [TRANSACTION_FLOWS.PAYNOVAL_TO_BANK_PAYOUT]: "bank",
+
+  [TRANSACTION_FLOWS.UNKNOWN_FLOW]: "paynoval",
+});
+
+function isKnownTransactionFlow(flow) {
+  return Object.values(TRANSACTION_FLOWS).includes(String(flow || ""));
+}
+
+function getDefaultProviderForFlow(flow) {
+  return FLOW_TO_DEFAULT_PROVIDER[flow] || "paynoval";
+}
+
+function isExternalPayoutFlow(flow) {
+  return [
+    TRANSACTION_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT,
+    TRANSACTION_FLOWS.PAYNOVAL_TO_BANK_PAYOUT,
+    TRANSACTION_FLOWS.PAYNOVAL_TO_CARD_PAYOUT,
+  ].includes(flow);
+}
+
+function isExternalCollectionFlow(flow) {
+  return [
+    TRANSACTION_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL,
+    TRANSACTION_FLOWS.BANK_TRANSFER_TO_PAYNOVAL,
+    TRANSACTION_FLOWS.CARD_TOPUP_TO_PAYNOVAL,
+  ].includes(flow);
+}
+
+module.exports = {
+  TRANSACTION_FLOWS,
+  FLOW_TO_DEFAULT_PROVIDER,
+  isKnownTransactionFlow,
+  getDefaultProviderForFlow,
+  isExternalPayoutFlow,
+  isExternalCollectionFlow,
+};
