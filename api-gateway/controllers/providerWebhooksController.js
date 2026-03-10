@@ -33,8 +33,8 @@ const logger = reqAny([
   "../utils/logger",
 ]);
 
-const { safeAxiosRequest } = require("../services/transactions/httpClient");
-const { getTargetService } = require("../services/transactions/providerRegistry");
+const { safeAxiosRequest } = require("../src/services/transactions/httpClient");
+const { getTargetService } = require("../src/services/transactions/providerRegistry");
 
 function buildForwardHeaders(req, providerName) {
   return {
