@@ -368,7 +368,7 @@ const PRINCIPAL_PREFIXES = [
   "/api/v1/announcements",
   "/api/v1/referrals",
   "/api/v1/internal/referrals",
-  "/api/v1/internal/referral"
+  "/api/v1/internal/referral",
 ];
 
 function makePrincipalProxy() {
