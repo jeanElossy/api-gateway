@@ -14,7 +14,8 @@ const {
   createProxyMiddleware,
   fixRequestBody,
   responseInterceptor,
-} = require("http-proxy-middleware");
+} = require("http-proxy-middleware"); 
+ 
 
 const config = require("./config");
 
@@ -22,6 +23,8 @@ const swaggerUi = require("swagger-ui-express");
 const YAML = require("yamljs");
 const path = require("path");
 const openapiSpec = YAML.load(path.join(__dirname, "../docs/openapi.yaml"));
+
+
 
 const { authMiddleware } = require("./middlewares/auth");
 const {
@@ -354,6 +357,7 @@ const PRINCIPAL_PREFIXES = [
   "/api/v1/devices",
   "/api/v1/verification",
   "/api/v1/kyc",
+  "/api/v1/kyb", 
   "/api/v1/badges",
   "/api/v1/upload",
   "/api/v1/rates",
