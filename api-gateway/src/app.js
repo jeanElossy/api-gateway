@@ -713,8 +713,6 @@
 
 
 
-
-
 "use strict";
 
 const express = require("express");
@@ -780,7 +778,8 @@ try {
   logger.info?.("[BOOT] PRINCIPAL_URL=" + String(config.principalUrl || ""));
 } catch {}
 
-app.set("trust proxy", true);
+// ✅ Corrige l’erreur express-rate-limit derrière proxy/CDN
+app.set("trust proxy", 1);
 
 /* -------------------------------------------------------------------------- */
 /* CORS                                                                       */
@@ -1282,6 +1281,14 @@ app.use((req, res, next) => {
 /* -------------------------------------------------------------------------- */
 
 app.use("/api/v1/public", (req, res, next) => {
+  const openPublicFx =
+    req.path === "/fx/latest" ||
+    req.path === "/fx/history";
+
+  if (openPublicFx) {
+    return next();
+  }
+
   if (!config.publicReadonlySecret) {
     return res.status(503).json({
       success: false,
@@ -1289,6 +1296,7 @@ app.use("/api/v1/public", (req, res, next) => {
         "Public read-only is not configured (missing PUBLIC_READONLY_HMAC_SECRET).",
     });
   }
+
   return requirePublicSignature(req, res, next);
 });
 
