@@ -54,32 +54,30 @@ const readLoginIdentifier = (req) => {
 };
 
 /**
- * ✅ Endpoints “noisy” (polling / refresh UI) :
- * -> on les exclut du bouclier global IP pour éviter les 429,
- * -> et on leur met (si besoin) un limiter dédié plus permissif.
+ * ✅ Endpoints “noisy” (polling / refresh UI)
+ * -> on les exclut du bouclier global IP pour éviter les 429
+ * -> et on leur met si besoin un limiter dédié plus permissif
  */
 function isNoisyPath(req) {
   const url = req.originalUrl || req.path || "";
 
-  // endpoints appelés au chargement (mobile/admin)
   const noisyPrefixes = [
     "/api/v1/users/me",
     "/api/v1/notifications",
     "/api/v1/balance",
     "/api/v1/rates",
     "/api/v1/badges",
-
-    // ✅ AJOUT: announcements est pollé très souvent (avec _ts)
     "/api/v1/announcements",
+
+    // ✅ back office transactions
+    "/api/v1/admin/transactions",
   ];
 
   return noisyPrefixes.some((p) => url === p || url.startsWith(p + "/"));
 }
 
 /* ------------------------------------------------------------------ */
-/* 1) Bouclier global par IP (protection infra)                         */
-/* Objectif: DDoS/loops -> mais NE DOIT PAS casser le "load" mobile.    */
-/* Donc: skip login + skip noisy (users/me, notifications, balance, etc)*/
+/* 1) Bouclier global par IP                                          */
 /* ------------------------------------------------------------------ */
 const globalIpLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -90,7 +88,7 @@ const globalIpLimiter = rateLimit({
   skip: (req) => {
     if (req.method === "OPTIONS") return true;
     if (isLoginPath(req)) return true;
-    if (isNoisyPath(req)) return true; // ✅ inclut announcements
+    if (isNoisyPath(req)) return true;
     return false;
   },
   handler: (req, res, _next, options) => {
@@ -111,13 +109,11 @@ const globalIpLimiter = rateLimit({
 });
 
 /* ------------------------------------------------------------------ */
-/* 2) Anti brute-force LOGIN (IP + identifiant)                         */
-/* - Ne compte pas les succès                                           */
-/* - Clé: ip + identifiant + path                                       */
+/* 2) Anti brute-force LOGIN                                          */
 /* ------------------------------------------------------------------ */
 const authLoginLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  max: 12, // ✅ un peu plus permissif
+  max: 12,
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.method === "OPTIONS",
@@ -148,9 +144,7 @@ const authLoginLimiter = rateLimit({
 });
 
 /* ------------------------------------------------------------------ */
-/* 3) Limiteur dédié /users/me                                          */
-/* - Plus permissif (refresh UI)                                        */
-/* - Clé par user si dispo (après auth), sinon IP                       */
+/* 3) Limiteur dédié /users/me                                        */
 /* ------------------------------------------------------------------ */
 const meLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -181,14 +175,11 @@ const meLimiter = rateLimit({
 });
 
 /* ------------------------------------------------------------------ */
-/* 4) ✅ Limiteur dédié /announcements                                   */
-/* - Route publique (user=null) souvent pollée par l’app                */
-/* - Clé IP + platform + locale + audience                              */
-/* - Permissif (évite les 429) tout en gardant un garde-fou             */
+/* 4) Limiteur dédié /announcements                                   */
 /* ------------------------------------------------------------------ */
 const announcementsLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 240, // ✅ 240/min (~4 req/sec) : suffisant même si _ts spam
+  max: 240,
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.method === "OPTIONS",
@@ -219,16 +210,60 @@ const announcementsLimiter = rateLimit({
 });
 
 /* ------------------------------------------------------------------ */
-/* 5) Limiteur global par user (routes protégées)                       */
-/* - /users/me a déjà son limiter dédié => OK                           */
-/* - /announcements est public => pas concerné                           */
+/* 5) Limiteur dédié admin transactions                               */
+/* ------------------------------------------------------------------ */
+const adminTransactionsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 180,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => {
+    const uid = req.user?.id || req.user?._id;
+    return uid ? `admin-tx:${uid}` : `admin-tx-ip:${getClientIp(req)}`;
+  },
+  handler: (req, res, _next, options) => {
+    logger.warn("[RateLimit][admin-transactions] Limit hit", {
+      userId: req.user && (req.user.id || req.user._id),
+      ip: getClientIp(req),
+      path: req.originalUrl,
+      method: req.method,
+    });
+
+    const retryAfter = setRetryAfter(res, options.windowMs);
+
+    return res.status(429).json({
+      success: false,
+      error: "Trop de requêtes sur les transactions admin. Réessaie dans un instant.",
+      retryAfter,
+    });
+  },
+});
+
+/* ------------------------------------------------------------------ */
+/* 6) Limiteur global par user                                        */
 /* ------------------------------------------------------------------ */
 const userLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 300,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.method === "OPTIONS" || !req.user,
+  skip: (req) => {
+    if (req.method === "OPTIONS") return true;
+    if (!req.user) return true;
+
+    const url = req.originalUrl || req.path || "";
+
+    // ✅ la route admin transactions a déjà son limiter dédié
+    if (
+      url === "/api/v1/admin/transactions" ||
+      url.startsWith("/api/v1/admin/transactions/")
+    ) {
+      return true;
+    }
+
+    return false;
+  },
   keyGenerator: (req) => {
     const uid = req.user?.id || req.user?._id;
     return uid ? `user:${uid}` : `ip:${getClientIp(req)}`;
@@ -255,6 +290,7 @@ module.exports = {
   globalIpLimiter,
   authLoginLimiter,
   meLimiter,
-  announcementsLimiter, // ✅ AJOUT
+  announcementsLimiter,
+  adminTransactionsLimiter,
   userLimiter,
 };

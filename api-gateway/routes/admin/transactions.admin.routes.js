@@ -1,44 +1,83 @@
-const express = require('express');
-const { requireRole } = require('../../src/middlewares/authz');
-const adminTxCtrl = require('../../controllers/adminTransactionsController');
-const { protect } = require('../../src/middlewares/auth');
+const express = require("express");
+const { requireRole } = require("../../src/middlewares/authz");
+const adminTxCtrl = require("../../controllers/adminTransactionsController");
+const { protect } = require("../../src/middlewares/auth");
 
-const router = express.Router(); // D'ABORD !
+const router = express.Router();
 
-// Toutes les routes requièrent un admin/superadmin authentifié
-router.use(protect, requireRole(['admin', 'superadmin']));
+/**
+ * Toutes les routes admin transactions :
+ * - JWT obligatoire
+ * - rôle admin/superadmin obligatoire
+ */
+router.use(protect, requireRole(["admin", "superadmin"]));
 
-// LIST (avec search/filtres/pagination)
-router.get('/', adminTxCtrl.listTransactions);
+/**
+ * EXPORT CSV
+ * IMPORTANT:
+ * cette route doit être déclarée AVANT "/:id"
+ * sinon Express peut interpréter "export" comme un id.
+ */
+router.get("/export/csv", adminTxCtrl.exportTransactionsCsv);
 
-// ONE
-router.get('/:id', adminTxCtrl.getTransactionById);
+/**
+ * LIST
+ * GET /api/v1/admin/transactions
+ */
+router.get("/", adminTxCtrl.listTransactions);
 
-// VALIDATE
-router.post('/:id/validate', adminTxCtrl.validateTransaction);
+/**
+ * ONE
+ * GET /api/v1/admin/transactions/:id
+ */
+router.get("/:id", adminTxCtrl.getTransactionById);
 
-// CANCEL
-router.post('/:id/cancel', adminTxCtrl.cancelTransaction);
+/**
+ * VALIDATE
+ * POST /api/v1/admin/transactions/:id/validate
+ */
+router.post("/:id/validate", adminTxCtrl.validateTransaction);
 
-// REFUND
-router.post('/:id/refund', adminTxCtrl.refundTransaction);
+/**
+ * CANCEL
+ * POST /api/v1/admin/transactions/:id/cancel
+ */
+router.post("/:id/cancel", adminTxCtrl.cancelTransaction);
 
-// REASSIGN
-router.post('/:id/reassign', adminTxCtrl.reassignTransaction);
+/**
+ * REFUND
+ * POST /api/v1/admin/transactions/:id/refund
+ */
+router.post("/:id/refund", adminTxCtrl.refundTransaction);
 
-// RELAUNCH
-router.post('/:id/relaunch', adminTxCtrl.relaunchTransaction);
+/**
+ * REASSIGN
+ * POST /api/v1/admin/transactions/:id/reassign
+ */
+router.post("/:id/reassign", adminTxCtrl.reassignTransaction);
 
-// ARCHIVE
-router.post('/:id/archive', adminTxCtrl.archiveTransaction);
+/**
+ * RELAUNCH
+ * POST /api/v1/admin/transactions/:id/relaunch
+ */
+router.post("/:id/relaunch", adminTxCtrl.relaunchTransaction);
 
-// UPDATE (assignation, note, ... : custom fields)
-router.put('/:id', adminTxCtrl.updateTransaction);
+/**
+ * ARCHIVE
+ * POST /api/v1/admin/transactions/:id/archive
+ */
+router.post("/:id/archive", adminTxCtrl.archiveTransaction);
 
-// SOFT DELETE (AML flag/archived)
-router.delete('/:id', adminTxCtrl.softDeleteTransaction);
+/**
+ * UPDATE
+ * PUT /api/v1/admin/transactions/:id
+ */
+router.put("/:id", adminTxCtrl.updateTransaction);
 
-// EXPORT CSV
-router.get('/export/csv', adminTxCtrl.exportTransactionsCsv);
+/**
+ * SOFT DELETE
+ * DELETE /api/v1/admin/transactions/:id
+ */
+router.delete("/:id", adminTxCtrl.softDeleteTransaction);
 
 module.exports = router;

@@ -29,6 +29,7 @@ const {
   authLoginLimiter,
   meLimiter,
   announcementsLimiter,
+  adminTransactionsLimiter,
   userLimiter,
 } = require("./middlewares/rateLimit");
 const { loggerMiddleware } = require("./middlewares/logger");
@@ -651,7 +652,14 @@ app.use("/api/v1/pay", paymentRoutes);
 app.use("/internal/transactions", internalTransactionsRouter);
 app.use("/api/v1/internal", internalRoutes);
 app.use("/api/v1/transactions", userTransactionRoutes);
-app.use("/api/v1/admin/transactions", transactionRoutes);
+
+// ✅ admin transactions avec limiter dédié
+app.use(
+  "/api/v1/admin/transactions",
+  adminTransactionsLimiter,
+  transactionRoutes
+);
+
 app.use("/api/v1/aml", amlRoutes);
 app.use("/api/v1/fees", feesRoutes);
 app.use("/api/v1/exchange-rates", exchangeRateRoutes);
