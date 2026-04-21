@@ -721,6 +721,8 @@
 
 
 
+
+
 "use strict";
 
 const express = require("express");
@@ -785,8 +787,12 @@ try {
   logger.info?.("[BOOT] PRINCIPAL_URL=" + String(config.principalUrl || ""));
 } catch {}
 
-// ✅ mieux derrière proxy/CDN/gateway chain
-app.set("trust proxy", true);
+/**
+ * IMPORTANT:
+ * 1 = un proxy de confiance devant la gateway
+ * évite ERR_ERL_PERMISSIVE_TRUST_PROXY avec express-rate-limit
+ */
+app.set("trust proxy", 1);
 
 /* -------------------------------------------------------------------------- */
 /* CORS                                                                       */
