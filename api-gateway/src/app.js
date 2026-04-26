@@ -802,7 +802,6 @@ const paymentRoutes = require("../routes/payment");
 const amlRoutes = require("../routes/aml");
 const feesRoutes = require("../routes/fees");
 const exchangeRateRoutes = require("../routes/admin/exchangeRates.routes");
-const commissionsRoutes = require("../routes/commissionsRoutes");
 const userTransactionRoutes = require("../routes/transactions");
 
 const internalTransactionsRouter = require("../routes/internalTransactions");
@@ -1525,7 +1524,7 @@ app.use("/api/v1/admin/transactions", adminTransactionsLimiter);
 app.use("/api/v1/aml", amlRoutes);
 app.use("/api/v1/fees", feesRoutes);
 app.use("/api/v1/exchange-rates", exchangeRateRoutes);
-app.use("/api/v1/commissions", commissionsRoutes);
+
 app.use("/api/v1/pricing", pricingRoutes);
 app.use("/api/v1/fx-rules", fxRulesRoutes);
 app.use("/api/v1/pricing-rules", pricingRulesRoutes);
