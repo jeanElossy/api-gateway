@@ -31,6 +31,7 @@
 //   adminTransactionsLimiter,
 //   userLimiter,
 // } = require("./middlewares/rateLimit");
+
 // const { loggerMiddleware } = require("./middlewares/logger");
 // const auditHeaders = require("./middlewares/auditHeaders");
 // const logger = require("./logger");
@@ -38,10 +39,8 @@
 
 // const paymentRoutes = require("../routes/payment");
 // const amlRoutes = require("../routes/aml");
-// const transactionRoutes = require("../routes/admin/transactions.admin.routes");
 // const feesRoutes = require("../routes/fees");
 // const exchangeRateRoutes = require("../routes/admin/exchangeRates.routes");
-// const commissionsRoutes = require("../routes/commissionsRoutes");
 // const userTransactionRoutes = require("../routes/transactions");
 
 // const internalTransactionsRouter = require("../routes/internalTransactions");
@@ -63,9 +62,7 @@
 // } catch {}
 
 // /**
-//  * IMPORTANT:
-//  * 1 = un proxy de confiance devant la gateway
-//  * évite ERR_ERL_PERMISSIVE_TRUST_PROXY avec express-rate-limit
+//  * 1 = un proxy de confiance devant la gateway.
 //  */
 // app.set("trust proxy", 1);
 
@@ -76,16 +73,16 @@
 // function buildAllowedOriginsSet() {
 //   const set = new Set();
 
-//   (config.cors?.origins || []).forEach((o) => o && set.add(o));
-//   (config.cors?.adminOrigins || []).forEach((o) => o && set.add(o));
-//   (config.cors?.mobileOrigins || []).forEach((o) => o && set.add(o));
+//   (config.cors?.origins || []).forEach((origin) => origin && set.add(origin));
+//   (config.cors?.adminOrigins || []).forEach((origin) => origin && set.add(origin));
+//   (config.cors?.mobileOrigins || []).forEach((origin) => origin && set.add(origin));
 
 //   [
 //     "http://localhost:3000",
 //     "http://127.0.0.1:3000",
 //     "http://localhost:5173",
 //     "http://127.0.0.1:5173",
-//   ].forEach((o) => set.add(o));
+//   ].forEach((origin) => set.add(origin));
 
 //   return set;
 // }
@@ -104,21 +101,33 @@
 //   "Content-Type",
 //   "Authorization",
 //   "X-Requested-With",
+
 //   "X-Request-Id",
 //   "x-request-id",
+
+//   "Idempotency-Key",
+//   "idempotency-key",
+//   "x-idempotency-key",
+
 //   "x-internal-token",
+//   "x-paynoval-internal-token",
+
 //   "Cache-Control",
 //   "Pragma",
 //   "Expires",
 //   "Accept",
 //   "Origin",
+
 //   "stripe-signature",
 //   "x-signature",
 //   "x-paynoval-signature",
+
 //   "X-Analytics-Key",
 //   "x-analytics-key",
+
 //   "X-Visitor-Id",
 //   "x-visitor-id",
+
 //   "X-Session-Id",
 //   "x-session-id",
 // ];
@@ -188,6 +197,7 @@
 
 // app.use(mongoSanitize());
 // app.use(xssClean());
+
 // app.use(
 //   hpp({
 //     whitelist: [
@@ -285,6 +295,7 @@
 // /* -------------------------------------------------------------------------- */
 
 // app.get("/openapi.json", (_req, res) => res.json(openapiSpec));
+
 // app.use(
 //   "/docs",
 //   swaggerUi.serve,
@@ -312,7 +323,10 @@
 // });
 
 // app.get("/healthz", (_req, res) =>
-//   res.json({ status: "ok", ts: new Date().toISOString() })
+//   res.json({
+//     status: "ok",
+//     ts: new Date().toISOString(),
+//   })
 // );
 
 // app.get("/status", async (_req, res) => {
@@ -320,21 +334,31 @@
 
 //   await Promise.all(
 //     getAllProviders().map(async (name) => {
-//       const p = getProvider(name);
-//       if (!p || !p.enabled) return;
+//       const provider = getProvider(name);
+//       if (!provider || !provider.enabled) return;
 
 //       try {
-//         const health = await axios.get(p.url + (p.health || "/health"), {
+//         const health = await axios.get(provider.url + (provider.health || "/health"), {
 //           timeout: 3000,
 //         });
-//         statuses[name] = { up: true, status: health.data?.status || "ok" };
+
+//         statuses[name] = {
+//           up: true,
+//           status: health.data?.status || "ok",
+//         };
 //       } catch (err) {
-//         statuses[name] = { up: false, error: err.message };
+//         statuses[name] = {
+//           up: false,
+//           error: err.message,
+//         };
 //       }
 //     })
 //   );
 
-//   res.json({ gateway: "ok", microservices: statuses });
+//   res.json({
+//     gateway: "ok",
+//     microservices: statuses,
+//   });
 // });
 
 // /* -------------------------------------------------------------------------- */
@@ -363,7 +387,15 @@
 //   "/api/v1/badges",
 //   "/api/v1/upload",
 //   "/api/v1/rates",
+
+//   /**
+//    * IMPORTANT :
+//    * Toutes les routes admin, y compris :
+//    * /api/v1/admin/transactions/:id/cancel-refund
+//    * vont maintenant vers le backend principal.
+//    */
 //   "/api/v1/admin",
+
 //   "/api/v1/feedback",
 //   "/api/v1/contact",
 //   "/api/v1/reports",
@@ -402,6 +434,7 @@
 //       if (pathReq.startsWith("/api/v1/analytics")) {
 //         return pathReq.replace(/^\/api\/v1\/analytics/, "/analytics");
 //       }
+
 //       return pathReq;
 //     },
 
@@ -412,16 +445,32 @@
 //         fixRequestBody(proxyReq, req);
 //       } catch {}
 
-//       const rid = req.headers["x-request-id"];
-//       if (rid) {
+//       const requestId = req.headers["x-request-id"];
+
+//       if (requestId) {
 //         try {
-//           proxyReq.setHeader("X-Request-Id", rid);
+//           proxyReq.setHeader("X-Request-Id", requestId);
 //         } catch {}
 //       }
 
 //       if (req.headers.authorization) {
 //         try {
 //           proxyReq.setHeader("Authorization", req.headers.authorization);
+//         } catch {}
+//       }
+
+//       if (req.headers["idempotency-key"]) {
+//         try {
+//           proxyReq.setHeader("idempotency-key", req.headers["idempotency-key"]);
+//         } catch {}
+//       }
+
+//       if (req.headers["x-idempotency-key"]) {
+//         try {
+//           proxyReq.setHeader(
+//             "x-idempotency-key",
+//             req.headers["x-idempotency-key"]
+//           );
 //         } catch {}
 //       }
 
@@ -460,20 +509,20 @@
 //     onProxyRes: responseInterceptor(
 //       async (responseBuffer, proxyRes, req, res) => {
 //         const status = proxyRes.statusCode || 502;
-//         const ct = String(proxyRes.headers["content-type"] || "");
+//         const contentType = String(proxyRes.headers["content-type"] || "");
 
-//         if (status === 429 && ct.includes("text/html")) {
+//         if (status === 429 && contentType.includes("text/html")) {
 //           res.setHeader("Content-Type", "application/json; charset=utf-8");
 //           return JSON.stringify({
 //             success: false,
 //             error: "UPSTREAM_RATE_LIMITED",
 //             message:
-//               "Le service principal a rejeté la requête (429). Cause probable: protection/anti-bot sur l'URL publique. Solution: utiliser l'Internal URL Render pour PRINCIPAL_URL.",
+//               "Le service principal a rejeté la requête (429). Cause probable : protection/anti-bot sur l'URL publique. Solution : utiliser l'Internal URL Render pour PRINCIPAL_URL.",
 //             path: req.originalUrl,
 //           });
 //         }
 
-//         if (status === 403 && ct.includes("text/html")) {
+//         if (status === 403 && contentType.includes("text/html")) {
 //           res.setHeader("Content-Type", "application/json; charset=utf-8");
 //           return JSON.stringify({
 //             success: false,
@@ -522,10 +571,11 @@
 //     logLevel: process.env.NODE_ENV === "production" ? "warn" : "debug",
 //     proxyTimeout: 30000,
 //     timeout: 30000,
+
 //     onProxyReqWs: (proxyReq, req) => {
 //       try {
-//         const rid = req.headers["x-request-id"];
-//         if (rid) proxyReq.setHeader("X-Request-Id", rid);
+//         const requestId = req.headers["x-request-id"];
+//         if (requestId) proxyReq.setHeader("X-Request-Id", requestId);
 
 //         if (config.principalInternalToken) {
 //           proxyReq.setHeader(
@@ -537,6 +587,7 @@
 //         proxyReq.setHeader("x-forwarded-service", "api-gateway");
 //       } catch {}
 //     },
+
 //     onError: (err, req, res) => {
 //       logger.error("[SOCKET PROXY] error", {
 //         message: err.message,
@@ -573,16 +624,20 @@
 //   "/docs",
 //   "/openapi.json",
 //   "/socket.io",
+
 //   "/api/v1/auth",
 //   "/api/v1/verification",
 //   "/api/v1/public",
+
 //   "/api/v1/fees/simulate",
 //   "/api/v1/commissions/simulate",
 //   "/api/v1/exchange-rates/rate",
 //   "/api/v1/pricing",
+
 //   "/internal/transactions",
 //   "/api/v1/internal",
 //   "/api/v1/transactions/internal",
+
 //   "/api/v1/jobs",
 //   "/api/v1/contact",
 //   "/api/v1/reports",
@@ -593,9 +648,11 @@
 
 // app.use((req, res, next) => {
 //   const isOpen = openEndpoints.some(
-//     (ep) => req.path === ep || req.path.startsWith(ep + "/")
+//     (endpoint) => req.path === endpoint || req.path.startsWith(endpoint + "/")
 //   );
+
 //   if (isOpen) return next();
+
 //   return authMiddleware(req, res, next);
 // });
 
@@ -649,22 +706,22 @@
 // });
 
 // /* -------------------------------------------------------------------------- */
-// /* Mongo readiness for selected routes                                        */
+// /* Mongo readiness for native gateway routes only                             */
 // /* -------------------------------------------------------------------------- */
 
 // const mongoRequiredPrefixes = [
-//   "/api/v1/admin",
 //   "/api/v1/aml",
 //   "/api/v1/fees",
 //   "/api/v1/commissions",
 //   "/api/v1/exchange-rates",
 //   "/api/v1/pricing",
 //   "/api/v1/fx-rules",
+//   "/api/v1/pricing-rules",
 // ];
 
 // app.use((req, res, next) => {
 //   const needsMongo = mongoRequiredPrefixes.some(
-//     (p) => req.path === p || req.path.startsWith(p + "/")
+//     (prefix) => req.path === prefix || req.path.startsWith(prefix + "/")
 //   );
 
 //   if (!needsMongo) return next();
@@ -691,16 +748,22 @@
 // app.use("/api/v1/internal", internalRoutes);
 // app.use("/api/v1/transactions", userTransactionRoutes);
 
-// app.use(
-//   "/api/v1/admin/transactions",
-//   adminTransactionsLimiter,
-//   transactionRoutes
-// );
+// /**
+//  * IMPORTANT :
+//  * Ancienne route native supprimée :
+//  *
+//  * const transactionRoutes = require("../routes/admin/transactions.admin.routes");
+//  * app.use("/api/v1/admin/transactions", adminTransactionsLimiter, transactionRoutes);
+//  *
+//  * Maintenant, /api/v1/admin/transactions part vers le backend principal.
+//  * On garde seulement le limiter, puis on laisse la requête continuer jusqu’au proxy final.
+//  */
+// app.use("/api/v1/admin/transactions", adminTransactionsLimiter);
 
 // app.use("/api/v1/aml", amlRoutes);
 // app.use("/api/v1/fees", feesRoutes);
 // app.use("/api/v1/exchange-rates", exchangeRateRoutes);
-// app.use("/api/v1/commissions", commissionsRoutes);
+
 // app.use("/api/v1/pricing", pricingRoutes);
 // app.use("/api/v1/fx-rules", fxRulesRoutes);
 // app.use("/api/v1/pricing-rules", pricingRulesRoutes);
@@ -710,8 +773,11 @@
 // /* -------------------------------------------------------------------------- */
 
 // if (principalProxy) {
-//   const uniq = Array.from(new Set(PRINCIPAL_PREFIXES));
-//   uniq.forEach((prefix) => app.use(prefix, principalProxy));
+//   const uniquePrefixes = Array.from(new Set(PRINCIPAL_PREFIXES));
+
+//   uniquePrefixes.forEach((prefix) => {
+//     app.use(prefix, principalProxy);
+//   });
 // }
 
 // /* -------------------------------------------------------------------------- */
@@ -719,7 +785,10 @@
 // /* -------------------------------------------------------------------------- */
 
 // app.use((req, res) =>
-//   res.status(404).json({ success: false, error: "Ressource non trouvée" })
+//   res.status(404).json({
+//     success: false,
+//     error: "Ressource non trouvée",
+//   })
 // );
 
 // /* -------------------------------------------------------------------------- */
@@ -745,7 +814,7 @@
 //     success: false,
 //     error:
 //       err.isJoi && err.details
-//         ? err.details.map((d) => d.message).join("; ")
+//         ? err.details.map((detail) => detail.message).join("; ")
 //         : err.message || "Erreur serveur",
 //   });
 // });
@@ -757,8 +826,7 @@
 
 
 
-
-
+// File: src/app.js
 "use strict";
 
 const express = require("express");
@@ -803,6 +871,7 @@ const amlRoutes = require("../routes/aml");
 const feesRoutes = require("../routes/fees");
 const exchangeRateRoutes = require("../routes/admin/exchangeRates.routes");
 const userTransactionRoutes = require("../routes/transactions");
+const adminComplianceRoutes = require("../routes/adminComplianceRoutes");
 
 const internalTransactionsRouter = require("../routes/internalTransactions");
 const internalRoutes = require("../routes/internalRoutes");
@@ -975,6 +1044,13 @@ app.use(
       "days",
       "siteId",
       "groupBy",
+
+      /**
+       * Compliance filters
+       */
+      "code",
+      "q",
+      "search",
     ],
   })
 );
@@ -1151,9 +1227,9 @@ const PRINCIPAL_PREFIXES = [
 
   /**
    * IMPORTANT :
-   * Toutes les routes admin, y compris :
-   * /api/v1/admin/transactions/:id/cancel-refund
-   * vont maintenant vers le backend principal.
+   * Toutes les routes admin non natives Gateway vont vers le backend principal.
+   * Les routes natives Gateway comme /api/v1/admin/compliance doivent être montées
+   * avant le proxy final.
    */
   "/api/v1/admin",
 
@@ -1520,6 +1596,20 @@ app.use("/api/v1/transactions", userTransactionRoutes);
  * On garde seulement le limiter, puis on laisse la requête continuer jusqu’au proxy final.
  */
 app.use("/api/v1/admin/transactions", adminTransactionsLimiter);
+
+/**
+ * Conformité transactions :
+ * Cette route doit rester AVANT le proxy final /api/v1/admin,
+ * sinon elle sera envoyée au backend principal.
+ *
+ * Endpoint :
+ * GET /api/v1/admin/compliance/transactions
+ */
+app.use(
+  "/api/v1/admin/compliance",
+  adminTransactionsLimiter,
+  adminComplianceRoutes
+);
 
 app.use("/api/v1/aml", amlRoutes);
 app.use("/api/v1/fees", feesRoutes);
