@@ -825,9 +825,66 @@
 
 
 
-
 // File: src/app.js
 "use strict";
+
+/* -------------------------------------------------------------------------- */
+/* Production log guard                                                       */
+/* -------------------------------------------------------------------------- */
+
+const NODE_ENV = process.env.NODE_ENV || "development";
+const IS_PRODUCTION = NODE_ENV === "production";
+const SILENCE_PROD_LOGS = process.env.SILENCE_PROD_LOGS !== "false";
+const SHOW_PROD_WARNINGS = process.env.SHOW_PROD_WARNINGS === "true";
+
+const originalConsole = {
+  log: console.log.bind(console),
+  info: console.info.bind(console),
+  debug: console.debug.bind(console),
+  warn: console.warn.bind(console),
+  error: console.error.bind(console),
+};
+
+function isDuplicateMongooseIndexWarning(value) {
+  const text =
+    typeof value === "string"
+      ? value
+      : String(value?.message || value?.stack || value || "");
+
+  return (
+    text.includes("[MONGOOSE] Warning: Duplicate schema index") ||
+    text.includes("Duplicate schema index")
+  );
+}
+
+if (IS_PRODUCTION && SILENCE_PROD_LOGS) {
+  console.log = () => {};
+  console.info = () => {};
+  console.debug = () => {};
+  console.warn = (...args) => {
+    const text = args.map((item) => String(item?.message || item || "")).join(" ");
+
+    if (isDuplicateMongooseIndexWarning(text)) return;
+
+    if (SHOW_PROD_WARNINGS) {
+      originalConsole.warn(...args);
+    }
+  };
+}
+
+process.on("warning", (warning) => {
+  if (IS_PRODUCTION && SILENCE_PROD_LOGS) {
+    if (isDuplicateMongooseIndexWarning(warning)) return;
+
+    if (SHOW_PROD_WARNINGS) {
+      originalConsole.warn(warning?.stack || warning?.message || warning);
+    }
+
+    return;
+  }
+
+  originalConsole.warn(warning?.stack || warning?.message || warning);
+});
 
 const express = require("express");
 const cors = require("cors");
@@ -884,12 +941,7 @@ const providerWebhooksRoutes = require("../routes/providerWebhookRoutes");
 
 const app = express();
 
-try {
-  logger.info?.("[BOOT] env=" + (config.nodeEnv || process.env.NODE_ENV));
-  logger.info?.("[BOOT] HMAC enabled=" + String(!!config.publicReadonlySecret));
-  logger.info?.("[BOOT] HMAC TTL=" + String(config.publicSignatureTtlSec));
-  logger.info?.("[BOOT] PRINCIPAL_URL=" + String(config.principalUrl || ""));
-} catch {}
+const shouldLogVerbose = !IS_PRODUCTION && config.nodeEnv !== "test";
 
 /**
  * 1 = un proxy de confiance devant la gateway.
@@ -904,8 +956,12 @@ function buildAllowedOriginsSet() {
   const set = new Set();
 
   (config.cors?.origins || []).forEach((origin) => origin && set.add(origin));
-  (config.cors?.adminOrigins || []).forEach((origin) => origin && set.add(origin));
-  (config.cors?.mobileOrigins || []).forEach((origin) => origin && set.add(origin));
+  (config.cors?.adminOrigins || []).forEach(
+    (origin) => origin && set.add(origin)
+  );
+  (config.cors?.mobileOrigins || []).forEach(
+    (origin) => origin && set.add(origin)
+  );
 
   [
     "http://localhost:3000",
@@ -996,7 +1052,7 @@ app.use((req, res, next) => {
     return res.sendStatus(204);
   }
 
-  next();
+  return next();
 });
 
 app.use(
@@ -1016,7 +1072,7 @@ app.use(
 );
 
 /* -------------------------------------------------------------------------- */
-/* Security / parsing / logging                                               */
+/* Security / parsing                                                         */
 /* -------------------------------------------------------------------------- */
 
 app.use(
@@ -1055,13 +1111,16 @@ app.use(
   })
 );
 
-if (config.nodeEnv !== "test") {
+if (shouldLogVerbose) {
   app.use(morgan(config.logging?.level === "debug" ? "dev" : "combined"));
 }
 
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
-app.use(loggerMiddleware);
+
+if (shouldLogVerbose) {
+  app.use(loggerMiddleware);
+}
 
 /* -------------------------------------------------------------------------- */
 /* Rate limits spécifiques                                                    */
@@ -1092,6 +1151,22 @@ function isSocketIoRequest(req) {
 function isPrivilegedRole(req) {
   const role = String(req?.user?.role || "").toLowerCase();
   return ["admin", "superadmin", "support"].includes(role);
+}
+
+function logErrorInNonProd(message, meta = {}) {
+  if (!shouldLogVerbose) return;
+
+  try {
+    logger.error?.(message, meta);
+  } catch {}
+}
+
+function logWarnInNonProd(message, meta = {}) {
+  if (!shouldLogVerbose) return;
+
+  try {
+    logger.warn?.(message, meta);
+  } catch {}
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1175,9 +1250,12 @@ app.get("/status", async (_req, res) => {
       if (!provider || !provider.enabled) return;
 
       try {
-        const health = await axios.get(provider.url + (provider.health || "/health"), {
-          timeout: 3000,
-        });
+        const health = await axios.get(
+          provider.url + (provider.health || "/health"),
+          {
+            timeout: 3000,
+          }
+        );
 
         statuses[name] = {
           up: true,
@@ -1250,7 +1328,9 @@ const PRINCIPAL_PREFIXES = [
 
 function makePrincipalProxy() {
   if (!PRINCIPAL_BASE) {
-    logger.warn?.("[PROXY] PRINCIPAL_BASE missing -> principal routes disabled");
+    logWarnInNonProd(
+      "[PROXY] PRINCIPAL_BASE missing -> principal routes disabled"
+    );
     return null;
   }
 
@@ -1261,7 +1341,7 @@ function makePrincipalProxy() {
     changeOrigin: true,
     xfwd: true,
     ws: true,
-    logLevel: process.env.NODE_ENV === "production" ? "warn" : "debug",
+    logLevel: IS_PRODUCTION ? "silent" : "debug",
     proxyTimeout: 30000,
     timeout: 30000,
     secure: !isHttp,
@@ -1375,7 +1455,7 @@ function makePrincipalProxy() {
     ),
 
     onError: (err, req, res) => {
-      logger.error("[PROXY principal] error", {
+      logErrorInNonProd("[PROXY principal] error", {
         message: err.message,
         path: req.originalUrl,
       });
@@ -1393,7 +1473,9 @@ function makePrincipalProxy() {
 
 function makePrincipalSocketProxy() {
   if (!PRINCIPAL_BASE) {
-    logger.warn?.("[SOCKET PROXY] PRINCIPAL_BASE missing -> socket proxy disabled");
+    logWarnInNonProd(
+      "[SOCKET PROXY] PRINCIPAL_BASE missing -> socket proxy disabled"
+    );
     return null;
   }
 
@@ -1405,7 +1487,7 @@ function makePrincipalSocketProxy() {
     xfwd: true,
     ws: true,
     secure: !isHttp,
-    logLevel: process.env.NODE_ENV === "production" ? "warn" : "debug",
+    logLevel: IS_PRODUCTION ? "silent" : "debug",
     proxyTimeout: 30000,
     timeout: 30000,
 
@@ -1426,7 +1508,7 @@ function makePrincipalSocketProxy() {
     },
 
     onError: (err, req, res) => {
-      logger.error("[SOCKET PROXY] error", {
+      logErrorInNonProd("[SOCKET PROXY] error", {
         message: err.message,
         path: req.originalUrl,
       });
@@ -1564,7 +1646,8 @@ app.use((req, res, next) => {
   if (!needsMongo) return next();
 
   if (mongoose.connection.readyState !== 1) {
-    logger.error("[MONGO] Requête refusée, MongoDB non connecté !");
+    logErrorInNonProd("[MONGO] Requête refusée, MongoDB non connecté !");
+
     return res.status(500).json({
       success: false,
       error: "MongoDB non connecté",
@@ -1647,17 +1730,19 @@ app.use((req, res) =>
 /* -------------------------------------------------------------------------- */
 
 app.use((err, req, res, _next) => {
-  logger.error("[API ERROR]", {
-    message: err.message,
-    stack: err.stack,
-    status: err.status,
-    path: req.originalUrl,
-    method: req.method,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
-    userAgent: req.headers["user-agent"],
-    user: req.user?.email,
-    body: req.body,
-  });
+  if (!IS_PRODUCTION) {
+    logger.error("[API ERROR]", {
+      message: err.message,
+      stack: err.stack,
+      status: err.status,
+      path: req.originalUrl,
+      method: req.method,
+      ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
+      userAgent: req.headers["user-agent"],
+      user: req.user?.email,
+      body: req.body,
+    });
+  }
 
   setCorsHeaders(req, res);
 
