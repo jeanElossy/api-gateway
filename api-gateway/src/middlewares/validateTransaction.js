@@ -20,6 +20,8 @@
 //  * - initiate = validation la plus riche
 //  * - confirm/cancel/admin = validation plus souple pour laisser
 //  *   le gateway résoudre le flow réel depuis la transaction canonique
+//  * - les vérifications email/téléphone/KYC/KYB doivent rester dans
+//  *   requireTransactionEligibility, pas ici.
 //  * --------------------------------------------------------------------------
 //  */
 
@@ -31,7 +33,7 @@
 //   "visa_direct",
 //   "stripe2momo",
 //   "flutterwave",
-//   "card", // compat front éventuelle
+//   "card",
 // ];
 
 // const MOBILEMONEY_OPERATORS = ["orange", "mtn", "moov", "wave", "flutterwave"];
@@ -46,14 +48,21 @@
 
 // function normalizeProviderLike(v) {
 //   const s = low(v);
+
 //   if (["visadirect", "visa-direct"].includes(s)) return "visa_direct";
+//   if (s === "mobile_money") return "mobilemoney";
+
 //   return s;
 // }
 
 // function normalizeRailLike(v) {
 //   const s = normalizeProviderLike(v);
+
 //   if (["stripe", "visa_direct", "card"].includes(s)) return "card";
-//   if (["wave", "orange", "mtn", "moov", "flutterwave"].includes(s)) return "mobilemoney";
+//   if (["wave", "orange", "mtn", "moov", "flutterwave"].includes(s)) {
+//     return "mobilemoney";
+//   }
+
 //   return s;
 // }
 
@@ -116,6 +125,7 @@
 //     body.currencySender ||
 //     body.currency ||
 //     body.selectedCurrency ||
+//     body.money?.source?.currency ||
 //     "USD"
 //   );
 // }
@@ -139,6 +149,32 @@
 //   return !(v === undefined || v === null || String(v).trim() === "");
 // }
 
+// function normalizeSecurityAliases(body = {}) {
+//   if (!body || typeof body !== "object") return body;
+
+//   if (!body.question && body.securityQuestion) {
+//     body.question = body.securityQuestion;
+//   }
+
+//   if (!body.securityQuestion && body.question) {
+//     body.securityQuestion = body.question;
+//   }
+
+//   if (!body.securityCode && body.securityAnswer) {
+//     body.securityCode = body.securityAnswer;
+//   }
+
+//   if (!body.securityCode && body.validationCode) {
+//     body.securityCode = body.validationCode;
+//   }
+
+//   if (!body.securityAnswer && body.securityCode) {
+//     body.securityAnswer = body.securityCode;
+//   }
+
+//   return body;
+// }
+
 // /* -------------------------------------------------------------------------- */
 // /* Meta schema à préserver                                                    */
 // /* -------------------------------------------------------------------------- */
@@ -146,6 +182,14 @@
 // const txMetaSchema = {
 //   amountSource: Joi.number().min(0).optional(),
 //   amountTarget: Joi.number().min(0).optional(),
+//   localAmount: Joi.number().min(0).optional(),
+//   netAmount: Joi.number().min(0).optional(),
+//   feeAmount: Joi.number().min(0).optional(),
+
+//   amountReceived: Joi.number().min(0).optional(),
+//   receivedAmount: Joi.number().min(0).optional(),
+//   recipientAmount: Joi.number().min(0).optional(),
+
 //   feeSource: Joi.number().min(0).optional(),
 //   feeTarget: Joi.number().min(0).optional(),
 
@@ -169,6 +213,9 @@
 //   senderCountry: Joi.string().max(64).optional(),
 //   originCountry: Joi.string().max(64).optional(),
 //   fromCountry: Joi.string().max(64).optional(),
+//   sourceCountry: Joi.string().max(64).optional(),
+//   toCountry: Joi.string().max(64).optional(),
+//   targetCountry: Joi.string().max(64).optional(),
 //   countryTarget: Joi.string().max(64).optional(),
 
 //   transactionFees: Joi.number().min(0).optional(),
@@ -176,13 +223,20 @@
 //   recipientInfo: Joi.object().unknown(true).optional(),
 //   metadata: Joi.object().unknown(true).optional(),
 //   meta: Joi.object().unknown(true).optional(),
+//   pricingSnapshot: Joi.object().unknown(true).optional(),
+//   money: Joi.object().unknown(true).optional(),
 
 //   toName: Joi.string().max(128).optional(),
 //   toBank: Joi.string().max(128).optional(),
 //   recipientName: Joi.string().max(128).optional(),
 //   reference: Joi.string().max(128).optional(),
+
 //   quoteId: Joi.string().max(128).optional(),
+//   pricingId: Joi.string().max(128).optional(),
+//   effectivePricingId: Joi.string().max(128).optional(),
+
 //   providerReference: Joi.string().max(128).optional(),
+//   providerTxId: Joi.string().max(128).optional(),
 //   idempotencyKey: Joi.string().max(128).optional(),
 // };
 
@@ -206,7 +260,9 @@
 //     message: Joi.string().max(256).optional(),
 //     question: Joi.string().max(128).required(),
 //     securityQuestion: Joi.string().max(128).optional(),
-//     securityCode: Joi.string().max(64).required(),
+//     securityCode: Joi.string().trim().min(1).max(64).required(),
+//     securityAnswer: Joi.string().trim().min(1).max(128).optional(),
+//     validationCode: Joi.string().trim().min(1).max(64).optional(),
 //     country: Joi.string().max(64).required(),
 //     description: Joi.string().max(500).optional(),
 //   }),
@@ -287,17 +343,22 @@
 //  * Pour confirm/cancel/admin :
 //  * - provider n'est PAS requis
 //  * - le gateway peut le déduire depuis la transaction canonique
+//  * - confirm exige maintenant au moins une réponse de sécurité non vide
 //  */
 // const confirmSchema = Joi.object({
 //   transactionId: Joi.string().required(),
 //   provider: Joi.string().valid(...PROVIDERS).optional(),
-//   securityCode: Joi.string().max(64).allow("").optional(),
-//   securityAnswer: Joi.string().max(128).allow("").optional(),
-//   code: Joi.string().max(64).allow("").optional(),
+
+//   securityCode: Joi.string().trim().min(1).max(64).empty("").optional(),
+//   securityAnswer: Joi.string().trim().min(1).max(128).empty("").optional(),
+//   code: Joi.string().trim().min(1).max(64).empty("").optional(),
+
 //   reference: Joi.string().max(128).optional(),
 //   metadata: Joi.object().unknown(true).optional(),
 //   meta: Joi.object().unknown(true).optional(),
-// }).unknown(false);
+// })
+//   .or("securityCode", "securityAnswer", "code")
+//   .unknown(false);
 
 // const cancelSchema = Joi.object({
 //   transactionId: Joi.string().required(),
@@ -325,6 +386,9 @@
 // function validateTransaction(action) {
 //   return function (req, res, next) {
 //     const body = req.body || {};
+
+//     normalizeSecurityAliases(body);
+
 //     const funds = body.funds;
 //     const destination = body.destination;
 
@@ -332,11 +396,28 @@
 //     const providerSelected = computeProviderSelected(actionTx, funds, destination);
 
 //     if (action === "initiate" && providerSelected === "paynoval") {
-//       if (!body.question && body.securityQuestion) body.question = body.securityQuestion;
-//       if (!body.country) body.country = resolveCountryCompat(body, req.user || {});
+//       if (!body.question && body.securityQuestion) {
+//         body.question = body.securityQuestion;
+//       }
+
+//       if (!body.securityCode && body.securityAnswer) {
+//         body.securityCode = body.securityAnswer;
+//       }
+
+//       if (!body.securityCode && body.validationCode) {
+//         body.securityCode = body.validationCode;
+//       }
+
+//       if (!body.country) {
+//         body.country = resolveCountryCompat(body, req.user || {});
+//       }
+
 //       if (!body.senderCountry) {
 //         body.senderCountry =
-//           req.user?.selectedCountry || req.user?.country || req.user?.countryCode || "";
+//           req.user?.selectedCountry ||
+//           req.user?.country ||
+//           req.user?.countryCode ||
+//           "";
 //       }
 //     }
 
@@ -362,7 +443,9 @@
 //       schema = confirmSchema;
 //     } else if (action === "cancel") {
 //       schema = cancelSchema;
-//     } else if (["refund", "reassign", "validate", "archive", "relaunch"].includes(action)) {
+//     } else if (
+//       ["refund", "reassign", "validate", "archive", "relaunch"].includes(action)
+//     ) {
 //       schema = adminActionSchema;
 //     }
 
@@ -390,6 +473,7 @@
 
 //     if (error) {
 //       let details = error.details.map((d) => d.message);
+
 //       details = details.map((msg) => {
 //         if (/less than or equal to (\d+)/i.test(msg)) {
 //           return msg.replace(
@@ -397,14 +481,22 @@
 //             (_m, p1) => `less than or equal to ${p1} ${currencyForMsg}`
 //           );
 //         }
+
+//         if (msg.includes("must contain at least one of")) {
+//           return "La réponse de sécurité est requise pour confirmer la transaction.";
+//         }
+
 //         return msg;
 //       });
 
-//       logger.warn(`[validateTransaction][${providerSelected}] Validation failed (${action})`, {
-//         details,
-//         ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
-//         email: value?.toEmail || null,
-//       });
+//       logger.warn(
+//         `[validateTransaction][${providerSelected}] Validation failed (${action})`,
+//         {
+//           details,
+//           ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
+//           email: value?.toEmail || null,
+//         }
+//       );
 
 //       return res.status(400).json({
 //         success: false,
@@ -435,6 +527,10 @@
 //           req.body.question = req.body.securityQuestion;
 //         }
 
+//         if (!req.body.securityCode && req.body.securityAnswer) {
+//           req.body.securityCode = req.body.securityAnswer;
+//         }
+
 //         if (!req.body.country) {
 //           req.body.country = resolveCountryCompat(req.body, req.user || {});
 //         }
@@ -443,7 +539,8 @@
 //       const match = allowedFlows.find(
 //         (f) =>
 //           normalizeRailLike(f.funds) === normalizeRailLike(req.body.funds) &&
-//           normalizeRailLike(f.destination) === normalizeRailLike(req.body.destination) &&
+//           normalizeRailLike(f.destination) ===
+//             normalizeRailLike(req.body.destination) &&
 //           (!f.action || low(f.action) === low(req.body.action))
 //       );
 
@@ -467,13 +564,19 @@
 //       (async () => {
 //         try {
 //           const userId = req.user && req.user._id;
+
 //           if (userId) {
 //             const cur = resolveCurrencyForLimits(req.body);
 //             const dailyLimit = getDailyLimit(req.providerSelected, cur);
-//             const stats = await getUserTransactionsStats(userId, req.providerSelected, cur);
+//             const stats = await getUserTransactionsStats(
+//               userId,
+//               req.providerSelected,
+//               cur
+//             );
 
-//             const inc = req.body.amountSource ?? req.body.amount ?? 0;
-//             const dailyTotal = (stats && stats.dailyTotal ? stats.dailyTotal : 0) + inc;
+//             const inc = Number(req.body.amountSource ?? req.body.amount ?? 0) || 0;
+//             const already = Number(stats?.dailyTotal || 0) || 0;
+//             const dailyTotal = already + inc;
 
 //             if (dailyTotal > dailyLimit) {
 //               logger.warn("[validateTransaction] Plafond journalier dépassé", {
@@ -481,7 +584,7 @@
 //                 providerSelected: req.providerSelected,
 //                 currency: cur,
 //                 tryAmount: inc,
-//                 already: stats?.dailyTotal,
+//                 already,
 //                 max: dailyLimit,
 //               });
 
@@ -503,6 +606,7 @@
 //           logger.error("[validateTransaction] Erreur vérification daily limit", {
 //             error: e?.message,
 //           });
+
 //           if (res.headersSent) return;
 //           next();
 //         }
@@ -515,12 +619,17 @@
 //       if (!req.body.securityCode && req.body.code) {
 //         req.body.securityCode = req.body.code;
 //       }
+
 //       if (!req.body.securityAnswer && req.body.securityCode) {
 //         req.body.securityAnswer = req.body.securityCode;
 //       }
 //     }
 
-//     if (["confirm", "cancel", "refund", "reassign", "validate", "archive", "relaunch"].includes(action)) {
+//     if (
+//       ["confirm", "cancel", "refund", "reassign", "validate", "archive", "relaunch"].includes(
+//         action
+//       )
+//     ) {
 //       if (!hasTruthy(req.body.provider)) {
 //         delete req.body.provider;
 //       } else {
@@ -528,7 +637,7 @@
 //       }
 //     }
 
-//     next();
+//     return next();
 //   };
 // }
 
@@ -600,6 +709,7 @@ function normalizeRailLike(v) {
   const s = normalizeProviderLike(v);
 
   if (["stripe", "visa_direct", "card"].includes(s)) return "card";
+
   if (["wave", "orange", "mtn", "moov", "flutterwave"].includes(s)) {
     return "mobilemoney";
   }
@@ -639,6 +749,7 @@ function computeProviderSelected(action, funds, destination) {
 
 function inferActionIfMissing(action, funds, destination) {
   const a = low(action);
+
   if (["send", "deposit", "withdraw"].includes(a)) return a;
 
   const f = normalizeRailLike(funds);
@@ -652,7 +763,10 @@ function inferActionIfMissing(action, funds, destination) {
 
   if (candidates.length === 1 && candidates[0].action) {
     const inferred = low(candidates[0].action);
-    if (["send", "deposit", "withdraw"].includes(inferred)) return inferred;
+
+    if (["send", "deposit", "withdraw"].includes(inferred)) {
+      return inferred;
+    }
   }
 
   return "send";
@@ -774,7 +888,20 @@ const txMetaSchema = {
 
   quoteId: Joi.string().max(128).optional(),
   pricingId: Joi.string().max(128).optional(),
+  pricingLockId: Joi.string().max(128).optional(),
+  lockId: Joi.string().max(128).optional(),
+  pricingQuoteId: Joi.string().max(128).optional(),
   effectivePricingId: Joi.string().max(128).optional(),
+
+  method: Joi.string().max(64).optional(),
+  methodType: Joi.string().max(64).optional(),
+  txType: Joi.string().max(64).optional(),
+  transactionType: Joi.string().max(64).optional(),
+
+  fundsUi: Joi.string().max(64).optional(),
+  destinationUi: Joi.string().max(64).optional(),
+  providerSelected: Joi.string().max(64).optional(),
+  rail: Joi.string().max(64).optional(),
 
   providerReference: Joi.string().max(128).optional(),
   providerTxId: Joi.string().max(128).optional(),
@@ -884,7 +1011,7 @@ const initiateSchemas = {
  * Pour confirm/cancel/admin :
  * - provider n'est PAS requis
  * - le gateway peut le déduire depuis la transaction canonique
- * - confirm exige maintenant au moins une réponse de sécurité non vide
+ * - confirm exige au moins une réponse de sécurité non vide
  */
 const confirmSchema = Joi.object({
   transactionId: Joi.string().required(),
@@ -934,7 +1061,11 @@ function validateTransaction(action) {
     const destination = body.destination;
 
     const actionTx = inferActionIfMissing(body.action, funds, destination);
-    const providerSelected = computeProviderSelected(actionTx, funds, destination);
+    const providerSelected = computeProviderSelected(
+      actionTx,
+      funds,
+      destination
+    );
 
     if (action === "initiate" && providerSelected === "paynoval") {
       if (!body.question && body.securityQuestion) {
@@ -959,6 +1090,14 @@ function validateTransaction(action) {
           req.user?.country ||
           req.user?.countryCode ||
           "";
+      }
+
+      if (!body.method) {
+        body.method = body.methodType === "internal" ? "INTERNAL" : "INTERNAL";
+      }
+
+      if (!body.txType) {
+        body.txType = body.transactionType || "TRANSFER";
       }
     }
 
@@ -1062,18 +1201,51 @@ function validateTransaction(action) {
       );
 
       req.body.provider = req.body.provider || req.providerSelected;
+      req.body.providerSelected = req.providerSelected;
 
       if (req.providerSelected === "paynoval") {
         if (!req.body.question && req.body.securityQuestion) {
           req.body.question = req.body.securityQuestion;
         }
 
+        if (!req.body.securityQuestion && req.body.question) {
+          req.body.securityQuestion = req.body.question;
+        }
+
         if (!req.body.securityCode && req.body.securityAnswer) {
           req.body.securityCode = req.body.securityAnswer;
         }
 
+        if (!req.body.securityAnswer && req.body.securityCode) {
+          req.body.securityAnswer = req.body.securityCode;
+        }
+
         if (!req.body.country) {
           req.body.country = resolveCountryCompat(req.body, req.user || {});
+        }
+
+        if (!req.body.method) {
+          req.body.method = "INTERNAL";
+        }
+
+        if (!req.body.methodType) {
+          req.body.methodType = "internal";
+        }
+
+        if (!req.body.txType) {
+          req.body.txType = "TRANSFER";
+        }
+
+        if (!req.body.transactionType) {
+          req.body.transactionType = "transfer";
+        }
+
+        if (!req.body.fundsUi) {
+          req.body.fundsUi = "paynoval";
+        }
+
+        if (!req.body.destinationUi) {
+          req.body.destinationUi = "paynoval";
         }
       }
 
@@ -1104,18 +1276,20 @@ function validateTransaction(action) {
 
       (async () => {
         try {
-          const userId = req.user && req.user._id;
+          const userId = req.user && (req.user._id || req.user.id);
 
           if (userId) {
             const cur = resolveCurrencyForLimits(req.body);
             const dailyLimit = getDailyLimit(req.providerSelected, cur);
+
             const stats = await getUserTransactionsStats(
               userId,
               req.providerSelected,
               cur
             );
 
-            const inc = Number(req.body.amountSource ?? req.body.amount ?? 0) || 0;
+            const inc =
+              Number(req.body.amountSource ?? req.body.amount ?? 0) || 0;
             const already = Number(stats?.dailyTotal || 0) || 0;
             const dailyTotal = already + inc;
 
@@ -1167,9 +1341,15 @@ function validateTransaction(action) {
     }
 
     if (
-      ["confirm", "cancel", "refund", "reassign", "validate", "archive", "relaunch"].includes(
-        action
-      )
+      [
+        "confirm",
+        "cancel",
+        "refund",
+        "reassign",
+        "validate",
+        "archive",
+        "relaunch",
+      ].includes(action)
     ) {
       if (!hasTruthy(req.body.provider)) {
         delete req.body.provider;
