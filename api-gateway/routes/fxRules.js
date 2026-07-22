@@ -5,6 +5,7 @@ const express = require("express");
 const router = express.Router();
 const config = require("../src/config");
 const requireAdmin = require("../src/middlewares/requireAdmin");
+const { secureCompare } = require("../src/utils/secureCompare");
 const ctrl = require("../controllers/fxRulesController");
 
 const requireInternalOrAdmin = (req, res, next) => {
@@ -15,7 +16,7 @@ const requireInternalOrAdmin = (req, res, next) => {
     config.internalToken ||
     "";
 
-  if (internalHeader && expectedInternal && internalHeader === expectedInternal) {
+  if (internalHeader && expectedInternal && secureCompare(internalHeader, expectedInternal)) {
     return next();
   }
 

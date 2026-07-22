@@ -6,6 +6,7 @@ const router = express.Router();
 
 const config = require("../src/config");
 const requireAdmin = require("../src/middlewares/requireAdmin");
+const { secureCompare } = require("../src/utils/secureCompare");
 const feesCtrl = require("../controllers/feesController");
 
 // ✅ simulate accessible avant protection admin
@@ -19,7 +20,7 @@ const requireInternalOrAdmin = (req, res, next) => {
     config.internalToken ||
     "";
 
-  if (internalHeader && expectedInternal && internalHeader === expectedInternal) {
+  if (internalHeader && expectedInternal && secureCompare(internalHeader, expectedInternal)) {
     return next();
   }
 

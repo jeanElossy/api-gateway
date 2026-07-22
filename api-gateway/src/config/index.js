@@ -196,10 +196,26 @@ function canonicalString({ ts, method, path: pth, query }) {
 }
 
 // ---------------- CORS / RateLimit ----------------
-const legacyCorsOrigins =
-  env.CORS_ORIGINS === "*"
-    ? ["*"]
-    : env.CORS_ORIGINS.split(",").map((s) => s.trim()).filter(Boolean);
+// ⚠️ Sécurité : `CORS_ORIGINS` valait "*" par défaut. Combiné à
+// `Access-Control-Allow-Credentials: true` et au reflet de l'origine appelante,
+// n'importe quel site pouvait appeler l'API et lire les réponses. Le joker est
+// désormais REFUSÉ en production : le service refuse de démarrer plutôt que de
+// s'ouvrir silencieusement à tout le monde.
+const corsOriginsRaw = String(env.CORS_ORIGINS || "").trim();
+const wantsWildcardCors = corsOriginsRaw === "*" || corsOriginsRaw === "";
+
+if (env.NODE_ENV === "production" && wantsWildcardCors) {
+  // eslint-disable-next-line no-console
+  console.error(
+    "[config] CORS_ORIGINS doit lister explicitement les origines autorisées en production " +
+      '(ex: "https://www.paynoval.com"). Le joker "*" est refusé.'
+  );
+  process.exit(1);
+}
+
+const legacyCorsOrigins = wantsWildcardCors
+  ? ["*"]
+  : corsOriginsRaw.split(",").map((s) => s.trim()).filter(Boolean);
 
 const adminOrigins = splitCSV(env.ADMIN_CORS_ORIGINS || "");
 const mobileOrigins = splitCSV(env.MOBILE_CORS_ORIGINS || "");

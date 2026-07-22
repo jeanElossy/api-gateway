@@ -1,15 +1,33 @@
 // File: src/middlewares/authz.js
 "use strict";
 
-const requireRole = (roles = []) => (req, res, next) => {
+/**
+ * @param {string[]} roles   Rôles autorisés (vide = tout rôle authentifié).
+ * @param {object}   options
+ * @param {boolean}  options.allowInternal  Autorise le pseudo-rôle
+ *   `internal-service` (auth par x-internal-token). Doit être demandé
+ *   EXPLICITEMENT route par route.
+ *
+ * ⚠️ Sécurité : auparavant `internal-service` passait TOUS les contrôles de
+ * rôle, sur toutes les routes. Le token interne est aujourd'hui limité aux
+ * préfixes internes (cf. middlewares/auth.js), mais toute route acceptant ce
+ * token héritait d'un contournement total. L'autorisation est désormais opt-in.
+ */
+const requireRole = (roles = [], options = {}) => (req, res, next) => {
   const role = String(req.user?.role || "").toLowerCase();
 
   if (!role) {
     return res.status(403).json({ success: false, error: "Accès interdit (non authentifié)" });
   }
 
-  // internal-service optionnel (si tu veux l’autoriser sur certaines routes)
-  if (role === "internal-service") return next();
+  if (role === "internal-service") {
+    if (options.allowInternal === true) return next();
+
+    return res.status(403).json({
+      success: false,
+      error: "Accès interdit (appel interne non autorisé sur cette route)",
+    });
+  }
 
   // Si aucune contrainte de rôle => ok
   if (!Array.isArray(roles) || roles.length === 0) return next();

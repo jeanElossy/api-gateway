@@ -3,6 +3,7 @@
 
 const config = require('../config');
 const logger = require('../logger');
+const { secureCompare } = require('../utils/secureCompare');
 
 // ✅ Supporte plusieurs noms d'env pour éviter les mismatchs entre services
 // - INTERNAL_TOKEN : standard
@@ -46,7 +47,7 @@ module.exports = function validateInternalToken(req, res, next) {
     });
   }
 
-  if (String(headerToken) !== String(INTERNAL_TOKEN)) {
+  if (!secureCompare(String(headerToken), String(INTERNAL_TOKEN))) {
     logger.warn('[validateInternalToken] x-internal-token invalide', {
       ip,
       path: req.originalUrl,

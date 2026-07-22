@@ -3,6 +3,7 @@
 
 const jwt = require("jsonwebtoken");
 const config = require("../config");
+const { secureCompare } = require("../utils/secureCompare");
 const { getUsersConnection } = require("../db");
 const getUserModel = require("../models/userModel");
 const logger = require("../logger");
@@ -83,7 +84,7 @@ const authMiddleware = async (req, res, next) => {
     if (
       internalToken &&
       expectedInternal &&
-      String(internalToken).trim() === String(expectedInternal).trim() &&
+      secureCompare(String(internalToken).trim(), String(expectedInternal).trim()) &&
       isInternalAllowedPath(req)
     ) {
       req.user = { system: true, role: "internal-service" };
@@ -155,6 +156,38 @@ const authMiddleware = async (req, res, next) => {
         success: false,
         error: "Utilisateur introuvable",
       });
+    }
+
+    // ⚠️ Sécurité : le gateway se contentait auparavant de charger l'utilisateur
+    // sans regarder son statut. Un compte bloqué ou gelé restait donc autorisé
+    // sur toutes les routes NATIVES du gateway (pricing, FX, compliance…), qui
+    // ne passent jamais par le backend principal — seul endroit où ces contrôles
+    // existaient. On réplique ici les mêmes règles.
+    if (user.isBlocked === true) {
+      return res.status(403).json({
+        success: false,
+        error: "Compte bloqué",
+      });
+    }
+
+    const staffStatus = String(user.staffStatus || "").toLowerCase();
+    if (staffStatus === "disabled" || staffStatus === "suspended") {
+      return res.status(403).json({
+        success: false,
+        error: "Connexion désactivée pour ce compte",
+      });
+    }
+
+    if (String(user.accountStatus || "").toLowerCase() === "frozen") {
+      const frozenUntil = user.frozenUntil ? new Date(user.frozenUntil) : null;
+
+      // Un gel daté et échu ne bloque plus (cohérent avec le principal).
+      if (!frozenUntil || frozenUntil.getTime() > Date.now()) {
+        return res.status(403).json({
+          success: false,
+          error: "Compte temporairement gelé",
+        });
+      }
     }
 
     req.user = user.toObject ? user.toObject() : user;
