@@ -131,16 +131,30 @@ app.set("trust proxy", 1);
 /* CORS                                                                       */
 /* -------------------------------------------------------------------------- */
 
+// Le navigateur envoie `scheme://host[:port]`, sans slash final. La config est
+// déjà normalisée (voir src/config/index.js) mais on refait le passage ici pour
+// que la comparaison reste juste quelle que soit la source de la valeur.
+function normalizeOrigin(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw === "*") return raw;
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return raw.replace(/\/+$/, "");
+  }
+}
+
 function buildAllowedOriginsSet() {
   const set = new Set();
 
-  (config.cors?.origins || []).forEach((origin) => origin && set.add(origin));
-  (config.cors?.adminOrigins || []).forEach(
-    (origin) => origin && set.add(origin)
-  );
-  (config.cors?.mobileOrigins || []).forEach(
-    (origin) => origin && set.add(origin)
-  );
+  const add = (origin) => {
+    const normalized = normalizeOrigin(origin);
+    if (normalized) set.add(normalized);
+  };
+
+  (config.cors?.origins || []).forEach(add);
+  (config.cors?.adminOrigins || []).forEach(add);
+  (config.cors?.mobileOrigins || []).forEach(add);
 
   // ⚠️ Les origines de développement ne doivent JAMAIS être acceptées en
   // production : une page servie depuis localhost pouvait sinon dialoguer avec
@@ -164,7 +178,7 @@ const allowAll =
 function isOriginAllowed(origin) {
   if (!origin) return true;
   if (allowAll) return true;
-  return allowedOrigins.has(origin);
+  return allowedOrigins.has(normalizeOrigin(origin));
 }
 
 const ALLOWED_HEADERS = [

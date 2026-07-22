@@ -196,29 +196,69 @@ function canonicalString({ ts, method, path: pth, query }) {
 }
 
 // ---------------- CORS / RateLimit ----------------
+// Un en-tête `Origin` ne porte jamais de chemin ni de slash final : le
+// navigateur envoie strictement `scheme://host[:port]`. Une valeur saisie
+// « à la main » comme `https://www.paynoval.com/` ne correspondrait donc à
+// aucune origine réelle et bloquerait silencieusement le back-office. On
+// normalise pour que la configuration tolère ces écritures.
+const normalizeOrigin = (value) => {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw === "*") return raw;
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return raw.replace(/\/+$/, "");
+  }
+};
+
+const splitOrigins = (v) =>
+  Array.from(new Set(splitCSV(v).map(normalizeOrigin).filter(Boolean)));
+
 // ⚠️ Sécurité : `CORS_ORIGINS` valait "*" par défaut. Combiné à
 // `Access-Control-Allow-Credentials: true` et au reflet de l'origine appelante,
 // n'importe quel site pouvait appeler l'API et lire les réponses. Le joker est
-// désormais REFUSÉ en production : le service refuse de démarrer plutôt que de
-// s'ouvrir silencieusement à tout le monde.
+// désormais neutralisé en production.
+//
+// On ne coupe PAS le démarrage : le gateway est le frontal unique du web ET du
+// mobile, un refus de boot serait une panne totale. On dégrade : le joker est
+// abandonné, on retombe sur les origines admin/mobile explicitement
+// configurées, puis en dernier recours sur les domaines de production connus.
 const corsOriginsRaw = String(env.CORS_ORIGINS || "").trim();
 const wantsWildcardCors = corsOriginsRaw === "*" || corsOriginsRaw === "";
 
-if (env.NODE_ENV === "production" && wantsWildcardCors) {
+const FALLBACK_PRODUCTION_ORIGINS = [
+  "https://www.paynoval.com",
+  "https://paynoval.com",
+];
+
+const adminOrigins = splitOrigins(env.ADMIN_CORS_ORIGINS || "");
+const mobileOrigins = splitOrigins(env.MOBILE_CORS_ORIGINS || "");
+
+let legacyCorsOrigins;
+
+if (!wantsWildcardCors) {
+  legacyCorsOrigins = splitOrigins(corsOriginsRaw);
+} else if (env.NODE_ENV !== "production") {
+  legacyCorsOrigins = ["*"];
+} else {
+  const configured = [...adminOrigins, ...mobileOrigins].filter(
+    (o) => o && o !== "*"
+  );
+  legacyCorsOrigins = configured.length
+    ? []
+    : FALLBACK_PRODUCTION_ORIGINS.slice();
+
   // eslint-disable-next-line no-console
   console.error(
-    "[config] CORS_ORIGINS doit lister explicitement les origines autorisées en production " +
-      '(ex: "https://www.paynoval.com"). Le joker "*" est refusé.'
+    "[config] CORS_ORIGINS doit lister explicitement les origines autorisées en " +
+      'production (ex: "https://www.paynoval.com"). Le joker "*" est ignoré ; ' +
+      `origines retenues : ${
+        configured.length
+          ? configured.join(", ") + " (via ADMIN_/MOBILE_CORS_ORIGINS)"
+          : legacyCorsOrigins.join(", ") + " (repli par défaut)"
+      }.`
   );
-  process.exit(1);
 }
-
-const legacyCorsOrigins = wantsWildcardCors
-  ? ["*"]
-  : corsOriginsRaw.split(",").map((s) => s.trim()).filter(Boolean);
-
-const adminOrigins = splitCSV(env.ADMIN_CORS_ORIGINS || "");
-const mobileOrigins = splitCSV(env.MOBILE_CORS_ORIGINS || "");
 
 // ---------------- URLs / DB ----------------
 const principalUrl = normStr(env.PRINCIPAL_URL || "").replace(/\/+$/, "");
