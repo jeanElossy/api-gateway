@@ -94,6 +94,7 @@ const {
   meLimiter,
   announcementsLimiter,
   adminTransactionsLimiter,
+  adminAdjustmentsLimiter,
   userLimiter,
 } = require("./middlewares/rateLimit");
 
@@ -877,6 +878,25 @@ app.use("/api/v1/transactions", userTransactionRoutes);
  * On garde seulement le limiter, puis on laisse la requête continuer jusqu’au proxy final.
  */
 app.use("/api/v1/admin/transactions", adminTransactionsLimiter);
+
+/**
+ * Ajustements manuels de solde — crédit / débit d'un compte client décidé au
+ * back-office.
+ *
+ * Comme `/api/v1/admin/transactions`, la route n'est PAS native : seul le
+ * limiteur est appliqué ici, puis la requête poursuit jusqu'au proxy final vers
+ * le backend principal, qui détient la double validation demandeur ≠ valideur.
+ *
+ * Ce montage doit rester AVANT le proxy `/api/v1/admin`, sinon le limiteur ne
+ * s'applique jamais : le proxy absorberait la requête en amont.
+ *
+ * Endpoints (portés par le principal) :
+ *   GET  /api/v1/admin/adjustments            — file des demandes
+ *   POST /api/v1/admin/adjustments            — créer une demande
+ *   POST /api/v1/admin/adjustments/:id/approve
+ *   POST /api/v1/admin/adjustments/:id/reject
+ */
+app.use("/api/v1/admin/adjustments", adminAdjustmentsLimiter);
 
 /**
  * Conformité transactions :

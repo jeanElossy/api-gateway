@@ -241,6 +241,57 @@ const adminTransactionsLimiter = rateLimit({
 });
 
 /* ------------------------------------------------------------------ */
+/* 5 bis) Ajustements manuels de solde                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Limiteur dédié aux ajustements manuels de solde
+ * (`/api/v1/admin/adjustments`).
+ *
+ * Volontairement beaucoup plus strict que `adminTransactionsLimiter` : lister
+ * des transactions est une lecture banale, alors que chaque appel ici crée ou
+ * valide un mouvement d'argent décidé par un humain. Un rythme élevé sur cette
+ * route n'a aucun usage légitime — c'est soit un script, soit un compte
+ * compromis. 20 appels par minute laissent largement de quoi travailler à la
+ * main tout en rendant l'abattage en masse impossible.
+ *
+ * La clé est l'identifiant de l'administrateur, pas l'IP : plusieurs
+ * administrateurs derrière un même réseau d'entreprise ne doivent pas se
+ * bloquer mutuellement, et changer d'IP ne doit pas remettre le compteur à
+ * zéro.
+ */
+const adminAdjustmentsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => {
+    const uid = req.user?.id || req.user?._id;
+    return uid ? `admin-adj:${uid}` : `admin-adj-ip:${getClientIp(req)}`;
+  },
+  handler: (req, res, _next, options) => {
+    // Journalisé en `warn` : sur cette route, atteindre la limite est un
+    // signal de sécurité à part entière, pas une simple gêne d'usage.
+    logger.warn("[RateLimit][admin-adjustments] Limit hit", {
+      userId: req.user && (req.user.id || req.user._id),
+      ip: getClientIp(req),
+      path: req.originalUrl,
+      method: req.method,
+    });
+
+    const retryAfter = setRetryAfter(res, options.windowMs);
+
+    return res.status(429).json({
+      success: false,
+      error:
+        "Trop d'opérations d'ajustement de solde. Réessayez dans un instant.",
+      retryAfter,
+    });
+  },
+});
+
+/* ------------------------------------------------------------------ */
 /* 6) Limiteur global par user                                        */
 /* ------------------------------------------------------------------ */
 const userLimiter = rateLimit({
@@ -292,5 +343,6 @@ module.exports = {
   meLimiter,
   announcementsLimiter,
   adminTransactionsLimiter,
+  adminAdjustmentsLimiter,
   userLimiter,
 };

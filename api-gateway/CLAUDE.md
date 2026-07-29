@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> Règles de collaboration transverses → [`../../CLAUDE.md`](../../CLAUDE.md). Vue d'ensemble de l'écosystème PayNoval et conventions de code partagées → [`../../.claude/context/`](../../.claude/context/).
+
 ## Projet
 
 PayNoval **API Gateway** : un service Express en frontal de
@@ -98,4 +100,3 @@ En sortie vers le principal, le proxy injecte `x-internal-token: PRINCIPAL_INTER
 - [src/services/configSyncService.js](src/services/configSyncService.js) et [src/services/transactionPricingService.js](src/services/transactionPricingService.js) requièrent `pino`, qui n'est pas une dépendance — les charger lève une exception. Rien ne les importe.
 - `src/openapi.yaml` est vide ; c'est [docs/openapi.yaml](docs/openapi.yaml) qui est réellement servi.
 - Non montés dans `src/app.js` : `routes/exchangeRates.routes.js` (copie à la racine — celui monté est `routes/admin/exchangeRates.routes.js`), `routes/phoneVerificationRoutes.js`, `routes/principalProxyRoutes.js`, `routes/trustedDepositNumberRoutes.js`. Middlewares inutilisés : `src/middlewares/gatewayAuth.js`, `src/middlewares/validate.js`.
-- Les fichiers `.claude/docs/*.md` sont un modèle copié depuis un projet React sans rapport (« CAVA Website ») et ne décrivent pas ce gateway.
