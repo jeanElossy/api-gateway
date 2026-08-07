@@ -118,6 +118,7 @@ const publicRoutes = require("../routes/publicRoutes");
 const requirePublicSignature = require("./middlewares/requirePublicSignature");
 const pricingRulesRoutes = require("../routes/pricingRulesRoutes");
 const pricingChangeRequestsRoutes = require("../routes/pricingChangeRequestsRoutes");
+const requireNotRestricted = require("./middlewares/requireNotRestricted");
 const providerWebhooksRoutes = require("../routes/providerWebhookRoutes");
 
 const app = express();
@@ -1001,6 +1002,18 @@ app.use("/api/v1/pricing", pricingRoutes);
 app.use("/api/v1/fx-rules", fxRulesRoutes);
 app.use("/api/v1/pricing-rules", pricingRulesRoutes);
 app.use("/api/v1/pricing-change-requests", pricingChangeRequestsRoutes);
+
+/**
+ * Surfaces PROXIFIÉES sensibles : le gateway les transmet au backend principal
+ * sans les faire passer par `requireTransactionEligibility`, monté uniquement
+ * sur les routes de transaction natives.
+ *
+ * Le garde s'applique donc ici, avant le proxy final. Le backend principal
+ * refait le même contrôle : c'est une défense en profondeur, pas un doublon
+ * inutile — la règle vaut aussi bien pour le web que pour l'application mobile,
+ * puisque les deux passent par ce gateway.
+ */
+app.use("/api/v1/cagnottes", requireNotRestricted({ methods: ["POST"] }));
 
 /* -------------------------------------------------------------------------- */
 /* Final proxy to principal backend                                           */
