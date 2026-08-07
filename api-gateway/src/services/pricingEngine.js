@@ -205,6 +205,24 @@ function matchScopeCountry(reqVal, ruleVal) {
   return upper(stripAccents(reqVal)) === upper(stripAccents(ruleVal));
 }
 
+/**
+ * Fenêtre de validité d'une règle.
+ *
+ * `startsAt`/`endsAt` existaient dans le modèle mais n'étaient lus nulle part :
+ * une règle programmée s'appliquait immédiatement, une règle expirée
+ * s'appliquait pour toujours. L'évaluation se fait à chaque devis, ce qui
+ * évite toute tâche planifiée.
+ */
+function isWithinWindow(rule, nowMs) {
+  const startsAt = rule?.startsAt ? new Date(rule.startsAt).getTime() : null;
+  const endsAt = rule?.endsAt ? new Date(rule.endsAt).getTime() : null;
+
+  if (Number.isFinite(startsAt) && nowMs < startsAt) return false;
+  if (Number.isFinite(endsAt) && nowMs > endsAt) return false;
+
+  return true;
+}
+
 function computeSpecificity(rule) {
   let score = 0;
   const sc = rule?.scope || {};
@@ -249,9 +267,11 @@ function pickBestRule(rules, req) {
       : null;
 
   const amount = Number(req.amount);
+  const nowMs = Number.isFinite(Number(req.now)) ? Number(req.now) : Date.now();
 
   const candidates = (rules || []).filter((r) => {
     if (!r?.active) return false;
+    if (!isWithinWindow(r, nowMs)) return false;
 
     const sc = r?.scope || {};
 
@@ -570,4 +590,7 @@ module.exports = {
   normalizeTxType,
   normalizeMethod,
   normalizeCountryISO2,
+  // Exportés pour les tests et pour la détection de couverture.
+  pickBestRule,
+  isWithinWindow,
 };
