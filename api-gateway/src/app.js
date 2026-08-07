@@ -117,6 +117,7 @@ const fxRulesRoutes = require("../routes/fxRules");
 const publicRoutes = require("../routes/publicRoutes");
 const requirePublicSignature = require("./middlewares/requirePublicSignature");
 const pricingRulesRoutes = require("../routes/pricingRulesRoutes");
+const pricingChangeRequestsRoutes = require("../routes/pricingChangeRequestsRoutes");
 const providerWebhooksRoutes = require("../routes/providerWebhookRoutes");
 
 const app = express();
@@ -835,6 +836,7 @@ const mongoRequiredPrefixes = [
   "/api/v1/pricing",
   "/api/v1/fx-rules",
   "/api/v1/pricing-rules",
+  "/api/v1/pricing-change-requests",
 ];
 
 app.use((req, res, next) => {
@@ -919,6 +921,7 @@ app.use("/api/v1/exchange-rates", exchangeRateRoutes);
 app.use("/api/v1/pricing", pricingRoutes);
 app.use("/api/v1/fx-rules", fxRulesRoutes);
 app.use("/api/v1/pricing-rules", pricingRulesRoutes);
+app.use("/api/v1/pricing-change-requests", pricingChangeRequestsRoutes);
 
 /* -------------------------------------------------------------------------- */
 /* Final proxy to principal backend                                           */
