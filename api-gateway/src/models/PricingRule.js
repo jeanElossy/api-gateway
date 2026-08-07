@@ -228,6 +228,48 @@ const PricingRuleSchema = new mongoose.Schema(
       default: 1,
     },
 
+    /**
+     * Numéro de version courant, incrémenté à chaque publication.
+     *
+     * Remplace `version` ci-dessus, que `pickPayload` remettait à 1 à chaque
+     * mise à jour — ce n'était donc pas un versionnage. `version` est conservé
+     * pour compatibilité de lecture mais n'est plus écrit par le workflow.
+     *
+     * C'est aussi le jeton de concurrence : la publication est un $inc gardé
+     * sur ce champ.
+     */
+    currentVersion: {
+      type: Number,
+      default: 1,
+      min: 1,
+    },
+
+    /**
+     * L'archivage remplace la suppression physique. Une règle supprimée était
+     * irrécupérable, et sa disparition changeait instantanément ce que payaient
+     * les clients.
+     */
+    archivedAt: { type: Date, default: null, index: true },
+    archivedBy: {
+      type: new mongoose.Schema(
+        {
+          staffId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+          email: { type: String, trim: true, default: "" },
+          name: { type: String, trim: true, default: "" },
+          at: { type: Date, default: Date.now },
+        },
+        { _id: false }
+      ),
+      default: null,
+    },
+
+    /** Demande ayant produit l'état courant. */
+    lastChangeRequestId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "PricingChangeRequest",
+      default: null,
+    },
+
     metadata: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
