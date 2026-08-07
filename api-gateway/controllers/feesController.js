@@ -5,6 +5,12 @@ const { getExchangeRate } = require("../src/services/exchangeRateService");
 const { normalizeCurrency } = require("../src/utils/currency");
 const { getAdjustedRate } = require("../src/services/fxRulesService");
 
+// Adaptateur : une seule vérité de prix, celle du moteur de tarification.
+// `roundMoney` n'est pas importé : ce fichier a déjà le sien, identique.
+const { computeQuote } = require("../src/services/pricingEngine");
+const { getActiveRules } = require("../src/services/pricing/ruleCache");
+const { recordCoverageGap } = require("../src/services/pricing/coverage");
+
 let logger = null;
 try {
   logger = require("../src/logger");
@@ -549,125 +555,123 @@ exports.simulateFee = async (req, res) => {
       });
     }
 
-    const bareme = await pickBestFeeRule(ctx);
+    /**
+     * ADAPTATEUR AU-DESSUS DU MOTEUR DE TARIFICATION
+     * -------------------------------------------------------------------------
+     * Cet endpoint lisait `Fee` + `FxRule` tandis que `/pricing/quote` — celui
+     * qui facture réellement — lit `PricingRule`. Le client pouvait donc voir un
+     * frais et en payer un autre. Il n'existe désormais qu'une seule vérité.
+     *
+     * La forme de la réponse est conservée à l'identique : l'app mobile et le
+     * site public la consomment telle quelle.
+     */
+    const quoteRequest = {
+      txType: normalizedTxType || "TRANSFER",
+      method: normalizedMethod || null,
+      provider: normalizedProvider || null,
+      amount: amountNum,
+      fromCurrency: fromCur,
+      toCurrency: toCur,
+      country: normalizedCountry ? upper(normalizedCountry) : null,
+      fromCountry: normalizedCountry ? upper(normalizedCountry) : null,
+      toCountry: normalizedToCountry ? upper(normalizedToCountry) : null,
+    };
 
-    let fees = 0;
-    let feePercent = 0;
-    let usedBareme = null;
-    let feeBreakdown = null;
+    const rules = await getActiveRules();
 
-    if (bareme) {
-      const resFee = computeFeeFromBareme(bareme, amountNum, fromCur);
-      fees = resFee.fee;
-      feePercent = resFee.feePercent;
-      feeBreakdown = resFee.breakdown;
-      usedBareme = bareme;
-
-      await Fee.updateOne({ _id: bareme._id }, { $set: { lastUsedAt: new Date() } });
-    } else {
-      let pct = 0.01;
-      if (normalizedProvider === "stripe" || normalizedProvider === "bank") pct = 0.015;
-      fees = roundMoney(amountNum * pct, fromCur);
-      feePercent = pct * 100;
-      feeBreakdown = {
-        fallback: true,
-        pct: feePercent,
-        formula: `${amountNum} * ${feePercent}%`,
-      };
-    }
-
-    const netAfterFees = roundMoney(amountNum - fees, fromCur);
-
-    const fx = await getExchangeRate(fromCur, toCur);
-    const baseRate = Number(fx?.rate ?? fx);
-
-    if (fx?.retryAfterSec) {
-      res.setHeader("Retry-After", String(fx.retryAfterSec));
-    }
-
-    if (!Number.isFinite(baseRate) || baseRate <= 0) {
-      return res.status(503).json({
-        success: false,
-        message: "Taux de change indisponible",
+    let quote;
+    try {
+      quote = await computeQuote({
+        req: quoteRequest,
+        rules,
+        getMarketRate: async (from, to) => {
+          if (upper(from) === upper(to)) return 1;
+          const out = await getExchangeRate(from, to);
+          const rate = Number(out?.rate ?? out);
+          return Number.isFinite(rate) ? rate : null;
+        },
       });
+    } catch (err) {
+      if (err?.status === 404) {
+        // Plus de repli inventé : afficher 1 % que la transaction ne prélèvera
+        // pas est exactement le défaut corrigé ici. Le corridor est consigné
+        // pour que l'admin puisse créer la règle manquante.
+        recordCoverageGap(err?.details?.normalizedRequest || quoteRequest);
+
+        return res.status(404).json({
+          success: false,
+          code: "NO_PRICING_RULE",
+          message:
+            "Aucun tarif n'est défini pour ce corridor. Nos équipes en ont été informées.",
+        });
+      }
+
+      if (err?.status === 503) {
+        return res.status(503).json({
+          success: false,
+          code: "FX_UNAVAILABLE",
+          message: "Taux de change indisponible",
+        });
+      }
+
+      throw err;
     }
 
-    const adjusted = await getAdjustedRate({
-      baseRate,
-      context: {
-        txType: normalizedTxType,
-        method: normalizedMethod,
-        provider: normalizedProvider,
-        country: normalizedToCountry || normalizedCountry,
-        fromCountry: normalizedCountry,
-        toCountry: normalizedToCountry,
-        fromCurrency: fromCur,
-        toCurrency: toCur,
-        amount: amountNum,
-      },
-    });
+    const result = quote.result || {};
 
-    const appliedRate = Number(adjusted?.rate ?? baseRate);
-    if (!Number.isFinite(appliedRate) || appliedRate <= 0) {
-      return res.status(503).json({
-        success: false,
-        message: "Taux ajusté invalide",
-      });
-    }
-
+    const fees = Number(result.fee || 0);
+    const appliedRate = Number(result.appliedRate || 0);
+    const marketRate = result.marketRate == null ? null : Number(result.marketRate);
+    const netAfterFees = Number(result.netFrom || 0);
+    const convertedNet = Number(result.netTo || 0);
     const convertedAmount = roundMoney(amountNum * appliedRate, toCur);
-    const convertedNet = roundMoney(netAfterFees * appliedRate, toCur);
 
-    const debug = buildSimulationDebug({
-      ctx,
-      amountNum,
-      fromCur,
-      toCur,
-      bareme: usedBareme,
-      feeBreakdown,
-      fees,
-      netAfterFees,
-      fx,
-      baseRate,
-      adjusted,
-      appliedRate,
-      convertedAmount,
-      convertedNet,
-    });
+    // Les deux moteurs expriment déjà le pourcentage en pourcentage :
+    // aucune conversion, sous peine d'un facteur 100.
+    const feePercent = Number(result.feeBreakdown?.percent ?? 0);
 
     return res.json({
       success: true,
       data: {
-        txType: normalizedTxType || null,
-        method: normalizedMethod || null,
-        provider: normalizedProvider || null,
-        country: normalizedCountry || null,
-        toCountry: normalizedToCountry || null,
+        txType: quote.request?.txType || null,
+        method: quote.request?.method || null,
+        provider: quote.request?.provider || null,
+        country: quote.request?.country || null,
+        toCountry: quote.request?.toCountry || null,
 
         amount: amountNum,
         fromCurrency: fromCur,
         toCurrency: toCur,
 
-        fxBaseRate: baseRate,
+        fxBaseRate: marketRate,
         exchangeRate: appliedRate,
-        fxRuleApplied: adjusted?.info || null,
-        fxSource: fx?.source,
-        fxStale: !!fx?.stale,
-        fxWarning: fx?.warning,
+        fxRuleApplied: quote.ruleApplied || null,
+        fxSource: "pricing-engine",
+        fxStale: false,
+        fxWarning: null,
 
         feeSource: fees,
         feePercent,
         fees,
-        feeBreakdown,
+        feeBreakdown: result.feeBreakdown || null,
         netAfterFees,
 
         convertedAmount,
         convertedNetAfterFees: convertedNet,
 
-        baremeId: usedBareme ? usedBareme._id : null,
-        baremeSnapshot: usedBareme || null,
+        // Champs conservés pour compatibilité, désormais alimentés par la règle
+        // de tarification. Obsolètes : ils disparaîtront quand plus aucun client
+        // ne les lira.
+        baremeId: quote.ruleApplied?.ruleId || null,
+        baremeSnapshot: null,
 
-        debug,
+        debug: {
+          engine: "pricing-engine",
+          requestNormalized: quote.request || null,
+          ruleApplied: quote.ruleApplied || null,
+          feeBreakdown: result.feeBreakdown || null,
+          fxRevenue: result.fxRevenue || null,
+        },
       },
     });
   } catch (e) {
