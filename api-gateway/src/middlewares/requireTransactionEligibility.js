@@ -283,6 +283,42 @@ function isFrozenNow(user = {}) {
   return d > new Date();
 }
 
+/**
+ * Compte restreint : signalé deux fois, restreint à titre conservatoire.
+ *
+ * Volontairement TRAITÉ À PART de `isAccountBlocked` : un compte restreint
+ * garde l'accès à l'application, à son solde et à ses RETRAITS. Seuls les
+ * envois vers un autre compte PayNoval sont suspendus — c'est précisément ce
+ * que les signalements visent, et cela évite d'immobiliser l'argent d'un
+ * client sur un simple compteur, avant toute vérification humaine.
+ */
+function isRestrictedAccount(user = {}) {
+  return normalizeStatus(user.accountStatus) === "restricted";
+}
+
+/**
+ * L'opération demandée est-elle un transfert PayNoval → PayNoval ?
+ *
+ * Retrait et envoi partagent le même flux technique : un payout vers Mobile
+ * Money ne se distingue pas d'un envoi au numéro d'un tiers. On ne bloque donc
+ * que ce qui est identifiable sans ambiguïté — le P2P interne.
+ */
+function isInternalPeerTransfer(body = {}) {
+  const method = normalizeStatus(body.method || body.methodType || body.rail);
+  const destination = normalizeStatus(body.destination);
+  const funds = normalizeStatus(body.funds);
+
+  if (["internal", "wallet", "paynoval"].includes(method)) return true;
+  if (["paynoval", "internal", "wallet"].includes(destination)) return true;
+
+  // Certains payloads n'expriment l'interne que par la source des fonds.
+  if (funds === "paynoval" && ["paynoval", "internal", ""].includes(destination)) {
+    return true;
+  }
+
+  return false;
+}
+
 function isAccountBlocked(user = {}) {
   return (
     user.isBlocked === true ||
@@ -495,6 +531,26 @@ module.exports = async function requireTransactionEligibility(req, res, next) {
       isBusiness: normalizedUser.isBusiness,
       accountStatus: normalizedUser.accountStatus || null,
     };
+
+    /**
+     * Compte restreint : on ne refuse que le P2P interne, jamais les retraits.
+     * Contrôlé ICI et non dans `buildEligibilityFailure`, qui ne connaît que
+     * l'utilisateur — la décision dépend de l'opération demandée.
+     */
+    if (isRestrictedAccount(normalizedUser) && isInternalPeerTransfer(req.body || {})) {
+      logger.warn?.("[Gateway][TX eligibility] compte restreint, P2P refusé", {
+        userId: normalizedUser._id || normalizedUser.id || null,
+      });
+
+      return res.status(403).json({
+        success: false,
+        code: "ACCOUNT_RESTRICTED",
+        error:
+          "Votre compte fait l'objet de signalements et les envois vers d'autres comptes PayNoval sont temporairement suspendus. Vos retraits restent disponibles.",
+        message:
+          "Votre compte fait l'objet de signalements et les envois vers d'autres comptes PayNoval sont temporairement suspendus. Vos retraits restent disponibles.",
+      });
+    }
 
     try {
       logger.info?.("[Gateway][TX eligibility] profile OK", {
