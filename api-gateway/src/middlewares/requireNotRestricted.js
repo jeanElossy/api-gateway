@@ -30,14 +30,25 @@ const MESSAGE =
   "Votre compte fait l'objet de signalements : cette opération est temporairement suspendue. Vos retraits restent disponibles.";
 
 /**
- * @param {{methods?: string[]}} options  Méthodes HTTP concernées. Par défaut
- *   les seules méthodes qui créent quelque chose.
+ * @param {object} options
+ * @param {string[]} [options.methods]  Méthodes HTTP concernées.
+ * @param {RegExp[]} [options.paths]    Chemins concernés, **relatifs au point de
+ *   montage**. Obligatoire en pratique : un garde qui intercepte toutes les
+ *   écritures d'un préfixe bloque aussi ce qui doit rester ouvert — clôturer sa
+ *   propre cagnotte, se désabonner, ou un webkook de provider.
  */
-module.exports = function requireNotRestricted({ methods = ["POST"] } = {}) {
+module.exports = function requireNotRestricted({
+  methods = ["POST"],
+  paths = null,
+} = {}) {
   const wanted = methods.map((m) => String(m).toUpperCase());
 
   return function requireNotRestrictedMiddleware(req, res, next) {
     if (!wanted.includes(req.method)) return next();
+
+    if (Array.isArray(paths) && !paths.some((re) => re.test(req.path))) {
+      return next();
+    }
 
     const status = normalizeStatus(req.user?.accountStatus);
 

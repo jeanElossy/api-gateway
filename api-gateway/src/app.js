@@ -1013,7 +1013,31 @@ app.use("/api/v1/pricing-change-requests", pricingChangeRequestsRoutes);
  * inutile — la règle vaut aussi bien pour le web que pour l'application mobile,
  * puisque les deux passent par ce gateway.
  */
-app.use("/api/v1/cagnottes", requireNotRestricted({ methods: ["POST"] }));
+app.use(
+  "/api/v1/cagnottes",
+  requireNotRestricted({
+    methods: ["POST"],
+    /**
+     * Chemins bloqués, et EUX SEULS. Ce qui envoie de l'argent à un autre
+     * utilisateur PayNoval, ou crée une collecte :
+     *   POST /                                → création
+     *   POST /:id/join                        → participation (porte un montant)
+     *   POST /:id/participations/paynoval     → participation sur solde PayNoval
+     *
+     * Restent ouverts, volontairement :
+     *   POST /:id/close                       → un compte restreint doit pouvoir
+     *                                           liquider sa propre cagnotte
+     *   POST /:id/subscribe                   → simple abonnement, aucun argent
+     *   POST /:id/external-payment-callback   → webhook provider, authentifié par
+     *                                           token gateway et sans req.user
+     */
+    paths: [
+      /^\/$/,
+      /^\/[^/]+\/join$/,
+      /^\/[^/]+\/participations\/paynoval$/,
+    ],
+  })
+);
 
 /* -------------------------------------------------------------------------- */
 /* Final proxy to principal backend                                           */
