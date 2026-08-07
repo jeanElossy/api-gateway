@@ -735,13 +735,37 @@ if (principalSocketProxy) {
 /* Auth global                                                                */
 /* -------------------------------------------------------------------------- */
 
-const openEndpoints = [
+/**
+ * BARRIÈRE D'AUTHENTIFICATION — ALLOWLIST EN REFUS PAR DÉFAUT
+ * -----------------------------------------------------------------------------
+ * ⚠️ CORRECTIF DE SÉCURITÉ. L'ancienne liste mélangeait deux natures de règles
+ * dans un seul tableau évalué en « préfixe » :
+ *
+ *     const openEndpoints = ["/", "/api/v1", "/api/v1/auth", …];
+ *     req.path === e || req.path.startsWith(e + "/")
+ *
+ * L'entrée "/api/v1" faisait donc passer TOUT chemin commençant par "/api/v1/"
+ * — soit la totalité de l'API, y compris /api/v1/admin et /api/v1/users. La
+ * barrière documentée ne filtrait plus rien. Aucune porte n'était réellement
+ * ouverte (chaque routeur natif réapplique son propre garde, et le proxy fait
+ * réauthentifier le backend principal), mais la défense en profondeur était
+ * réduite à une seule couche : la prochaine route native qui aurait oublié son
+ * garde aurait été publiquement accessible.
+ *
+ * Les deux natures sont désormais séparées :
+ *   - OPEN_EXACT  : ouvert pour CE chemin seulement (racines d'information).
+ *   - OPEN_PREFIX : ouvert pour ce chemin et tout son sous-arbre.
+ */
+const OPEN_EXACT = [
   "/",
   "/api/v1",
   "/healthz",
   "/status",
-  "/docs",
   "/openapi.json",
+];
+
+const OPEN_PREFIX = [
+  "/docs",
   "/socket.io",
 
   "/api/v1/auth",
@@ -765,12 +789,43 @@ const openEndpoints = [
   "/api/v1/analytics",
 ];
 
-app.use((req, res, next) => {
-  const isOpen = openEndpoints.some(
-    (endpoint) => req.path === endpoint || req.path.startsWith(endpoint + "/")
-  );
+/** Conservé pour compatibilité de lecture : plus aucun code ne doit s'en servir. */
+const openEndpoints = [...OPEN_EXACT, ...OPEN_PREFIX];
 
-  if (isOpen) return next();
+function isOpenPath(path) {
+  if (OPEN_EXACT.includes(path)) return true;
+  return OPEN_PREFIX.some((e) => path === e || path.startsWith(e + "/"));
+}
+
+/**
+ * Bascule de durcissement.
+ *
+ * `false` (défaut) = REPORT-ONLY : le comportement actuel est conservé et les
+ * chemins qui *auraient* été bloqués sont journalisés. Cela permet de constituer
+ * l'inventaire réel du trafic avant de verrouiller, sans risquer de couper un
+ * parcours public non recensé — même logique qu'un CSP en report-only.
+ *
+ * `true` = la barrière refuse réellement. À activer une fois les logs
+ * `[AUTH-BARRIER][REPORT]` silencieux en préproduction.
+ */
+const AUTH_BARRIER_STRICT =
+  String(process.env.AUTH_BARRIER_STRICT || "").toLowerCase() === "true";
+
+app.use((req, res, next) => {
+  if (isOpenPath(req.path)) return next();
+
+  if (!AUTH_BARRIER_STRICT) {
+    // L'ancienne évaluation laissait tout /api/v1/* passer : on ne change pas
+    // le comportement, on l'observe.
+    const wasOpenBefore = req.path.startsWith("/api/v1/");
+
+    if (wasOpenBefore) {
+      logger.warn(
+        `[AUTH-BARRIER][REPORT] ${req.method} ${req.path} — ce chemin sera protégé quand AUTH_BARRIER_STRICT=true`
+      );
+      return next();
+    }
+  }
 
   return authMiddleware(req, res, next);
 });
