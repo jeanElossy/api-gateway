@@ -3,6 +3,7 @@
 const { v4: uuidv4 } = require("uuid");
 
 const { getActiveRules } = require("../src/services/pricing/ruleCache");
+const { recordCoverageGap } = require("../src/services/pricing/coverage");
 const PricingQuote = require("../src/models/PricingQuote");
 
 const {
@@ -514,6 +515,10 @@ exports.quote = async (req, res, next) => {
     return res.status(200).json(buildQuoteResponsePayload({ quote }));
   } catch (e) {
     if (e && e.status === 404 && e.details) {
+      // Consigné hors du chemin de réponse : un incident de journalisation ne
+      // doit jamais empêcher la réponse au client.
+      recordCoverageGap(e.details.normalizedRequest || {});
+
       return sendPricingError(
         res,
         404,
@@ -588,6 +593,10 @@ exports.lock = async (req, res, next) => {
     return res.status(200).json(buildLockResponsePayload({ doc }));
   } catch (e) {
     if (e && e.status === 404 && e.details) {
+      // Consigné hors du chemin de réponse : un incident de journalisation ne
+      // doit jamais empêcher la réponse au client.
+      recordCoverageGap(e.details.normalizedRequest || {});
+
       return sendPricingError(
         res,
         404,

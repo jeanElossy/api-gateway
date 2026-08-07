@@ -7,6 +7,7 @@ const {
   listPricingRules,
   getPricingRuleById,
   listPricingRuleVersions,
+  listCoverageGaps,
 } = require("../controllers/pricingRulesController");
 
 const authMod = require("../src/middlewares/auth");
@@ -32,6 +33,10 @@ const STAFF = ["admin", "superadmin"];
  * Ne pas les rétablir « temporairement ».
  */
 router.get("/", authMiddleware, requireRole(STAFF), listPricingRules);
+
+// ⚠️ Avant /:id : sinon « coverage-gaps » serait lu comme un identifiant.
+router.get("/coverage-gaps", authMiddleware, requireRole(STAFF), listCoverageGaps);
+
 router.get("/:id", authMiddleware, requireRole(STAFF), getPricingRuleById);
 router.get("/:id/versions", authMiddleware, requireRole(STAFF), listPricingRuleVersions);
 

@@ -3,6 +3,7 @@
 const mongoose = require("mongoose");
 const PricingRule = require("../src/models/PricingRule");
 const PricingRuleVersion = require("../src/models/PricingRuleVersion");
+const PricingCoverageGap = require("../src/models/PricingCoverageGap");
 const { getExchangeRate } = require("../src/services/exchangeRateService");
 
 function toBool(v, defaultValue = undefined) {
@@ -263,6 +264,48 @@ exports.listPricingRuleVersions = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Erreur lors de la lecture du journal de la règle",
+    });
+  }
+};
+
+/**
+ * GET /pricing-rules/coverage-gaps?days=30&includeResolved=false
+ *
+ * Les corridors demandés sans règle applicable. Faits constatés, pas matrice
+ * supposée : chaque ligne correspond à un échec réel du moteur.
+ */
+exports.listCoverageGaps = async (req, res) => {
+  try {
+    const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const filter = { lastSeenAt: { $gte: since } };
+    if (String(req.query.includeResolved ?? "") !== "true") {
+      filter.resolvedAt = null;
+    }
+
+    const items = await PricingCoverageGap.find(filter)
+      .sort({ occurrences: -1, lastSeenAt: -1 })
+      .limit(200)
+      .lean();
+
+    const totalOccurrences = items.reduce(
+      (sum, item) => sum + Number(item.occurrences || 0),
+      0
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: items,
+      total: items.length,
+      totalOccurrences,
+      days,
+    });
+  } catch (error) {
+    console.error("[pricingRules.coverageGaps] error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Erreur lors de la lecture des corridors non couverts",
     });
   }
 };
