@@ -918,6 +918,30 @@ app.use("/api/v1/aml", amlRoutes);
 app.use("/api/v1/fees", feesRoutes);
 app.use("/api/v1/exchange-rates", exchangeRateRoutes);
 
+/**
+ * /api/v1/pricing est ouvert sans JWT : le simulateur public en dépend. Il
+ * reste donc borné par un limiteur qui lui est propre, dimensionné pour un
+ * usage de simulateur et non de boucle automatisée.
+ *
+ * Chaque devis déclenche une lecture des règles (servie par le cache) et, si le
+ * corridor n'est pas en PASS_THROUGH figé, un appel FX externe.
+ */
+const pricingQuoteLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Number(process.env.PRICING_QUOTE_RATE_LIMIT || 60),
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  handler: (req, res) => {
+    setCorsHeaders(req, res);
+    res.status(429).json({
+      success: false,
+      message: "Trop de simulations tarifaires. Réessayez dans une minute.",
+    });
+  },
+});
+
+app.use("/api/v1/pricing", pricingQuoteLimiter);
 app.use("/api/v1/pricing", pricingRoutes);
 app.use("/api/v1/fx-rules", fxRulesRoutes);
 app.use("/api/v1/pricing-rules", pricingRulesRoutes);

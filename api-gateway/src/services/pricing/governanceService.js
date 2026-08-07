@@ -29,6 +29,8 @@ const {
   httpError,
 } = require("./governanceRules");
 
+const { invalidateRuleCache } = require("./ruleCache");
+
 /** `req.user` -> acteur stockable. */
 function toActor(user) {
   if (!user?._id && !user?.id) {
@@ -154,6 +156,9 @@ async function publish({ request, actor }) {
       throw err;
     }
   }
+
+  // Le prix vient de changer : le prochain devis doit relire la base.
+  invalidateRuleCache();
 
   return { rule, version };
 }
