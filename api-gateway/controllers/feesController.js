@@ -3,7 +3,6 @@
 const Fee = require("../src/models/Fee");
 const { getExchangeRate } = require("../src/services/exchangeRateService");
 const { normalizeCurrency } = require("../src/utils/currency");
-const { getAdjustedRate } = require("../src/services/fxRulesService");
 
 // Adaptateur : une seule vérité de prix, celle du moteur de tarification.
 // `roundMoney` n'est pas importé : ce fichier a déjà le sien, identique.
@@ -250,61 +249,6 @@ async function pickBestFeeRule(ctx) {
     });
 
   return ranked[0]?.doc || null;
-}
-
-function buildSimulationDebug({
-  ctx,
-  amountNum,
-  fromCur,
-  toCur,
-  bareme,
-  feeBreakdown,
-  fees,
-  netAfterFees,
-  fx,
-  baseRate,
-  adjusted,
-  appliedRate,
-  convertedAmount,
-  convertedNet,
-}) {
-  return {
-    requestNormalized: {
-      txType: ctx.txType || null,
-      method: ctx.method || null,
-      provider: ctx.provider || null,
-      country: ctx.country || null,
-      toCountry: ctx.toCountry || null,
-      amount: amountNum,
-      fromCurrency: fromCur,
-      toCurrency: toCur,
-    },
-
-    feeSource: fees,
-    feeRuleApplied: bareme || null,
-    feeBreakdown: feeBreakdown || null,
-
-    feeCalculation: {
-      grossFrom: amountNum,
-      fee: fees,
-      netAfterFees,
-      formula:
-        Number.isFinite(amountNum) && Number.isFinite(fees)
-          ? `${amountNum} - ${fees} = ${netAfterFees}`
-          : null,
-    },
-
-    fxRuleApplied: adjusted?.info || null,
-    fxCalculation: {
-      baseRate,
-      appliedRate,
-      convertedAmount,
-      convertedNetAfterFees: convertedNet,
-      source: fx?.source || null,
-      stale: !!fx?.stale,
-      warning: fx?.warning || null,
-    },
-  };
 }
 
 exports.getFees = async (req, res) => {
