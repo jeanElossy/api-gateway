@@ -769,15 +769,14 @@ const OPEN_EXACT = [
    * qui n'attache jamais de jeton (aucun intercepteur d'authentification).
    *
    * Volontairement en EXACT et non en préfixe : `/api/v1/announcements/:id/seen`
-   * reste protégé, et `/api/v1/users/*` n'est pas ouvert pour autant.
+   * reste protégé.
    *
-   * ⚠️ `/api/v1/users/avatar-by-email` expose l'existence d'un compte à partir
-   * d'une adresse e-mail, sans authentification. C'est une surface
-   * d'énumération d'utilisateurs. Elle est listée ici pour refléter l'usage
-   * RÉEL du client — pas pour l'entériner ; voir la note dans CLAUDE.md.
+   * `/api/v1/users/avatar-by-email` y a figuré brièvement, le temps de
+   * constater que ses deux écrans appelants sont post-connexion. Le client
+   * envoie désormais son jeton et la route est passée derrière `protect` côté
+   * backend : elle n'a plus rien à faire ici.
    */
   "/api/v1/announcements",
-  "/api/v1/users/avatar-by-email",
 ];
 
 const OPEN_PREFIX = [
