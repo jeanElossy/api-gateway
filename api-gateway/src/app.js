@@ -256,21 +256,50 @@ app.use((req, res, next) => {
   return next();
 });
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
-      if (isOriginAllowed(origin)) return cb(null, true);
-      return cb(new Error(`CORS blocked for origin: ${origin}`));
-    },
-    credentials: config.cors?.allowCredentials !== false,
-    methods: CORS_METHODS,
-    allowedHeaders: ALLOWED_HEADERS,
-    exposedHeaders: EXPOSED_HEADERS,
-    maxAge: 86400,
-    optionsSuccessStatus: 204,
-  })
-);
+const corsMiddleware = cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    if (isOriginAllowed(origin)) return cb(null, true);
+
+    /**
+     * Un refus CORS est une décision de contrôle d'accès, JAMAIS une erreur
+     * serveur. `cb(new Error(...))` remontait au gestionnaire d'erreurs global,
+     * qui répondait 500 avec la stack complète : chaque connexion d'origine non
+     * whitelistée noyait `logs/error.log` sous des incidents fantômes.
+     *
+     * `cb(null, false)` n'ajoute pas l'en-tête `Access-Control-Allow-Origin` —
+     * le navigateur bloque alors la lecture de la réponse côté client, ce qui
+     * EST le comportement CORS correct — sans transformer le refus en 500. La
+     * sécurité est inchangée : aucune origine non listée ne reçoit d'en-tête
+     * d'autorisation, et le CORS n'a jamais protégé des clients non-navigateur
+     * (curl, service à service), pour lesquels la barrière d'auth JWT reste la
+     * vraie protection.
+     */
+    return cb(null, false);
+  },
+  credentials: config.cors?.allowCredentials !== false,
+  methods: CORS_METHODS,
+  allowedHeaders: ALLOWED_HEADERS,
+  exposedHeaders: EXPOSED_HEADERS,
+  maxAge: 86400,
+  optionsSuccessStatus: 204,
+});
+
+app.use((req, res, next) => {
+  /**
+   * socket.io ne passe PAS par le CORS HTTP du gateway.
+   *
+   * Le gateway n'est ici qu'un proxy transparent vers le serveur socket.io du
+   * backend principal, qui gère lui-même l'origine et authentifie au handshake
+   * JWT. Soumettre le transport polling de socket.io à ce middleware rejetait
+   * toute connexion portant un `Origin` non whitelisté — y compris de vrais
+   * clients web — alors que les WebSockets ne sont de toute façon pas soumis à
+   * la same-origin policy : le contrôle n'apportait aucune sécurité et cassait
+   * le transport. Le proxy est monté plus bas (`app.use("/socket.io", …)`).
+   */
+  if (req.path.startsWith("/socket.io")) return next();
+  return corsMiddleware(req, res, next);
+});
 
 /* -------------------------------------------------------------------------- */
 /* Security / parsing                                                         */
