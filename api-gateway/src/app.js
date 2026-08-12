@@ -549,6 +549,7 @@ const PRINCIPAL_PREFIXES = [
   "/api/v1/tools",
   "/api/v1/moderation",
   "/api/v1/announcements",
+  "/api/v1/app-version",
   "/api/v1/referrals",
   "/api/v1/internal/referrals",
   "/api/v1/internal/referral",
@@ -806,6 +807,16 @@ const OPEN_EXACT = [
    * backend : elle n'a plus rien à faire ici.
    */
   "/api/v1/announcements",
+
+  /**
+   * Porte de mise à jour applicative. Interrogée AVANT la connexion, et c'est
+   * tout son intérêt : une version périmée doit être signalée même à quelqu'un
+   * qui n'arrive plus à se connecter avec elle. Ne divulgue rien — versions
+   * minimales et liens de store sont des informations publiques.
+   *
+   * En EXACT : seul `/check` est ouvert, le reste du préfixe reste protégé.
+   */
+  "/api/v1/app-version/check",
 ];
 
 const OPEN_PREFIX = [
