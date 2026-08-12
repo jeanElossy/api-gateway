@@ -65,16 +65,21 @@ Corrigé en `24714a7`. Deux tableaux distincts dans [src/app.js](src/app.js) :
 
 **La protection est donc inerte tant que la variable n'est pas passée à `true`.**
 
-Inventaire statique déjà fait (2026-08-12) — tous les appels **sans jeton** des deux clients tombent dans l'allowlist :
+Inventaire des appels **sans jeton**, corrigé le 2026-08-12 après lecture des logs réels :
 
 | Client | Chemins appelés sans jeton | Couvert par |
 |---|---|---|
-| Mobile | `/api/v1/public/*`, `/api/v1/fees/simulate`, `/api/v1/exchange-rates/rate`, `/api/v1/auth/*` | `OPEN_PREFIX` |
+| Mobile — `publicApi` (aucun intercepteur d'auth) | `/api/v1/auth/*`, `/api/v1/verification/start-phone` et `/check-phone`, `/api/v1/announcements`, `/api/v1/users/avatar-by-email` | `OPEN_PREFIX` + `OPEN_EXACT` |
+| Mobile — `txApi` | `/api/v1/public/*`, `/api/v1/fees/simulate`, `/api/v1/exchange-rates/rate` | `OPEN_PREFIX` |
 | Web | `/api/v1/jobs/*`, `/api/v1/auth/*`, `/api/v1/verification/*`, `/api/v1/contact` | `OPEN_PREFIX` |
 
-Trois entrées mortes ont été retirées de `publicPaths` côté mobile à cette occasion (`/fx/latest`, `/fx/history`, `/phone-verification/status`) : jamais appelées, et `phone-verification` n'est même pas relayé par le gateway.
+> ⚠️ **Piège qui a fait échouer un premier inventaire.** Le mobile a **deux** instances axios sans jeton : `publicApi` n'a *aucun* intercepteur d'authentification, et sa liste d'appels n'apparaît nulle part dans le tableau `publicPaths` (qui ne concerne que `txApi`). Vérifier les deux.
 
-**Avant de basculer** : laisser tourner en report-only le temps d'un cycle d'usage réel et vérifier que les logs `[AUTH-BARRIER][REPORT]` sont silencieux. L'analyse statique ne voit ni les webhooks de fournisseurs, ni les scripts d'exploitation, ni un client tiers oublié — c'est précisément ce que le mode observation est là pour attraper.
+`/api/v1/announcements` et `/api/v1/users/avatar-by-email` sont en `OPEN_EXACT` et non en préfixe : `/api/v1/announcements/:id/seen` reste protégé, et `/api/v1/users/*` n'est pas ouvert.
+
+**Dette de sécurité à trancher** — `/api/v1/users/avatar-by-email` renvoie l'avatar d'un compte à partir d'une **adresse e-mail, sans authentification**. C'est une surface d'énumération : on peut y tester l'existence d'un compte PayNoval. Elle figure dans l'allowlist pour refléter l'usage réel du client (écran de connexion), pas pour l'entériner. À revoir : jeton éphémère, limitation de débit stricte, ou suppression.
+
+**Avant de basculer** : laisser tourner en report-only le temps d'un cycle d'usage réel et vérifier que les logs `[AUTH-BARRIER][WOULD-BLOCK]` sont silencieux. Ces logs ne signalent que les requêtes **sans identifiant exploitable** — les seules qui casseraient. Une première version journalisait tout chemin hors allowlist, y compris les requêtes authentifiées : des milliers de lignes de bruit, inexploitables.
 
 ## Authentification : trois identifiants distincts
 

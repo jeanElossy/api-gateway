@@ -763,6 +763,21 @@ const OPEN_EXACT = [
   "/healthz",
   "/status",
   "/openapi.json",
+
+  /**
+   * Appelés par l'app mobile AVANT toute connexion, via l'instance `publicApi`
+   * qui n'attache jamais de jeton (aucun intercepteur d'authentification).
+   *
+   * Volontairement en EXACT et non en préfixe : `/api/v1/announcements/:id/seen`
+   * reste protégé, et `/api/v1/users/*` n'est pas ouvert pour autant.
+   *
+   * ⚠️ `/api/v1/users/avatar-by-email` expose l'existence d'un compte à partir
+   * d'une adresse e-mail, sans authentification. C'est une surface
+   * d'énumération d'utilisateurs. Elle est listée ici pour refléter l'usage
+   * RÉEL du client — pas pour l'entériner ; voir la note dans CLAUDE.md.
+   */
+  "/api/v1/announcements",
+  "/api/v1/users/avatar-by-email",
 ];
 
 const OPEN_PREFIX = [
@@ -812,6 +827,31 @@ function isOpenPath(path) {
 const AUTH_BARRIER_STRICT =
   String(process.env.AUTH_BARRIER_STRICT || "").toLowerCase() === "true";
 
+/**
+ * Le mode observation ne doit journaliser QUE ce qui casserait réellement.
+ *
+ * ⚠️ Première version défectueuse : elle journalisait tout chemin hors
+ * allowlist, y compris les requêtes porteuses d'un jeton valide — soit la
+ * quasi-totalité du trafic de l'application. Des milliers de lignes indiquant
+ * « sera protégé », qu'on lit naturellement comme « sera bloqué », alors que ces
+ * requêtes passeraient sans encombre. Du bruit à la place du signal, et un
+ * inventaire impossible à établir.
+ *
+ * Ce qui casserait en mode strict, c'est une requête SANS aucun identifiant
+ * exploitable. C'est cela, et cela seul, qu'on veut voir.
+ */
+function hasUsableCredential(req) {
+  const auth = String(req.headers.authorization || "");
+
+  if (/^bearer\s+\S+/i.test(auth)) return true;
+  if (req.headers["x-internal-token"]) return true;
+
+  // Requête publique signée en HMAC (voir requirePublicSignature).
+  if (req.headers["x-signature"] && req.headers["x-ts"]) return true;
+
+  return false;
+}
+
 app.use((req, res, next) => {
   if (isOpenPath(req.path)) return next();
 
@@ -821,9 +861,13 @@ app.use((req, res, next) => {
     const wasOpenBefore = req.path.startsWith("/api/v1/");
 
     if (wasOpenBefore) {
-      logger.warn(
-        `[AUTH-BARRIER][REPORT] ${req.method} ${req.path} — ce chemin sera protégé quand AUTH_BARRIER_STRICT=true`
-      );
+      if (!hasUsableCredential(req)) {
+        logger.warn(
+          `[AUTH-BARRIER][WOULD-BLOCK] ${req.method} ${req.path} — sans identifiant, ` +
+            `cette requête sera REFUSÉE quand AUTH_BARRIER_STRICT=true`
+        );
+      }
+
       return next();
     }
   }
