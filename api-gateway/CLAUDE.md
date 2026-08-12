@@ -69,15 +69,19 @@ Inventaire des appels **sans jeton**, corrigé le 2026-08-12 après lecture des 
 
 | Client | Chemins appelés sans jeton | Couvert par |
 |---|---|---|
-| Mobile — `publicApi` (aucun intercepteur d'auth) | `/api/v1/auth/*`, `/api/v1/verification/start-phone` et `/check-phone`, `/api/v1/announcements`, `/api/v1/users/avatar-by-email` | `OPEN_PREFIX` + `OPEN_EXACT` |
+| Mobile — `publicApi` (aucun intercepteur d'auth) | `/api/v1/auth/*`, `/api/v1/verification/start-phone` et `/check-phone`, `/api/v1/announcements` | `OPEN_PREFIX` + `OPEN_EXACT` |
 | Mobile — `txApi` | `/api/v1/public/*`, `/api/v1/fees/simulate`, `/api/v1/exchange-rates/rate` | `OPEN_PREFIX` |
 | Web | `/api/v1/jobs/*`, `/api/v1/auth/*`, `/api/v1/verification/*`, `/api/v1/contact` | `OPEN_PREFIX` |
 
 > ⚠️ **Piège qui a fait échouer un premier inventaire.** Le mobile a **deux** instances axios sans jeton : `publicApi` n'a *aucun* intercepteur d'authentification, et sa liste d'appels n'apparaît nulle part dans le tableau `publicPaths` (qui ne concerne que `txApi`). Vérifier les deux.
 
-`/api/v1/announcements` et `/api/v1/users/avatar-by-email` sont en `OPEN_EXACT` et non en préfixe : `/api/v1/announcements/:id/seen` reste protégé, et `/api/v1/users/*` n'est pas ouvert.
+`/api/v1/announcements` est en `OPEN_EXACT` et non en préfixe : `/api/v1/announcements/:id/seen` reste protégé.
 
-**Dette de sécurité à trancher** — `/api/v1/users/avatar-by-email` renvoie l'avatar d'un compte à partir d'une **adresse e-mail, sans authentification**. C'est une surface d'énumération : on peut y tester l'existence d'un compte PayNoval. Elle figure dans l'allowlist pour refléter l'usage réel du client (écran de connexion), pas pour l'entériner. À revoir : jeton éphémère, limitation de débit stricte, ou suppression.
+**Dette de sécurité soldée le 2026-08-12** — `/api/v1/users/avatar-by-email` a figuré dans cette allowlist, au motif erroné qu'elle servait l'écran de connexion. Vérification faite, ses deux appelants (`addPaynoval.js`, `transaction-review.js`) sont post-connexion : il n'y avait aucun arbitrage produit à rendre, seulement un oubli. La route est **retirée de l'allowlist**, le mobile l'appelle désormais via `api` (avec jeton), et le backend la passe derrière `protect` + un limiteur par compte.
+
+Sa voisine `/api/v1/users/info-by-email` était publique elle aussi et fuyait bien davantage — identifiant, nom complet, e-mail, avatar pour toute adresse devinée. Même correctif. **Elle n'est pas orpheline** : trois appelants passent par le helper `fetchUserByEmail` (deux écrans mobile, un écran back-office), invisibles si l'on cherche le chemin d'URL plutôt que le helper. Ne pas la supprimer.
+
+Conséquence pour tester : un appel sans jeton sur ces deux routes est désormais rejeté **par le gateway**, avant tout proxy. Un `401` obtenu ici ne prouve donc rien sur le `protect` du backend — pour valider les deux couches, viser aussi le backend en direct.
 
 **Avant de basculer** : laisser tourner en report-only le temps d'un cycle d'usage réel et vérifier que les logs `[AUTH-BARRIER][WOULD-BLOCK]` sont silencieux. Ces logs ne signalent que les requêtes **sans identifiant exploitable** — les seules qui casseraient. Une première version journalisait tout chemin hors allowlist, y compris les requêtes authentifiées : des milliers de lignes de bruit, inexploitables.
 
