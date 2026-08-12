@@ -35,7 +35,7 @@ Le démarrage est fail-fast : [src/config/index.js](src/config/index.js) valide 
 1. garde-fou des logs prod → CORS (`setCorsHeaders` manuel + `cors()`) → helmet / mongo-sanitize / xss-clean / hpp → parsers de body
 2. limiters spécifiques (login, announcements) → en-têtes `no-store` sur `/api/v1` → limiter global par IP → limiter public
 3. docs & health → proxy WebSocket `/socket.io` vers le principal
-4. **barrière d'authentification** : tout chemin qui ne correspond *pas* à `openEndpoints[]` passe par `authMiddleware`
+4. **barrière d'authentification** : tout chemin qui ne correspond *pas* à l'allowlist passe par `authMiddleware` — voir la section dédiée plus bas, la règle n'est plus un simple tableau de préfixes
 5. vérification de signature HMAC sur `/api/v1/public/*` → `publicRoutes`
 6. `auditHeaders` → limiters par utilisateur (rôles privilégiés ignorés)
 7. contrôle de disponibilité Mongo — uniquement pour `mongoRequiredPrefixes[]`
@@ -46,9 +46,35 @@ Le démarrage est fail-fast : [src/config/index.js](src/config/index.js) valide 
 Conséquences quand on ajoute un endpoint :
 
 - Une route native doit être montée **avant** l'étape 9, sinon le proxy l'absorbe. `/api/v1/admin/compliance` est montée avant le proxy `/api/v1/admin` exactement pour cette raison — voir le commentaire à [src/app.js:860](src/app.js#L860).
-- Accessible sans JWT → l'ajouter dans `openEndpoints[]`.
+- Accessible sans JWT → l'ajouter dans `OPEN_EXACT` (ce chemin seul) ou `OPEN_PREFIX` (ce chemin et son sous-arbre). Ne jamais réintroduire une entrée large comme `/api/v1` dans `OPEN_PREFIX`.
 - Touche à Mongo → ajouter son préfixe dans `mongoRequiredPrefixes[]` pour renvoyer une 500 propre au lieu de rester bloqué quand la base est down.
 - Les réponses d'erreur/429/502 rappellent `setCorsHeaders(req, res)` car elles répondent en dehors du middleware `cors()`. À conserver lors de l'ajout de nouveaux gestionnaires terminaux.
+
+## Barrière d'authentification — refus par défaut, en deux temps
+
+L'ancienne liste mélangeait deux natures de règles dans un seul tableau évalué en préfixe. L'entrée `"/api/v1"` faisait passer **tout** `/api/v1/*` : la barrière ne filtrait plus rien. Aucune porte n'était réellement ouverte (chaque routeur natif réapplique son garde, et le proxy fait réauthentifier le principal), mais la défense en profondeur était réduite à une seule couche.
+
+Corrigé en `24714a7`. Deux tableaux distincts dans [src/app.js](src/app.js) :
+
+- `OPEN_EXACT` — ouvert pour **ce chemin seulement** (racines d'information : `/`, `/api/v1`, `/healthz`, `/status`, `/openapi.json`).
+- `OPEN_PREFIX` — ouvert pour ce chemin **et tout son sous-arbre**.
+
+### Bascule `AUTH_BARRIER_STRICT`
+
+`false` par défaut = **report-only** : le comportement historique est conservé, et tout chemin qui *aurait* été bloqué est journalisé en `[AUTH-BARRIER][REPORT]`. Même logique qu'un CSP en report-only — on constitue l'inventaire du trafic réel avant de verrouiller.
+
+**La protection est donc inerte tant que la variable n'est pas passée à `true`.**
+
+Inventaire statique déjà fait (2026-08-12) — tous les appels **sans jeton** des deux clients tombent dans l'allowlist :
+
+| Client | Chemins appelés sans jeton | Couvert par |
+|---|---|---|
+| Mobile | `/api/v1/public/*`, `/api/v1/fees/simulate`, `/api/v1/exchange-rates/rate`, `/api/v1/auth/*` | `OPEN_PREFIX` |
+| Web | `/api/v1/jobs/*`, `/api/v1/auth/*`, `/api/v1/verification/*`, `/api/v1/contact` | `OPEN_PREFIX` |
+
+Trois entrées mortes ont été retirées de `publicPaths` côté mobile à cette occasion (`/fx/latest`, `/fx/history`, `/phone-verification/status`) : jamais appelées, et `phone-verification` n'est même pas relayé par le gateway.
+
+**Avant de basculer** : laisser tourner en report-only le temps d'un cycle d'usage réel et vérifier que les logs `[AUTH-BARRIER][REPORT]` sont silencieux. L'analyse statique ne voit ni les webhooks de fournisseurs, ni les scripts d'exploitation, ni un client tiers oublié — c'est précisément ce que le mode observation est là pour attraper.
 
 ## Authentification : trois identifiants distincts
 
