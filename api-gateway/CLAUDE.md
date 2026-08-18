@@ -13,14 +13,18 @@ PayNoval **API Gateway** : un service Express en frontal de
 
 Le gateway *possède* aussi nativement quelques domaines (pricing/FX/frais, conformité AML & sanctions, orchestration des transactions) adossés à sa propre base MongoDB.
 
-CommonJS, JavaScript uniquement, pas d'étape de build, pas de suite de tests, aucun linter configuré.
+CommonJS, JavaScript uniquement, pas d'étape de build, aucun linter configuré. Une suite de tests existe (`test/`, runner natif `node:test`).
 
 ## Commandes
 
 ```bash
-npm start                  # node src/server.js — le seul script npm
+npm start                  # node src/server.js
+npm test                   # node --test "test/**/*.test.js" — 61 tests dans test/{moderation,pricing}
+node --test test/pricing/diff.test.js   # un seul fichier de test
 node generate-secrets.js   # régénère JWT_SECRET / INTERNAL_TOKEN et réécrit .env
 ```
+
+Le glob est **indispensable** : `node --test test/` (l'ancien script, corrigé le 2026-08-18) résout `test/` comme un module CommonJS et échoue en `MODULE_NOT_FOUND` sur Node 22. Les tests couvrent la logique pure (règles de pricing, gardes de modération) et ne démarrent ni serveur ni connexion Mongo — conserver cette propriété pour toute nouvelle suite.
 
 Vérifications runtime : `GET /healthz` (gateway seul), `GET /status` (ping `/health` sur chaque provider activé dans [src/providers.json](src/providers.json)), Swagger UI sur `/docs`, spec brute sur `/openapi.json`.
 
@@ -124,7 +128,7 @@ En sortie vers le principal, le proxy injecte `x-internal-token: PRINCIPAL_INTER
 ## Conventions
 
 - Architecture en couches : routes → controllers → services → models. Les routes ne contiennent aucune logique métier, les controllers restent minces.
-- Format de réponse `{ success: boolean, ... }` avec `data` en cas de succès et `error` + souvent `message`/`code` en cas d'échec. **Les messages destinés à l'utilisateur sont en français** ; les identifiants et le code restent en anglais. Les explications à l'utilisateur se font en français (voir [.claude/memory/conventions.md](.claude/memory/conventions.md)). Ne pas convertir le projet en TypeScript.
+- Format de réponse `{ success: boolean, ... }` avec `data` en cas de succès et `error` + souvent `message`/`code` en cas d'échec. **Les messages destinés à l'utilisateur sont en français** ; les identifiants et le code restent en anglais. Les explications à l'utilisateur se font en français (voir [`../../.claude/context/conventions.md`](../../.claude/context/conventions.md) — le `.claude/` présent dans ce dépôt est une copie obsolète d'un ancien template, ne pas s'y fier). Ne pas convertir le projet en TypeScript.
 - De nombreux services/routes utilisent un helper défensif `reqAny([...chemins])` qui essaie plusieurs chemins de require. Il existe à cause du découpage racine/`src` — le conserver lors des modifications plutôt que de le « nettoyer » en un require unique.
 - [src/app.js](src/app.js) réduit `console.*` au silence en production (`SILENCE_PROD_LOGS`, `SHOW_PROD_WARNINGS`). Tout ce qui doit survivre en production passe par le `logger` winston ([src/logger.js](src/logger.js)), qui écrit aussi `logs/combined.log` et `logs/error.log`.
 - Les messages de commit de l'historique suivent le format `gateway paynoval file update vNNN`.
