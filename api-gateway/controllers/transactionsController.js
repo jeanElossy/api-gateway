@@ -131,6 +131,17 @@ exports.listTransactions = async (req, res) => {
       },
     });
 
+    /**
+     * `Retry-After` accompagne les 429 et 503 produits par l'orchestrateur.
+     * Sans lui, le client ne peut que deviner quand réessayer — et devine mal,
+     * en général en réessayant tout de suite, ce qui aggrave la saturation.
+     */
+    if (out?.headers && typeof out.headers === "object") {
+      for (const [name, value] of Object.entries(out.headers)) {
+        if (value != null) res.set(name, String(value));
+      }
+    }
+
     return res.status(out.status || 200).json(out.body);
   } catch (err) {
     console.error(

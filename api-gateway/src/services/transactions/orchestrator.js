@@ -98,6 +98,54 @@ async function getTransactionOrThrow(req) {
  * garde encore un provider par requête, mais avec cache/fallback défensif.
  * Pour ton usage actuel ça reste acceptable.
  */
+/**
+ * ÉCHEC DE CHARGEMENT — ET NON « AUCUNE TRANSACTION ».
+ *
+ * ═══ CE QUE CE CODE FAISAIT, ET POURQUOI C'ÉTAIT GRAVE ══════════════════════
+ *
+ * Quatre chemins d'erreur — service absent, refroidissement fournisseur, défi
+ * Cloudflare, erreur HTTP — répondaient tous `200 { success: true, data: [] }`.
+ * Autrement dit : « la requête a réussi, vous n'avez aucune transaction ».
+ *
+ * L'application mobile est pourtant écrite correctement : sur erreur, elle
+ * affiche un message ET restaure son cache local. Le faux succès la privait de
+ * ce filet, puis — bien pire — écrasait ce cache avec la liste vide
+ * (`AsyncStorage.setItem('transactions_<id>', '[]')`). Une seule limite de débit
+ * atteinte suffisait donc à faire *disparaître* l'historique, y compris hors
+ * ligne. C'est exactement ce qui a été observé le 2026-08-19.
+ *
+ * ═══ CE QUE FONT STRIPE, PAYPAL ET WISE ═════════════════════════════════════
+ *
+ * Aucun ne déguise une panne en succès. Un dépassement de quota est un **429**
+ * accompagné de `Retry-After` ; un service en difficulté est un **503**. Le
+ * client sait alors distinguer « rien à afficher » de « je n'ai pas pu
+ * regarder » — distinction sans laquelle aucune reprise n'est possible, ni par
+ * la machine, ni par l'utilisateur.
+ */
+function listFailure({ status, code, message, retryAfterSec = null }) {
+  const headers = {};
+
+  // `Retry-After` est ce qui rend l'erreur exploitable sans deviner : le client
+  // sait quand réessayer au lieu de marteler le service déjà en peine.
+  if (Number.isFinite(retryAfterSec) && retryAfterSec > 0) {
+    headers["Retry-After"] = String(Math.ceil(retryAfterSec));
+  }
+
+  return {
+    status,
+    headers,
+    body: {
+      success: false,
+      code,
+      error: message,
+      message,
+      ...(Number.isFinite(retryAfterSec) && retryAfterSec > 0
+        ? { retryAfterSec: Math.ceil(retryAfterSec) }
+        : {}),
+    },
+  };
+}
+
 async function listTransactionsOrFallback(req) {
   const provider = normalizeProviderForRouting(
     resolveProviderForRequest(req, "paynoval")
@@ -138,37 +186,25 @@ async function listTransactionsOrFallback(req) {
 
   const compute = async () => {
     if (!targetService) {
-      return {
-        status: 200,
-        body: {
-          success: true,
-          data: [],
-          count: 0,
-          total: 0,
-          limit: Number(req.query?.limit || 25),
-          skip: Number(req.query?.skip || 0),
-          warning: "no_provider_service",
-        },
-      };
+      return listFailure({
+        status: 503,
+        code: "no_provider_service",
+        message:
+          "Le service de paiement n'est pas configuré. Réessayez dans un instant.",
+      });
     }
 
     const url = `${cleanBaseUrl(targetService)}/transactions`;
 
     const cdBefore = getProviderCooldown(url);
     if (cdBefore) {
-      return {
-        status: 200,
-        body: {
-          success: true,
-          data: [],
-          count: 0,
-          total: 0,
-          limit: Number(req.query?.limit || 25),
-          skip: Number(req.query?.skip || 0),
-          warning: "provider_cooldown",
-          retryAfterSec: cdBefore.retryAfterSec,
-        },
-      };
+      return listFailure({
+        status: 503,
+        code: "provider_cooldown",
+        message:
+          "Le service de paiement est momentanément indisponible. Réessayez dans un instant.",
+        retryAfterSec: cdBefore.retryAfterSec,
+      });
     }
 
     try {
@@ -197,21 +233,16 @@ async function listTransactionsOrFallback(req) {
     } catch (err) {
       if (err.isProviderCooldown || err.isCloudflareChallenge) {
         const cd = err.cooldown || getProviderCooldown(url);
-        return {
-          status: 200,
-          body: {
-            success: true,
-            data: [],
-            count: 0,
-            total: 0,
-            limit: Number(req.query?.limit || 25),
-            skip: Number(req.query?.skip || 0),
-            warning: err.isCloudflareChallenge
-              ? "provider_cloudflare_challenge"
-              : "provider_cooldown",
-            retryAfterSec: cd?.retryAfterSec,
-          },
-        };
+
+        return listFailure({
+          status: 503,
+          code: err.isCloudflareChallenge
+            ? "provider_cloudflare_challenge"
+            : "provider_cooldown",
+          message:
+            "Le service de paiement est momentanément indisponible. Réessayez dans un instant.",
+          retryAfterSec: cd?.retryAfterSec,
+        });
       }
 
       const status = err.response?.status || err.status || 502;
@@ -226,29 +257,56 @@ async function listTransactionsOrFallback(req) {
           "Trop de requêtes vers le service de paiement. Merci de patienter quelques instants.";
       }
 
-      logger.error?.("[Gateway][TX] Erreur GET transactions (no DB fallback)", {
+      logger.error?.("[Gateway][TX] Erreur GET transactions", {
         status,
         error,
         provider,
       });
 
-      return {
-        status: 200,
-        body: {
-          success: true,
-          data: [],
-          count: 0,
-          total: 0,
-          limit: Number(req.query?.limit || 25),
-          skip: Number(req.query?.skip || 0),
-          warning: "provider_unavailable",
-        },
-      };
+      /**
+       * Le 429 du fournisseur est relayé TEL QUEL, avec son `Retry-After`.
+       * Le traduire en 503 effacerait l'information la plus utile : ce n'est
+       * pas le service qui est en panne, c'est nous qui avons trop demandé.
+       */
+      if (status === 429) {
+        const retryAfterSec =
+          Number(err.response?.headers?.["retry-after"]) || 30;
+
+        return listFailure({
+          status: 429,
+          code: "rate_limited",
+          message: error,
+          retryAfterSec,
+        });
+      }
+
+      /**
+       * Une erreur 4xx du fournisseur est relayée : elle décrit la requête.
+       * Tout le reste devient 503 — c'est un incident de service, pas une
+       * faute du client, et c'est ce que le client doit pouvoir réessayer.
+       */
+      return listFailure({
+        status: status >= 400 && status < 500 ? status : 503,
+        code: "provider_unavailable",
+        message: error,
+      });
     }
   };
 
   const promise = (async () => {
     const out = await compute();
+
+    /**
+     * ⚠️ UN ÉCHEC NE SE MET PAS EN CACHE.
+     *
+     * Le cache retenait indistinctement succès et erreurs. Une seule limite de
+     * débit atteinte servait donc la même erreur à toutes les requêtes
+     * suivantes pendant la durée de vie de l'entrée — y compris après le
+     * rétablissement du fournisseur. On prolongeait la panne au lieu de la
+     * laisser se résorber.
+     */
+    if (!out || Number(out.status) >= 400) return out;
+
     listTxCache.set(cacheKey, out);
     return out;
   })();
