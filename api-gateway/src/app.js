@@ -551,8 +551,24 @@ const PRINCIPAL_PREFIXES = [
   "/api/v1/announcements",
   "/api/v1/app-version",
   "/api/v1/referrals",
-  "/api/v1/internal/referrals",
-  "/api/v1/internal/referral",
+
+  /**
+   * ⚠️ `/api/v1/internal/referral` et `/api/v1/internal/referrals` ONT ÉTÉ
+   * RETIRÉS DE CETTE LISTE — ne pas les remettre.
+   *
+   * Ces endpoints évaluent l'éligibilité d'un bonus et déclenchent un versement.
+   * Les proxifier ici les rendait joignables depuis Internet : ils figuraient de
+   * surcroît dans `OPEN_PREFIX`, donc sans aucune authentification au niveau du
+   * gateway, protégés par le seul secret partagé du backend principal — lequel
+   * laissait passer les requêtes lorsque sa variable d'environnement était
+   * absente.
+   *
+   * Le parrainage est un échange strictement service-à-service : Tx-Core appelle
+   * le backend principal directement, sur le réseau privé. Rien ne doit
+   * l'atteindre par la porte publique. Toute requête publique vers ces chemins
+   * tombe désormais sur le 404 final, ce qui est le comportement voulu.
+   */
+
   "/api/v1/fx",
   "/api/v1/analytics",
 ];
@@ -833,7 +849,15 @@ const OPEN_PREFIX = [
   "/api/v1/pricing",
 
   "/internal/transactions",
-  "/api/v1/internal",
+
+  /**
+   * Restreint depuis `/api/v1/internal`, qui ouvrait TOUT l'espace interne.
+   * Seules les deux routes natives du gateway (`/transactions/notify` et
+   * `/transactions/log`) ont besoin d'être joignables ici, et elles portent
+   * chacune `validateInternalToken`. Élargir ce préfixe rouvrirait la porte au
+   * parrainage et à tout endpoint interne ajouté plus tard.
+   */
+  "/api/v1/internal/transactions",
   "/api/v1/transactions/internal",
 
   "/api/v1/jobs",
