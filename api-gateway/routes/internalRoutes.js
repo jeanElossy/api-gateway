@@ -13,7 +13,7 @@ const {
 let notifyTransactionEvent = null;
 try {
   // eslint-disable-next-line global-require
-  notifyTransactionEvent = require("../src/services/transactionNotificationService")
+  notifyTransactionEvent = require("../src/services/transactionNotificationRelay")
     .notifyTransactionEvent;
 } catch {
   notifyTransactionEvent = null;
