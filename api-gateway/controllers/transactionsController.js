@@ -20,6 +20,22 @@ const {
   logInternalTransactionOrThrow,
 } = require("../src/services/transactions/orchestrator");
 
+/**
+ * ⚠️ CORRECTIF DE SÉCURITÉ (audit transactionnel).
+ *
+ * Ce contrôleur journalisait `req.body` intégralement à onze endroits, dont le
+ * chemin d'erreur de `/initiate` — qui passe par `console.error`, le seul
+ * niveau que le garde-fou de production de `src/app.js` ne réduit PAS au
+ * silence. La réponse à la question de sécurité partait donc en clair dans les
+ * journaux de production à chaque échec d'initiation.
+ *
+ * La logique de masquage vit dans un module pur (`src/utils/redactSensitive`)
+ * plutôt qu'ici : ce fichier tire l'orchestrateur, donc `src/config`, qui
+ * appelle `process.exit(1)` hors d'un environnement complet — il est
+ * intestable. Le module, lui, est couvert par `test/redactSensitive.test.js`.
+ */
+const { redactSensitive: redactBody } = require("../src/utils/redactSensitive");
+
 function safeJson(value) {
   try {
     return JSON.stringify(value, null, 2);
@@ -160,10 +176,10 @@ exports.listTransactions = async (req, res) => {
 
 exports.initiateTransaction = async (req, res) => {
   try {
-    console.log("[Gateway][Controller][initiateTransaction] request.body", req?.body);
+    console.log("[Gateway][Controller][initiateTransaction] request.body", redactBody(req?.body));
     console.log(
       "[Gateway][Controller][initiateTransaction] request.body.json",
-      safeJson(req?.body)
+      safeJson(redactBody(req?.body))
     );
 
     const out = await initiateTransactionOrThrow(req);
@@ -178,7 +194,7 @@ exports.initiateTransaction = async (req, res) => {
   } catch (err) {
     console.error("[Gateway][Controller][initiateTransaction] error", {
       ...buildErrorDetails(err),
-      requestBody: req?.body,
+      requestBody: redactBody(req?.body),
     });
 
     return sendProxyError(res, err, "Erreur interne provider");
@@ -188,7 +204,7 @@ exports.initiateTransaction = async (req, res) => {
 exports.confirmTransaction = async (req, res) => {
   try {
     console.log("[Gateway][Controller][confirmTransaction] request", {
-      body: req?.body,
+      body: redactBody(req?.body),
       params: req?.params,
       query: req?.query,
     });
@@ -213,7 +229,7 @@ exports.confirmTransaction = async (req, res) => {
 exports.cancelTransaction = async (req, res) => {
   try {
     console.log("[Gateway][Controller][cancelTransaction] request", {
-      body: req?.body,
+      body: redactBody(req?.body),
       params: req?.params,
       query: req?.query,
     });
@@ -238,7 +254,7 @@ exports.cancelTransaction = async (req, res) => {
 exports.refundTransaction = async (req, res) => {
   try {
     console.log("[Gateway][Controller][refundTransaction] request", {
-      body: req?.body,
+      body: redactBody(req?.body),
       params: req?.params,
       query: req?.query,
     });
@@ -263,7 +279,7 @@ exports.refundTransaction = async (req, res) => {
 exports.reassignTransaction = async (req, res) => {
   try {
     console.log("[Gateway][Controller][reassignTransaction] request", {
-      body: req?.body,
+      body: redactBody(req?.body),
       params: req?.params,
       query: req?.query,
     });
@@ -288,7 +304,7 @@ exports.reassignTransaction = async (req, res) => {
 exports.validateTransaction = async (req, res) => {
   try {
     console.log("[Gateway][Controller][validateTransaction] request", {
-      body: req?.body,
+      body: redactBody(req?.body),
       params: req?.params,
       query: req?.query,
     });
@@ -313,7 +329,7 @@ exports.validateTransaction = async (req, res) => {
 exports.archiveTransaction = async (req, res) => {
   try {
     console.log("[Gateway][Controller][archiveTransaction] request", {
-      body: req?.body,
+      body: redactBody(req?.body),
       params: req?.params,
       query: req?.query,
     });
@@ -338,7 +354,7 @@ exports.archiveTransaction = async (req, res) => {
 exports.relaunchTransaction = async (req, res) => {
   try {
     console.log("[Gateway][Controller][relaunchTransaction] request", {
-      body: req?.body,
+      body: redactBody(req?.body),
       params: req?.params,
       query: req?.query,
     });
@@ -363,7 +379,7 @@ exports.relaunchTransaction = async (req, res) => {
 exports.logInternalTransaction = async (req, res) => {
   try {
     console.log("[Gateway][Controller][logInternalTransaction] request", {
-      body: req?.body,
+      body: redactBody(req?.body),
     });
 
     const out = await logInternalTransactionOrThrow(req);
