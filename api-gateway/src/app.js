@@ -847,6 +847,22 @@ const OPEN_EXACT = [
    * (`ANALYTICS_REQUIRE_KEY`) sont appliquées côté backend principal.
    */
   "/api/v1/analytics/collect",
+
+  /**
+   * Formulaire de contact du site public. Envoyé par un visiteur anonyme, qui
+   * n'a par définition aucun jeton à présenter.
+   *
+   * En EXACT, et c'est le changement : le préfixe entier était ouvert, donc
+   * `GET /api/v1/contact` et `GET /api/v1/contact/:id` l'étaient aussi. Ces
+   * deux routes servent les tickets d'un utilisateur — elles exigent désormais
+   * `protect` côté backend, et n'ont plus rien à faire dans une liste
+   * d'ouverture.
+   *
+   * Seule la création est publique. Elle est limitée en débit sur la route
+   * (5 envois par quart d'heure et par adresse), ce qui compte pour un endpoint
+   * qui déclenche deux e-mails à chaque appel.
+   */
+  "/api/v1/contact",
 ];
 
 const OPEN_PREFIX = [
@@ -875,7 +891,6 @@ const OPEN_PREFIX = [
   "/api/v1/transactions/internal",
 
   "/api/v1/jobs",
-  "/api/v1/contact",
   "/api/v1/reports",
   "/api/v1/feedback/threads",
   "/api/v1/provider-webhooks",
