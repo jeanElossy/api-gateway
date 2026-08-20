@@ -833,6 +833,20 @@ const OPEN_EXACT = [
    * En EXACT : seul `/check` est ouvert, le reste du préfixe reste protégé.
    */
   "/api/v1/app-version/check",
+
+  /**
+   * Collecte analytique du site public. Appelée par le navigateur d'un visiteur
+   * anonyme, qui n'a par définition aucun jeton à présenter.
+   *
+   * En EXACT, et c'est tout l'objet du changement : le préfixe entier était
+   * ouvert auparavant, ce qui rendait publiques les LECTURES d'audience
+   * (`/overview`, `/geography`, …). Seule l'écriture l'est désormais.
+   *
+   * Elle n'est pas sans défense pour autant : limitation de débit sur la route,
+   * liste blanche de `siteId` et clé de collecte optionnelle
+   * (`ANALYTICS_REQUIRE_KEY`) sont appliquées côté backend principal.
+   */
+  "/api/v1/analytics/collect",
 ];
 
 const OPEN_PREFIX = [
@@ -865,7 +879,22 @@ const OPEN_PREFIX = [
   "/api/v1/reports",
   "/api/v1/feedback/threads",
   "/api/v1/provider-webhooks",
-  "/api/v1/analytics",
+
+  /**
+   * ⚠️ `/api/v1/analytics` figurait ici, en PRÉFIXE.
+   *
+   * Tout le sous-arbre était donc réputé public — y compris les lectures
+   * `/overview`, `/geography`, `/top-pages` et `/locales`, qui exposent
+   * l'audience du site : fréquentation, pays d'origine, pages les plus
+   * consultées. Le routeur backend ne posait lui non plus aucun garde. La
+   * combinaison rendait ces chiffres lisibles par quiconque connaissait l'URL.
+   *
+   * Seule la collecte a besoin d'être ouverte : elle est appelée par le
+   * navigateur d'un visiteur anonyme, qui ne peut présenter aucun jeton. Elle
+   * passe donc en EXACT ci-dessus, et les lectures repassent derrière la
+   * barrière d'authentification. Côté backend, `routes/analytics.routes.js`
+   * exige désormais un rôle `admin` ou `superadmin` sur ces mêmes lectures.
+   */
 ];
 
 /** Conservé pour compatibilité de lecture : plus aucun code ne doit s'en servir. */
