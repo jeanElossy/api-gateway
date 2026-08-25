@@ -73,6 +73,8 @@ const xssClean = require("xss-clean");
 const hpp = require("hpp");
 const morgan = require("morgan");
 const mongoose = require("mongoose");
+const { getUsersConnection } = require("./db");
+const { createReadiness } = require("./services/readiness");
 const axios = require("axios");
 const rateLimit = require("./middlewares/rateLimiter");
 const {
@@ -128,6 +130,35 @@ const shouldLogVerbose = !IS_PRODUCTION && config.nodeEnv !== "test";
 /**
  * 1 = un proxy de confiance devant la gateway.
  */
+/**
+ * Sondes de disponibilité — voir `src/services/readiness.js`.
+ *
+ * `main` est la connexion mongoose globale de la passerelle, `users` la
+ * connexion secondaire ouverte par `createConnection`. Les deux sont requises :
+ * une passerelle qui ne peut pas lire les utilisateurs ne peut authentifier
+ * personne.
+ */
+const readiness = createReadiness({
+  readConnections: () => {
+    const states = ["disconnected", "connected", "connecting", "disconnecting"];
+    const label = (rs) => states[rs] || "unknown";
+
+    let users = "not_initialized";
+    try {
+      const conn = getUsersConnection?.();
+      if (conn) users = label(conn.readyState);
+    } catch {}
+
+    return { main: label(mongoose.connection.readyState), users };
+  },
+  required: ["main", "users"],
+  logger,
+});
+
+// Exposé au bootstrap : c'est lui qui sait quand les connexions sont ouvertes
+// et quand l'arrêt commence.
+app.set("readiness", readiness);
+
 app.set("trust proxy", 1);
 
 /* -------------------------------------------------------------------------- */
@@ -480,12 +511,46 @@ app.get("/api/v1", (_req, res) => {
   });
 });
 
+/**
+ * VIVACITÉ. Toujours 200 tant que la boucle d'événements répond.
+ *
+ * Elle ne doit dépendre d'AUCUNE dépendance externe : répondre 503 sur une
+ * panne Mongo ferait redémarrer l'instance en boucle, ce qui ne répare pas
+ * Mongo. Voir `src/services/readiness.js`.
+ */
 app.get("/healthz", (_req, res) =>
   res.json({
     status: "ok",
     ts: new Date().toISOString(),
   })
 );
+
+/**
+ * DISPONIBILITÉ. 503 quand une connexion critique manque ou pendant le vidage.
+ *
+ * ⚠️ C'est CETTE route que le répartiteur de charge doit interroger, pas
+ * `/healthz`. La passerelle est ce que le mobile atteint en premier : une
+ * instance dont Mongo est déconnectée doit sortir de la rotation, pas répondre
+ * 500 à chaque appel.
+ *
+ * Le disjoncteur des fournisseurs n'y figure PAS : un fournisseur en panne ne
+ * doit pas retirer la passerelle de la rotation — elle sert bien d'autres
+ * routes, et toutes les instances tomberaient ensemble.
+ */
+app.get("/readyz", (_req, res) => {
+  const state = readiness.snapshot();
+
+  // Un répartiteur ou un CDN qui mettrait la réponse en cache continuerait de
+  // croire l'instance disponible après sa chute.
+  res.set("Cache-Control", "no-store");
+
+  return res.status(state.httpStatus).json({
+    ready: state.ready,
+    status: state.status,
+    checks: state.checks,
+    ts: new Date().toISOString(),
+  });
+});
 
 app.get("/status", async (_req, res) => {
   const statuses = {};
