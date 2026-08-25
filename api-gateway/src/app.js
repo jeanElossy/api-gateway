@@ -131,6 +131,21 @@ const shouldLogVerbose = !IS_PRODUCTION && config.nodeEnv !== "test";
 app.set("trust proxy", 1);
 
 /* -------------------------------------------------------------------------- */
+/* Identifiant de corrélation                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Monté AVANT tout le reste — limiteurs, proxys, validation, gestionnaire
+ * d'erreur. Sans quoi un rejet 429 ou une erreur de validation serait
+ * journalisé sans identifiant, c'est-à-dire précisément dans les cas où l'on
+ * cherche à comprendre ce qui s'est passé.
+ *
+ * La logique vit dans `utils/requestId.js` : module pur, donc testable.
+ */
+const { requestIdMiddleware } = require("./utils/requestId");
+app.use(requestIdMiddleware);
+
+/* -------------------------------------------------------------------------- */
 /* CORS                                                                       */
 /* -------------------------------------------------------------------------- */
 
