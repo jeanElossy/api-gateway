@@ -114,3 +114,67 @@ test("l'enveloppeur garde la signature d'express-rate-limit", () => {
   assert.equal(mw.length, 3);
   assert.equal(typeof rateLimit.MemoryStore, "function");
 });
+
+/**
+ * Résilience — ce qui a été observé en production : Redis injoignable,
+ * `increment()` qui rejette à chaque requête, et express-rate-limit qui imprime
+ * une trace d'appel complète **par requête**. La panne du cache devenait une
+ * inondation de journaux, et surtout : plus aucune limitation du tout.
+ */
+class FakeMemoryStore {
+  constructor() { this.hits = 0; }
+  init() {}
+  async increment() { this.hits += 1; return { totalHits: this.hits, resetTime: undefined }; }
+  async decrement() {}
+  async resetKey() {}
+}
+
+class BrokenRedisStore {
+  init() {}
+  async increment() { throw new Error("Stream isn't writeable"); }
+  async decrement() { throw new Error("Stream isn't writeable"); }
+  async resetKey() {}
+}
+
+test("le magasin enveloppé ne rejette jamais, même Redis à terre", async () => {
+  const factory = createStoreFactory({
+    client: fakeClient,
+    RedisStore: BrokenRedisStore,
+    MemoryStore: FakeMemoryStore,
+    logger: { warn() {} },
+  });
+
+  const store = factory.makeStore({ name: "gw-resilient" });
+
+  const r = await store.increment("k");
+  assert.equal(r.totalHits, 1);
+});
+
+test("pendant la panne, la limitation continue en mémoire", async () => {
+  const factory = createStoreFactory({
+    client: fakeClient,
+    RedisStore: BrokenRedisStore,
+    MemoryStore: FakeMemoryStore,
+    logger: { warn() {} },
+  });
+
+  const store = factory.makeStore({ name: "gw-compte" });
+
+  assert.equal((await store.increment("k")).totalHits, 1);
+  assert.equal((await store.increment("k")).totalHits, 2);
+});
+
+test("la journalisation de panne est étranglée", async () => {
+  const warnings = [];
+  const factory = createStoreFactory({
+    client: fakeClient,
+    RedisStore: BrokenRedisStore,
+    MemoryStore: FakeMemoryStore,
+    logger: { warn: (m) => warnings.push(m) },
+  });
+
+  const store = factory.makeStore({ name: "gw-silencieux" });
+  for (let i = 0; i < 100; i += 1) await store.increment("k");
+
+  assert.ok(warnings.length <= 1, `attendu <= 1, obtenu ${warnings.length}`);
+});

@@ -65,6 +65,8 @@
  * démarre jamais et l'on retombe en mémoire sans s'en apercevoir.
  */
 
+const { createResilientStore } = require("./resilientStore");
+
 const DEFAULT_PREFIX_ROOT = "rl";
 
 /**
@@ -176,6 +178,7 @@ function reservePrefix(registry, { name, owner, root = DEFAULT_PREFIX_ROOT }) {
 function createStoreFactory({
   client = null,
   RedisStore = null,
+  MemoryStore = null,
   registry = createRegistry(),
   logger = null,
   prefixRoot = DEFAULT_PREFIX_ROOT,
@@ -208,9 +211,35 @@ function createStoreFactory({
 
     if (!enabled) return null;
 
-    return new RedisStore({
+    const primary = new RedisStore({
       prefix,
       sendCommand: (...args) => client.call(...args),
+    });
+
+    /**
+     * ⚠️ LE MAGASIN REDIS N'EST JAMAIS RENDU NU.
+     *
+     * Sans enveloppe, une coupure Redis fait rejeter `increment()` à CHAQUE
+     * requête. `passOnStoreError` laisse alors passer — c'est le bon
+     * comportement — mais express-rate-limit imprime au passage une trace
+     * d'appel complète **par requête**. Sur un service en charge, la panne du
+     * cache devient une inondation de journaux, qui coûte plus cher que la
+     * panne elle-même et masque tout le reste.
+     *
+     * Pire : « laisser passer » signifie **plus aucune limitation du tout**.
+     * Le service se retrouve sans protection pendant l'incident.
+     *
+     * L'enveloppe résout les deux : bascule sur un compteur EN MÉMOIRE (dégradé
+     * — chaque instance compte pour elle — mais infiniment mieux que rien),
+     * période de repos pour ne pas repayer le délai de connexion à chaque
+     * requête, et journalisation étranglée à un message par tranche.
+     */
+    if (!MemoryStore) return primary;
+
+    return createResilientStore({
+      primary,
+      fallback: new MemoryStore(),
+      logger,
     });
   }
 
@@ -230,6 +259,19 @@ function createStoreFactory({
 let _factory = null;
 let _client = null;
 
+/**
+ * Décrit la cible sans jamais divulguer d'identifiant : une URL Redis contient
+ * le mot de passe, et les journaux d'un PaaS sont largement lisibles.
+ */
+function describeTarget(url) {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.hostname}:${u.port || 6379}`;
+  } catch {
+    return "URL illisible";
+  }
+}
+
 function buildClient(url, { Redis, logger }) {
   const client = new Redis(url, {
     /**
@@ -247,11 +289,35 @@ function buildClient(url, { Redis, logger }) {
     ...(url.startsWith("rediss://") ? { tls: {} } : {}),
   });
 
+  /**
+   * ⚠️ Un `error` sans écouteur sur un client ioredis fait tomber le processus.
+   *
+   * Le message est volontairement ACTIONNABLE : quand Redis ne répond pas, le
+   * symptôme observé (« Stream isn't writeable ») ne dit rien de la cause. On
+   * affiche donc l'hôte visé — jamais les identifiants — et les causes réelles
+   * par ordre de fréquence.
+   */
+  let lastErrorLoggedAt = 0;
+
   client.on("error", (err) => {
-    logger?.warn?.(
-      `[rate-limit] Redis indisponible — les requêtes passent sans limitation : ${
+    const t = Date.now();
+    if (t - lastErrorLoggedAt < 30_000) return;
+    lastErrorLoggedAt = t;
+
+    logger?.error?.(
+      `[rate-limit] Redis INJOIGNABLE (${describeTarget(url)}) : ${
         err?.message || err
-      }`
+      }\n` +
+        "  Le comptage bascule en mémoire — les requêtes ne sont pas bloquées.\n" +
+        "  Causes par ordre de fréquence :\n" +
+        "   1. URL EXTERNE utilisée en interne : une URL Render externe est en " +
+        "`rediss://` et n'est joignable que depuis l'extérieur. Utiliser " +
+        "l'« Internal Redis URL » (`redis://red-xxxxx:6379`).\n" +
+        "   2. Région différente de celle du service, ou instance dans un autre " +
+        "compte / une autre équipe Render.\n" +
+        "   3. Schéma incorrect : `redis://` sur une instance qui exige TLS, ou " +
+        "`rediss://` sur une instance qui ne le fait pas.\n" +
+        "   4. Mot de passe contenant @ / : sans encodage pourcent."
     );
   });
 
@@ -297,7 +363,16 @@ function getFactory() {
   }
 
   _client = buildClient(url, { Redis, logger });
-  _factory = createStoreFactory({ client: _client, RedisStore, logger });
+
+  let MemoryStore = null;
+  try {
+    ({ MemoryStore } = require("express-rate-limit"));
+  } catch {
+    // Sans magasin de repli, on rend le magasin Redis nu : `passOnStoreError`
+    // reste le filet, au prix d'une journalisation bavarde.
+  }
+
+  _factory = createStoreFactory({ client: _client, RedisStore, MemoryStore, logger });
 
   return _factory;
 }
