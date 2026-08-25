@@ -125,6 +125,15 @@ En sortie vers le principal, le proxy injecte `x-internal-token: PRINCIPAL_INTER
 
 **Règle devises** — seuls les codes ISO (`EUR`, `XOF`, `XAF`, `CAD`, `USD`) sont stockés et transportés ; jamais de symboles type `€` ou `F CFA`. Une transaction porte un côté source (`amountSource`/`currencySource`/`feeSource`) et un côté target. Voir [src/help/multi-currency.md](src/help/multi-currency.md).
 
+### Redis — limitation de débit (2026-08-25)
+
+Architecture complète : [`../../.claude/context/redis.md`](../../.claude/context/redis.md).
+
+- **Ne plus requérir `express-rate-limit` directement** : utiliser `src/middlewares/rateLimiter.js` (même signature, magasin partagé + compartiment dédié + `passOnStoreError`).
+- Les 9 limiteurs sont **nommés explicitement**, et ce n'est pas cosmétique : `globalIpLimiter` et `userLimiter` produisent tous deux une clé `ip:<adresse>` pour un appelant anonyme. Sans préfixe distinct ils partageraient un compteur, et atteindre la limite globale fermerait aussi la limite par compte.
+- `src/services/rateLimitStore.js` est une **copie** de celui du backend (dépôts séparés, pas de paquet commun) : toute correction dans l'un doit être reportée dans l'autre.
+- `REDIS_URL` absente ⇒ comptage en mémoire, journalisé au démarrage.
+
 ## Conventions
 
 - Architecture en couches : routes → controllers → services → models. Les routes ne contiennent aucune logique métier, les controllers restent minces.
