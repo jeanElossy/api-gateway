@@ -1,6 +1,6 @@
 "use strict";
 
-const rateLimit = require("express-rate-limit");
+const rateLimit = require("./rateLimiter");
 const logger = require("../logger");
 
 /**
@@ -80,6 +80,7 @@ function isNoisyPath(req) {
 /* 1) Bouclier global par IP                                          */
 /* ------------------------------------------------------------------ */
 const globalIpLimiter = rateLimit({
+  name: "gw-global-ip",
   windowMs: 60 * 1000,
   max: 1200,
   standardHeaders: true,
@@ -112,6 +113,7 @@ const globalIpLimiter = rateLimit({
 /* 2) Anti brute-force LOGIN                                          */
 /* ------------------------------------------------------------------ */
 const authLoginLimiter = rateLimit({
+  name: "gw-auth-login",
   windowMs: 10 * 60 * 1000,
   max: 12,
   standardHeaders: true,
@@ -147,6 +149,7 @@ const authLoginLimiter = rateLimit({
 /* 3) Limiteur dédié /users/me                                        */
 /* ------------------------------------------------------------------ */
 const meLimiter = rateLimit({
+  name: "gw-users-me",
   windowMs: 60 * 1000,
   max: 120,
   standardHeaders: true,
@@ -178,6 +181,7 @@ const meLimiter = rateLimit({
 /* 4) Limiteur dédié /announcements                                   */
 /* ------------------------------------------------------------------ */
 const announcementsLimiter = rateLimit({
+  name: "gw-announcements",
   windowMs: 60 * 1000,
   max: 240,
   standardHeaders: true,
@@ -213,6 +217,7 @@ const announcementsLimiter = rateLimit({
 /* 5) Limiteur dédié admin transactions                               */
 /* ------------------------------------------------------------------ */
 const adminTransactionsLimiter = rateLimit({
+  name: "gw-admin-transactions",
   windowMs: 60 * 1000,
   max: 180,
   standardHeaders: true,
@@ -261,6 +266,7 @@ const adminTransactionsLimiter = rateLimit({
  * zéro.
  */
 const adminAdjustmentsLimiter = rateLimit({
+  name: "gw-admin-adjustments",
   windowMs: 60 * 1000,
   max: 20,
   standardHeaders: true,
@@ -295,6 +301,7 @@ const adminAdjustmentsLimiter = rateLimit({
 /* 6) Limiteur global par user                                        */
 /* ------------------------------------------------------------------ */
 const userLimiter = rateLimit({
+  name: "gw-user-global",
   windowMs: 60 * 1000,
   max: 300,
   standardHeaders: true,

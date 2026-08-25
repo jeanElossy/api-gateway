@@ -74,7 +74,7 @@ const hpp = require("hpp");
 const morgan = require("morgan");
 const mongoose = require("mongoose");
 const axios = require("axios");
-const rateLimit = require("express-rate-limit");
+const rateLimit = require("./middlewares/rateLimiter");
 const {
   createProxyMiddleware,
   fixRequestBody,
@@ -430,6 +430,7 @@ app.use((req, res, next) => {
 
 if (config.rateLimit?.public) {
   const publicLimiter = rateLimit({
+  name: "gw-public",
     windowMs: config.rateLimit.public.windowMs,
     max: config.rateLimit.public.max,
     standardHeaders: true,
@@ -1149,6 +1150,7 @@ app.use("/api/v1/exchange-rates", exchangeRateRoutes);
  * corridor n'est pas en PASS_THROUGH figé, un appel FX externe.
  */
 const pricingQuoteLimiter = rateLimit({
+  name: "gw-pricing-quote",
   windowMs: 60 * 1000,
   max: Number(process.env.PRICING_QUOTE_RATE_LIMIT || 60),
   standardHeaders: true,
