@@ -16,6 +16,9 @@ const logger = require('./logger');
     // Si tu veux initialiser cette connexion à chaque démarrage (recommandé si utilisé)
     await connectToUsersDB();
 
+    // Les deux connexions sont ouvertes : /readyz peut passer au vert.
+    app.get("readiness")?.markStarted();
+
     // 3️⃣ Démarrage du serveur Express
     const PORT = config.port || 4000;
     const server = app.listen(PORT, () => {
@@ -23,6 +26,41 @@ const logger = require('./logger');
         `[Gateway] API listening on port ${PORT} (${config.nodeEnv})`
       );
     });
+
+    /**
+     * ARRÊT PROGRESSIF.
+     *
+     * `/readyz` bascule en 503 AVANT la fermeture : le répartiteur retire
+     * l'instance de la rotation pendant que les requêtes en cours se terminent.
+     * Sans ce délai, chaque redéploiement coupe des requêtes en vol — sur la
+     * passerelle, ce sont des appels de paiement interrompus côté mobile.
+     */
+    const DRAIN_DELAY_MS = Number(process.env.DRAIN_DELAY_MS || 5000);
+    let shuttingDown = false;
+
+    const shutdown = async (sig) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+
+      logger.info(`[Gateway] Arrêt demandé (${sig}) — vidage en cours`);
+
+      try {
+        app.get("readiness")?.beginDraining();
+        await new Promise((r) => setTimeout(r, DRAIN_DELAY_MS));
+      } catch (e) {
+        logger.error(`[Gateway] Erreur pendant le vidage: ${e?.message || e}`);
+      }
+
+      try {
+        await new Promise((resolve) => server.close(resolve));
+      } catch (e) {
+        logger.error(`[Gateway] Erreur fermeture HTTP: ${e?.message || e}`);
+      }
+
+      process.exit(0);
+    };
+
+    ["SIGTERM", "SIGINT"].forEach((sig) => process.on(sig, () => shutdown(sig)));
 
     // 4️⃣ Gestion des erreurs serveur (port déjà utilisé, etc.)
     server.on('error', (err) => {
