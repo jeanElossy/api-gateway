@@ -58,17 +58,26 @@ function resolveTransactionFlow(payload = {}) {
     return TRANSACTION_FLOWS.PAYNOVAL_TO_CARD_PAYOUT;
   }
 
-  if (action === "deposit" && funds === "bank" && destination === "paynoval") {
-    return TRANSACTION_FLOWS.BANK_TRANSFER_TO_PAYNOVAL;
-  }
-
-  if (
-    (action === "withdraw" || action === "send") &&
-    funds === "paynoval" &&
-    destination === "bank"
-  ) {
-    return TRANSACTION_FLOWS.PAYNOVAL_TO_BANK_PAYOUT;
-  }
+  /**
+   * ⚠️ AUCUNE DEMANDE NE DEVIENT PLUS UN FLUX BANCAIRE. Retiré le 2026-08-26.
+   *
+   * Deux branches se trouvaient ici : `deposit` depuis « bank », et `withdraw`
+   * ou `send` vers « bank ». Elles fabriquaient `BANK_TRANSFER_TO_PAYNOVAL` et
+   * `PAYNOVAL_TO_BANK_PAYOUT`.
+   *
+   * Le §1 de l'architecture cible dit que PayNoval n'a AUCUN rail bancaire
+   * direct. PayNoval démarre sur trois rails : interne, mobile money, cartes.
+   *
+   * C'EST ICI QUE LA PORTE SE FERME, et c'est le bon endroit : `flowResolver`
+   * est le seul point qui traduit une demande utilisateur en flux. Une demande
+   * bancaire tombe désormais en `UNKNOWN_FLOW`, que l'orchestrateur refuse —
+   * plutôt que d'être routée vers un rail de remplacement, ce qui déplacerait
+   * de l'argent par un chemin que personne n'a choisi.
+   *
+   * Les CONSTANTES de flux bancaires sont conservées : des transactions
+   * héritées peuvent les porter, et l'admin doit pouvoir les lire, les annuler
+   * et les rembourser. On ferme la création, pas la lecture.
+   */
 
   return TRANSACTION_FLOWS.UNKNOWN_FLOW;
 }
