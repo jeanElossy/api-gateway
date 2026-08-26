@@ -20,7 +20,6 @@ module.exports = [
   { funds: "paynoval", destination: "mobilemoney", action: "send", provider: "mobilemoney" },
 
   // Wallet PayNoval → Banque
-  { funds: "paynoval", destination: "bank", action: "send", provider: "bank" },
 
   // Wallet PayNoval → Stripe (ex: payout card-like si tu le supportes)
   { funds: "paynoval", destination: "stripe", action: "send", provider: "stripe" },
@@ -39,14 +38,12 @@ module.exports = [
   { funds: "mobilemoney", destination: "paynoval", action: "deposit", provider: "mobilemoney" },
 
   // ✅ Bank → PayNoval
-  { funds: "bank", destination: "paynoval", action: "deposit", provider: "bank" },
 
   /* -----------------------------
    * WITHDRAW (wallet -> destination)
    * ----------------------------- */
 
   // ✅ PayNoval → bank
-  { funds: "paynoval", destination: "bank", action: "withdraw", provider: "bank" },
 
   // ✅ PayNoval → mobilemoney
   { funds: "paynoval", destination: "mobilemoney", action: "withdraw", provider: "mobilemoney" },

@@ -23,7 +23,7 @@ const fxRuleSchema = new mongoose.Schema(
       default: "",
       trim: true,
       uppercase: true,
-      enum: ["MOBILEMONEY", "BANK", "CARD", "INTERNAL", ""],
+      enum: ["MOBILEMONEY", "CARD", "INTERNAL", ""],
       index: true,
     },
 

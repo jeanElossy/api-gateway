@@ -61,7 +61,7 @@ const ScopeSchema = new mongoose.Schema(
 
     method: {
       type: String,
-      enum: ["MOBILEMONEY", "BANK", "CARD", "INTERNAL", "ALL"],
+      enum: ["MOBILEMONEY", "CARD", "INTERNAL", "ALL"],
       default: "ALL",
       index: true,
     },

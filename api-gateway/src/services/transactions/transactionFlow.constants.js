@@ -15,8 +15,8 @@ const TRANSACTION_FLOWS = Object.freeze({
   CARD_TOPUP_TO_PAYNOVAL: "CARD_TOPUP_TO_PAYNOVAL",
   PAYNOVAL_TO_CARD_PAYOUT: "PAYNOVAL_TO_CARD_PAYOUT",
 
-  BANK_TRANSFER_TO_PAYNOVAL: "BANK_TRANSFER_TO_PAYNOVAL",
-  PAYNOVAL_TO_BANK_PAYOUT: "PAYNOVAL_TO_BANK_PAYOUT",
+  // Pas de flux bancaire : le rail a été retiré le 2026-08-26 (§1).
+  // PayNoval opère sur trois rails — interne, mobile money, cartes.
 
   UNKNOWN_FLOW: "UNKNOWN_FLOW",
 });
@@ -30,8 +30,6 @@ const FLOW_TO_DEFAULT_PROVIDER = Object.freeze({
   [TRANSACTION_FLOWS.CARD_TOPUP_TO_PAYNOVAL]: "stripe",
   [TRANSACTION_FLOWS.PAYNOVAL_TO_CARD_PAYOUT]: "visa_direct",
 
-  [TRANSACTION_FLOWS.BANK_TRANSFER_TO_PAYNOVAL]: "bank",
-  [TRANSACTION_FLOWS.PAYNOVAL_TO_BANK_PAYOUT]: "bank",
 
   [TRANSACTION_FLOWS.UNKNOWN_FLOW]: "paynoval",
 });
@@ -47,7 +45,6 @@ function getDefaultProviderForFlow(flow) {
 function isExternalPayoutFlow(flow) {
   return [
     TRANSACTION_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT,
-    TRANSACTION_FLOWS.PAYNOVAL_TO_BANK_PAYOUT,
     TRANSACTION_FLOWS.PAYNOVAL_TO_CARD_PAYOUT,
   ].includes(flow);
 }
@@ -55,7 +52,6 @@ function isExternalPayoutFlow(flow) {
 function isExternalCollectionFlow(flow) {
   return [
     TRANSACTION_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL,
-    TRANSACTION_FLOWS.BANK_TRANSFER_TO_PAYNOVAL,
     TRANSACTION_FLOWS.CARD_TOPUP_TO_PAYNOVAL,
   ].includes(flow);
 }

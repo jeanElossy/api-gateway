@@ -24,7 +24,6 @@ const { postToPaynovalService } = require("./providerAdapters/paynovalAdapter");
 const {
   postToMobileMoneyService,
 } = require("./providerAdapters/mobilemoneyAdapter");
-const { postToBankService } = require("./providerAdapters/bankAdapter");
 const { postToCardService } = require("./providerAdapters/cardAdapter");
 
 function getTransactionIdFromReq(req) {
@@ -65,10 +64,6 @@ function getProviderForAdminAction({ flow, body, canonicalTx = null }) {
     case TRANSACTION_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL:
     case TRANSACTION_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT:
       return "mobilemoney";
-
-    case TRANSACTION_FLOWS.BANK_TRANSFER_TO_PAYNOVAL:
-    case TRANSACTION_FLOWS.PAYNOVAL_TO_BANK_PAYOUT:
-      return "bank";
 
     case TRANSACTION_FLOWS.CARD_TOPUP_TO_PAYNOVAL:
       return "stripe";
@@ -130,14 +125,6 @@ async function routeAdminActionByFlow(req, action) {
   switch (provider) {
     case "mobilemoney":
       return postToMobileMoneyService({
-        req,
-        serviceUrl,
-        endpoint: `/transactions/${action}`,
-        body,
-      });
-
-    case "bank":
-      return postToBankService({
         req,
         serviceUrl,
         endpoint: `/transactions/${action}`,

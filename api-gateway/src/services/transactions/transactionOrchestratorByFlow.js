@@ -46,7 +46,6 @@ const { safeAxiosRequest } = require("./httpClient");
 
 const { postToPaynovalService } = require("./providerAdapters/paynovalAdapter");
 const { postToMobileMoneyService } = require("./providerAdapters/mobilemoneyAdapter");
-const { postToBankService } = require("./providerAdapters/bankAdapter");
 const { postToCardService } = require("./providerAdapters/cardAdapter");
 
 function cleanBaseUrl(url) {
@@ -150,12 +149,10 @@ function normalizeMethod(v, { funds = "", destination = "", provider = "" } = {}
     return "INTERNAL";
   }
 
-  if (method === "BANK") return "BANK";
   if (method === "CARD") return "CARD";
   if (method === "MOBILEMONEY") return "MOBILEMONEY";
   if (method === "MOBILE_MONEY") return "MOBILEMONEY";
 
-  if (d === "bank" || p === "bank") return "BANK";
   if (d === "mobilemoney" || p === "mobilemoney") return "MOBILEMONEY";
   if (d === "stripe" || p === "stripe" || p === "visa_direct") return "CARD";
 
@@ -211,13 +208,6 @@ function getProviderForFlow({ flow, body, canonicalTx = null }) {
     flow === TRANSACTION_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT
   ) {
     return "mobilemoney";
-  }
-
-  if (
-    flow === TRANSACTION_FLOWS.BANK_TRANSFER_TO_PAYNOVAL ||
-    flow === TRANSACTION_FLOWS.PAYNOVAL_TO_BANK_PAYOUT
-  ) {
-    return "bank";
   }
 
   if (flow === TRANSACTION_FLOWS.CARD_TOPUP_TO_PAYNOVAL) {
@@ -487,15 +477,6 @@ async function dispatchToProvider({ req, provider, serviceUrl, endpoint, body })
     switch (provider) {
       case "mobilemoney":
         out = await postToMobileMoneyService({
-          req,
-          serviceUrl,
-          endpoint,
-          body,
-        });
-        break;
-
-      case "bank":
-        out = await postToBankService({
           req,
           serviceUrl,
           endpoint,

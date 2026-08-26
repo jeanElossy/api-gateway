@@ -21,7 +21,7 @@ const feeSchema = new mongoose.Schema(
       type: String,
       trim: true,
       uppercase: true,
-      enum: ["MOBILEMONEY", "BANK", "CARD", "INTERNAL", ""],
+      enum: ["MOBILEMONEY", "CARD", "INTERNAL", ""],
       default: "",
       index: true,
     },

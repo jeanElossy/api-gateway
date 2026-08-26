@@ -82,14 +82,53 @@ test("les trois rails offerts continuent de se résoudre", () => {
   );
 });
 
-test("les CONSTANTES bancaires sont conservées — on ferme la création, pas la lecture", () => {
+test("aucune constante de flux bancaire ne subsiste", () => {
   /**
-   * Des transactions héritées peuvent porter ces flux. L'admin doit pouvoir les
-   * lire, les annuler et les rembourser ; les e-mails doivent pouvoir les
-   * nommer. Retirer les constantes casserait l'administration d'un historique
-   * qu'on ne peut pas réécrire — et le §26 interdit de faire disparaître une
-   * écriture financière en silence.
+   * Les constantes avaient d'abord été CONSERVÉES, le temps de vérifier qu'aucune
+   * transaction héritée ne les portait. L'utilisateur l'a confirmé le
+   * 2026-08-26 : il n'y en a aucune en base. Elles sont donc retirées.
+   *
+   * ⚠️ POURQUOI CE TEST COMPTE PLUS QU'IL N'EN A L'AIR. Tant qu'une constante
+   * vaut `undefined`, une comparaison `flow === TRANSACTION_FLOWS.BANK_...`
+   * devient `flow === undefined` — donc VRAIE pour un flux non défini. Un flux
+   * inconnu serait alors routé vers le rail bancaire. C'est le piège rencontré
+   * pendant ce retrait, deux fois : dans l'orchestrateur et dans le routeur
+   * admin. Les constantes doivent disparaître AVEC leurs comparaisons.
    */
-  assert.equal(TRANSACTION_FLOWS.BANK_TRANSFER_TO_PAYNOVAL, "BANK_TRANSFER_TO_PAYNOVAL");
-  assert.equal(TRANSACTION_FLOWS.PAYNOVAL_TO_BANK_PAYOUT, "PAYNOVAL_TO_BANK_PAYOUT");
+  assert.equal(TRANSACTION_FLOWS.BANK_TRANSFER_TO_PAYNOVAL, undefined);
+  assert.equal(TRANSACTION_FLOWS.PAYNOVAL_TO_BANK_PAYOUT, undefined);
+
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const dir = path.join(__dirname, "../../src/services/transactions");
+
+  for (const f of [
+    "transactionOrchestratorByFlow.js",
+    "adminFlowRouter.js",
+    "transactionFlow.constants.js",
+    "flowResolver.js",
+  ]) {
+    const src = fs.readFileSync(path.join(dir, f), "utf8");
+    const actif = src
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("*") && !l.trim().startsWith("//"))
+      .join("\n");
+
+    assert.ok(
+      !/TRANSACTION_FLOWS\.(BANK_TRANSFER_TO_PAYNOVAL|PAYNOVAL_TO_BANK_PAYOUT)/.test(actif),
+      `${f} compare encore à une constante bancaire — elle vaut undefined`
+    );
+  }
+});
+
+test("les trois rails offerts restent routables", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const src = fs.readFileSync(
+    path.join(__dirname, "../../src/services/transactions/adminFlowRouter.js"),
+    "utf8"
+  );
+  for (const rail of ["mobilemoney", "stripe", "visa_direct"]) {
+    assert.ok(src.includes(rail), `le rail ${rail} doit rester routable`);
+  }
 });
