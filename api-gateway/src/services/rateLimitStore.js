@@ -53,10 +53,18 @@
  *   • `passOnStoreError: true` (natif depuis express-rate-limit 7) — une erreur
  *     du magasin laisse la requête continuer au lieu de produire un 500 ;
  *
- *   • `enableOfflineQueue: false` sur le client Redis — sans cela, ioredis met
- *     les commandes **en file d'attente** pendant une coupure. La requête ne
- *     rendrait pas d'erreur : elle attendrait. Chaque appel HTTP resterait
- *     bloqué jusqu'au délai de connexion, et le fail-open ne servirait à rien.
+ *   • `enableOfflineQueue: false` sur le client Redis **une fois connecté** —
+ *     sans cela, ioredis met les commandes **en file d'attente** pendant une
+ *     coupure. La requête ne rendrait pas d'erreur : elle attendrait. Chaque
+ *     appel HTTP resterait bloqué jusqu'au délai de connexion, et le fail-open
+ *     ne servirait à rien.
+ *
+ *     ⚠️ « UNE FOIS CONNECTÉ » N'EST PAS UN DÉTAIL. Poser `false` dès la
+ *     construction faisait rejeter les deux `SCRIPT LOAD` que `RedisStore`
+ *     envoie dans son constructeur, avant même que la socket soit ouverte — et
+ *     ces rejets, jamais attendus par `rate-limit-redis`, ont tué la passerelle
+ *     au déploiement du 2026-08-26. La file est donc ouverte le temps de la
+ *     connexion, puis fermée. Voir `redisStoreSafety.js`.
  *
  * ═══ TLS ══════════════════════════════════════════════════════════════════
  *
@@ -66,6 +74,10 @@
  */
 
 const { createResilientStore } = require("./resilientStore");
+const {
+  closeOfflineQueueWhenReady,
+  neutralizeScriptLoadRejections,
+} = require("./redisStoreSafety");
 const { resolveRedisConnection } = require("./redisUrl");
 
 const DEFAULT_PREFIX_ROOT = "rl";
@@ -212,10 +224,13 @@ function createStoreFactory({
 
     if (!enabled) return null;
 
-    const primary = new RedisStore({
-      prefix,
-      sendCommand: (...args) => client.call(...args),
-    });
+    const primary = neutralizeScriptLoadRejections(
+      new RedisStore({
+        prefix,
+        sendCommand: (...args) => client.call(...args),
+      }),
+      { logger }
+    );
 
     /**
      * ⚠️ LE MAGASIN REDIS N'EST JAMAIS RENDU NU.
@@ -280,7 +295,19 @@ function buildClient(url, { Redis, logger }) {
      * d'échouer : chaque requête HTTP se bloquerait jusqu'au délai de
      * connexion, et le repli « laisser passer » ne s'appliquerait jamais.
      */
-    enableOfflineQueue: false,
+    /**
+     * ⚠️ `true` AU DÉMARRAGE, `false` DÈS LA CONNEXION ÉTABLIE.
+     *
+     * `false` d'emblée faisait REJETER les deux `SCRIPT LOAD` que le
+     * constructeur de `RedisStore` envoie immédiatement — la socket n'étant pas
+     * encore ouverte. `rate-limit-redis` stocke ces promesses sans les
+     * attendre : le rejet non géré a tué la passerelle au déploiement du
+     * 2026-08-26.
+     *
+     * La bascule est posée par `closeOfflineQueueWhenReady` juste en dessous.
+     * Le raisonnement complet est dans `redisStoreSafety.js`.
+     */
+    enableOfflineQueue: true,
 
     maxRetriesPerRequest: 2,
     connectTimeout: 5000,
@@ -289,6 +316,9 @@ function buildClient(url, { Redis, logger }) {
     // TLS uniquement si l'URL le demande — l'imposer casse `redis://`.
     ...(url.startsWith("rediss://") ? { tls: {} } : {}),
   });
+
+  // Ferme la file d'attente hors ligne dès la première connexion établie.
+  closeOfflineQueueWhenReady(client, { logger });
 
   /**
    * ⚠️ Un `error` sans écouteur sur un client ioredis fait tomber le processus.
