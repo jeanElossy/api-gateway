@@ -66,6 +66,7 @@
  */
 
 const { createResilientStore } = require("./resilientStore");
+const { resolveRedisConnection } = require("./redisUrl");
 
 const DEFAULT_PREFIX_ROOT = "rl";
 
@@ -332,15 +333,25 @@ function getFactory() {
   if (_factory) return _factory;
 
   const logger = safeLogger();
-  const url = String(process.env.REDIS_URL || "").trim();
+  /**
+   * La PRÉSENCE d'une variable n'est pas sa VALIDITÉ, et `REDIS_URL` n'est pas
+   * la seule forme acceptée : `redisUrl.js` gère aussi REDIS_HOST/PORT/…
+   *
+   * ⚠️ Ce fichier est une COPIE de `paynoval-backend/services/rateLimitStore.js`
+   * (dépôts séparés, pas de paquet commun). Toute correction ici doit être
+   * reportée là-bas, et réciproquement.
+   */
+  const conn = resolveRedisConnection({
+    logger,
+    scope: "rate-limit",
+    consequence:
+      "Comptage EN MÉMOIRE : correct sur une seule instance ; à plusieurs, " +
+      "chaque limite est multipliée par le nombre d'instances.",
+  });
+
+  const url = conn.url;
 
   if (!url) {
-    logger?.warn?.(
-      "[rate-limit] REDIS_URL absent — comptage EN MÉMOIRE. " +
-        "Correct sur une seule instance ; à plusieurs, chaque limite est " +
-        "multipliée par le nombre d'instances."
-    );
-
     _factory = createStoreFactory({ logger });
     return _factory;
   }

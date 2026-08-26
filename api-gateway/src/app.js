@@ -121,6 +121,7 @@ const requirePublicSignature = require("./middlewares/requirePublicSignature");
 const pricingRulesRoutes = require("../routes/pricingRulesRoutes");
 const pricingChangeRequestsRoutes = require("../routes/pricingChangeRequestsRoutes");
 const requireNotRestricted = require("./middlewares/requireNotRestricted");
+const validateInternalToken = require("./middlewares/validateInternalToken");
 const providerWebhooksRoutes = require("../routes/providerWebhookRoutes");
 
 const app = express();
@@ -160,6 +161,25 @@ const readiness = createReadiness({
 app.set("readiness", readiness);
 
 app.set("trust proxy", 1);
+
+/**
+ * ═══ MÉTRIQUES ════════════════════════════════════════════════════════════
+ *
+ * La passerelle n'avait aucune instrumentation. C'est pourtant le premier point
+ * que le mobile atteint : sa latence est celle que l'utilisateur ressent, et
+ * elle inclut le temps passé chez l'amont. Sans mesure ici, on ne peut pas
+ * distinguer « la passerelle est lente » de « le backend est lent ».
+ *
+ * Cardinalité bornée par `normalizeRoute` — voir l'en-tête du module. Ce point
+ * compte particulièrement ici : la passerelle voit TOUTES les URL, identifiants
+ * compris.
+ */
+const { createMetrics } = require("./services/metrics");
+
+const metrics = createMetrics({ client: require("prom-client") });
+
+// Monté TÔT : doit englober les limiteurs, la validation et le proxy.
+app.use(metrics.httpMiddleware);
 
 /* -------------------------------------------------------------------------- */
 /* Identifiant de corrélation                                                 */
@@ -524,6 +544,25 @@ app.get("/healthz", (_req, res) =>
     ts: new Date().toISOString(),
   })
 );
+
+/**
+ * ⚠️ `/metrics` N'EST PAS PUBLIQUE — elle divulgue la carte du service : motifs
+ * de routes internes, volumes, taux d'erreur. C'est un plan de reconnaissance.
+ *
+ * On réutilise `validateInternalToken`, le middleware déjà en place sur
+ * `/internal/*`, plutôt que d'écrire un second contrôle : une seule
+ * implémentation décide ce qu'est un appel interne valide. Il répond 401 sur
+ * jeton absent ou invalide.
+ */
+app.get("/metrics", validateInternalToken, async (_req, res) => {
+  try {
+    res.set("Content-Type", metrics.contentType);
+    res.set("Cache-Control", "no-store");
+    return res.send(await metrics.metrics());
+  } catch (err) {
+    return res.status(500).send(`# collecte impossible: ${err?.message || err}\n`);
+  }
+});
 
 /**
  * DISPONIBILITÉ. 503 quand une connexion critique manque ou pendant le vidage.

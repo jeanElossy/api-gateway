@@ -1,0 +1,84 @@
+# ============================================================================
+# API GATEWAY — INTÉGRATION CONTINUE
+# ============================================================================
+#
+# ⚠️ LA RACINE GIT N'EST PAS LA RACINE DU CODE.
+#
+# Ce dépôt a une structure inhabituelle : la racine Git est `api-gateway/`, et
+# le code (avec son `package.json`) vit dans `api-gateway/api-gateway/`. Chaque
+# étape doit donc déclarer `working-directory`, et le cache npm doit pointer
+# vers le bon lockfile — sans quoi `npm ci` échoue avec un message qui ne dit
+# rien d'utile.
+#
+# ⚠️ `npm test` DOIT garder son glob : `node --test "test/**/*.test.js"`.
+# `node --test test/` résout `test/` comme un module CommonJS et échoue en
+# `MODULE_NOT_FOUND` sur Node 22. Le défaut a déjà existé dans ce dépôt.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: api-gateway
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Ce dépôt ne déclare AUCUN `engines` — c'est une dette à combler
+          # (voir l'audit, §32). En attendant, 22.x est la version des postes
+          # de développement et celle sur laquelle les 120 tests sont verts.
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: api-gateway/package-lock.json
+
+      - run: npm ci
+
+      - name: Tests
+        run: npm test
+
+  audit:
+    name: Vulnérabilités
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: api-gateway/package-lock.json
+
+      - run: npm ci
+
+      # ─────────────────────────────────────────────────────────────────────
+      # CLIQUET — mesuré le 2026-08-26 : ZÉRO vulnérabilité, tous niveaux
+      # confondus. C'est le seul dépôt dans ce cas.
+      #
+      # Le seuil est donc réglé au maximum de sévérité : `low`. Toute
+      # dépendance vulnérable, même mineure, est refusée. C'est gratuit tant
+      # que le dépôt est propre, et c'est exactement le moment de le verrouiller
+      # — un dépôt sain se garde sain, il ne se nettoie pas deux fois.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: "npm audit (seuil : low — ce dépôt est propre, il doit le rester)"
+        run: npm audit --audit-level=low
