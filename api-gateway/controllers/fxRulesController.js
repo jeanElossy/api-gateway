@@ -1,6 +1,30 @@
 "use strict";
 
 const FxRule = require("../src/models/FxRule");
+const { invalidateFxRulesCache } = require("../src/services/fxRulesService");
+
+/**
+ * Purge le cache des règles de change APRÈS une écriture.
+ *
+ * ⚠️ APRÈS LE COMMIT, ET JAMAIS AVANT. Invalider avant l'écriture laisserait
+ * une fenêtre où un lecteur concurrent recharge l'ANCIENNE valeur depuis la
+ * base et la remet en cache — on aurait purgé pour rien, et le tarif périmé
+ * repartirait pour un tour de TTL.
+ *
+ * Ne lève jamais : une purge ratée ne doit pas transformer une écriture
+ * réussie en erreur pour l'administrateur. Le pire cas est un tarif périmé
+ * pendant la durée du TTL (5 minutes), pas une donnée fausse en base.
+ */
+async function purgerCache(doc) {
+  try {
+    await invalidateFxRulesCache({
+      fromCurrency: doc?.fromCurrency,
+      toCurrency: doc?.toCurrency,
+    });
+  } catch {
+    /* déjà journalisé par le service de cache */
+  }
+}
 
 const normStr = (v) => String(v ?? "").trim();
 const upper = (v) => normStr(v).toUpperCase();
@@ -196,6 +220,7 @@ exports.create = async (req, res) => {
 
     const doc = new FxRule(payload);
     await doc.save();
+    await purgerCache(doc);
 
     res.status(201).json({ success: true, data: doc });
   } catch (e) {
@@ -216,6 +241,14 @@ exports.update = async (req, res) => {
       return res.status(404).json({ success: false, message: "FxRule introuvable" });
     }
 
+    // Purge la paire d'ARRIVÉE. Si la modification a changé la paire elle-même,
+    // l'ancienne reste en cache jusqu'à son TTL : on purge donc aussi celle
+    // envoyée dans la requête quand elle diffère.
+    await purgerCache(doc);
+    if (payload.fromCurrency && payload.toCurrency) {
+      await purgerCache(payload);
+    }
+
     res.json({ success: true, data: doc });
   } catch (e) {
     res.status(400).json({ success: false, message: e.message });
@@ -228,6 +261,7 @@ exports.remove = async (req, res) => {
     if (!doc) {
       return res.status(404).json({ success: false, message: "FxRule introuvable" });
     }
+    await purgerCache(doc);
     res.json({ success: true, message: "FxRule supprimée" });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });

@@ -441,6 +441,29 @@ module.exports = {
   isRedisEnabled: () => getFactory().enabled,
   listPrefixes: () => getFactory().listPrefixes(),
 
+  /**
+   * Le client Redis du processus, ou `null` si Redis n'est pas configuré.
+   *
+   * ⚠️ EXPOSÉ POUR ÊTRE PARTAGÉ, PAS POUR ÊTRE DUPLIQUÉ. Le §12 l'exige :
+   * aucune requête HTTP ne crée de connexion Redis. Le cache de référentiel
+   * réutilise ce client plutôt que d'en ouvrir un second — un second client,
+   * c'est un second budget de connexions sur le plan Redis, et deux politiques
+   * de reconnexion à garder alignées.
+   *
+   * Ce client est sûr à partager : il n'est PAS en mode abonné. Un client
+   * ioredis passé en `subscribe` ne peut plus exécuter de commandes
+   * ordinaires — c'est pourquoi l'abonnement liste noire de tx-core utilise,
+   * lui, un client dédié obtenu par `duplicate()`.
+   *
+   * Il porte `enableOfflineQueue: false` une fois connecté, ce qui convient
+   * exactement au cache : mieux vaut un échec immédiat (qui retombe sur la
+   * base) qu'une commande mise en file jusqu'au délai d'expiration.
+   */
+  getClient: () => {
+    getFactory();
+    return _client;
+  },
+
   /** Réservé aux tests et à l'arrêt propre. */
   __reset: () => {
     try {

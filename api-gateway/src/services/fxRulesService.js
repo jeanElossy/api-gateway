@@ -1,6 +1,47 @@
 "use strict";
 
 const FxRule = require("../models/FxRule");
+const { createCache } = require("./cache/cacheService");
+const { getClient } = require("./rateLimitStore");
+
+/**
+ * Cache du RÉFÉRENTIEL de change — pas des devis.
+ *
+ * `pickFxRule` fait deux choses de nature très différentes :
+ *   1. LIRE le jeu de règles actives pour une paire de devises (accès base,
+ *      identique pour tous les appelants de cette paire) ;
+ *   2. CHOISIR la règle applicable selon le montant, le pays, l'opérateur —
+ *      un calcul pur, dépendant de l'appel.
+ *
+ * Seul (1) est caché. (2) rejoue intégralement à chaque appel.
+ *
+ * ⚠️ CE QUI N'EST PAS CACHÉ, ET NE DOIT PAS L'ÊTRE : le devis lui-même. Un
+ * devis est un PRIX. Le servir depuis un cache, c'est afficher un taux qui
+ * n'est plus celui appliqué à la confirmation — et cela déferait la frontière
+ * de tarification « échec en fermeture ». On cache la donnée, jamais la
+ * décision.
+ *
+ * Le client Redis est celui de la limitation de débit, réutilisé (§12 : aucune
+ * requête HTTP ne crée de connexion). Sans Redis, `getClient()` rend `null` et
+ * le cache est inerte : chaque appel relit la base, exactement comme avant.
+ */
+let _cache = null;
+
+function cache() {
+  if (_cache) return _cache;
+  _cache = createCache({
+    client: getClient(),
+    env: process.env.NODE_ENV || "development",
+    service: "gateway",
+    logger: console,
+  });
+  return _cache;
+}
+
+/** Identifiant de cache d'une paire. Majuscules : `eur` et `EUR` sont la même paire. */
+function clePaire(fromCurrency, toCurrency) {
+  return `${toUpper(fromCurrency)}-${toUpper(toCurrency)}`;
+}
 
 function toUpper(v) {
   return String(v || "").trim().toUpperCase();
@@ -65,7 +106,12 @@ async function pickFxRule(ctx) {
     toCurrency: toUpper(ctx.toCurrency),
   };
 
-  const rules = await FxRule.find(query).lean();
+  // Le jeu de règles ne dépend que de la paire de devises — le reste du filtrage
+  // est en mémoire, sur des données déjà chargées. C'est ce qui rend cette
+  // lecture cachable sans toucher à la justesse de la sélection.
+  const rules = await cache().getOrSet("pricing-rules", clePaire(ctx.fromCurrency, ctx.toCurrency), () =>
+    FxRule.find(query).lean()
+  );
 
   const candidates = rules
     .filter((r) => {
@@ -181,4 +227,29 @@ async function getAdjustedRate({ baseRate, context }) {
   return { rule: rule || null, ...applied };
 }
 
-module.exports = { getAdjustedRate };
+/**
+ * Invalide le cache des règles de change.
+ *
+ * **À appeler APRÈS le commit d'une écriture sur `FxRule`, jamais avant** :
+ * invalider avant laisserait une fenêtre où un lecteur recharge l'ancienne
+ * valeur depuis la base et la remet en cache, réintroduisant précisément la
+ * donnée qu'on voulait chasser.
+ *
+ * Sans argument, purge toute la ressource — c'est le bon choix après une
+ * modification en masse ou quand la paire touchée n'est pas connue de
+ * l'appelant. Une purge trop large coûte quelques lectures ; une purge trop
+ * étroite sert un tarif périmé.
+ */
+async function invalidateFxRulesCache({ fromCurrency, toCurrency } = {}) {
+  if (fromCurrency && toCurrency) {
+    return cache().invalider("pricing-rules", clePaire(fromCurrency, toCurrency));
+  }
+  return cache().invaliderRessource("pricing-rules");
+}
+
+module.exports = {
+  getAdjustedRate,
+  invalidateFxRulesCache,
+  /** Exposé pour les tests et pour `/metrics`. */
+  __cacheStats: () => cache().stats(),
+};
