@@ -20,9 +20,17 @@ function extractPayloadData(payload) {
   return payload.data || payload.transaction || payload;
 }
 
+/**
+ * ⚠️ « stripe » NE DOIT PAS être normalisé en un prestataire servi.
+ *
+ * Il rendait `"stripe"`, c'est-à-dire un rail retiré du périmètre le
+ * 2026-09-08 et dont l'adapter a été supprimé côté Tx Core. Le normaliser en
+ * `visa_direct` serait pire : router un ordre nommément adressé à Stripe vers
+ * un autre réseau déplacerait de l'argent par un chemin que personne n'a
+ * choisi. On rend la chaîne vide, qui fait échouer l'appelant en fermeture.
+ */
 function normalizeCardProvider(provider) {
   const p = String(provider || "").trim().toLowerCase();
-  if (p === "stripe") return "stripe";
   if (p === "visa_direct" || p === "visadirect") return "visa_direct";
   return "";
 }

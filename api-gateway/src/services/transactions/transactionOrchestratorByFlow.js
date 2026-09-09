@@ -48,6 +48,21 @@ const { postToPaynovalService } = require("./providerAdapters/paynovalAdapter");
 const { postToMobileMoneyService } = require("./providerAdapters/mobilemoneyAdapter");
 const { postToCardService } = require("./providerAdapters/cardAdapter");
 
+/**
+ * ⚠️ MASQUAGE OBLIGATOIRE AVANT TOUTE JOURNALISATION D'UN CORPS DE REQUÊTE.
+ *
+ * `redactSensitive` a été écrit exactement pour ce fichier — son en-tête le dit
+ * — et n'était importé **nulle part**. Le module existait, la fuite aussi :
+ * `console.log("raw body", req.body)` écrivait la RÉPONSE À LA QUESTION DE
+ * SÉCURITÉ en clair à chaque `/initiate`.
+ *
+ * Ce n'était muet en production que parce que `SILENCE_PROD_LOGS` réduit
+ * `console.log` au silence. **Un secret protégé par un interrupteur n'est pas
+ * protégé** : il suffit qu'on relève le niveau de journal une heure pour
+ * diagnostiquer un incident — c'est-à-dire précisément le moment où on le fait.
+ */
+const { redactSensitive } = require("../../utils/redactSensitive");
+
 function cleanBaseUrl(url) {
   return String(url || "").replace(/\/+$/, "");
 }
@@ -154,7 +169,8 @@ function normalizeMethod(v, { funds = "", destination = "", provider = "" } = {}
   if (method === "MOBILE_MONEY") return "MOBILEMONEY";
 
   if (d === "mobilemoney" || p === "mobilemoney") return "MOBILEMONEY";
-  if (d === "stripe" || p === "stripe" || p === "visa_direct") return "CARD";
+  /* « stripe » retiré le 2026-09-09. */
+  if (d === "card" || p === "visa_direct" || p === "visadirect") return "CARD";
 
   return method || "INTERNAL";
 }
@@ -210,12 +226,16 @@ function getProviderForFlow({ flow, body, canonicalTx = null }) {
     return "mobilemoney";
   }
 
-  if (flow === TRANSACTION_FLOWS.CARD_TOPUP_TO_PAYNOVAL) {
-    return "stripe";
-  }
-
-  if (flow === TRANSACTION_FLOWS.PAYNOVAL_TO_CARD_PAYOUT) {
-    if (requestedProvider === "stripe") return "stripe";
+  /**
+   * Rail carte : Visa Direct dans les DEUX sens depuis le retrait de Stripe
+   * (2026-09-09). Le dépôt renvoyait « stripe », c'est-à-dire un rail dont
+   * l'adapter a été supprimé côté Tx Core : la requête partait vers un service
+   * que plus rien ne sert.
+   */
+  if (
+    flow === TRANSACTION_FLOWS.CARD_TOPUP_TO_PAYNOVAL ||
+    flow === TRANSACTION_FLOWS.PAYNOVAL_TO_CARD_PAYOUT
+  ) {
     return "visa_direct";
   }
 
@@ -484,8 +504,9 @@ async function dispatchToProvider({ req, provider, serviceUrl, endpoint, body })
         });
         break;
 
-      case "stripe":
+      /* « stripe » retiré du routage le 2026-09-09. */
       case "visa_direct":
+      case "visadirect":
         out = await postToCardService({
           req,
           serviceUrl,
@@ -533,7 +554,7 @@ async function routeInitiateByFlow(req) {
   try {
     normalizeMobileMoneyProviderInBody(req);
 
-    console.log("[Gateway][routeInitiateByFlow] raw body", req.body);
+    console.log("[Gateway][routeInitiateByFlow] raw body", redactSensitive(req.body));
 
     const flow = resolveTransactionFlow(req.body || {});
     const userId = getUserId(req);
@@ -567,7 +588,8 @@ async function routeInitiateByFlow(req) {
       flow,
       provider,
       serviceUrl,
-      bodyWithSecurity,
+      // `bodyWithSecurity` porte la réponse de sécurité — son nom le dit.
+      bodyWithSecurity: redactSensitive(bodyWithSecurity),
     });
 
     if (!serviceUrl) {
@@ -578,10 +600,14 @@ async function routeInitiateByFlow(req) {
 
     const strictBody = buildStrictInitiateBody(bodyWithSecurity, flow, provider);
 
-    console.log("[Gateway][routeInitiateByFlow][strictBody]", strictBody);
+    /**
+     * `strictBody` dérive de `bodyWithSecurity` : il porte donc la réponse à la
+     * question de sécurité. Les deux journaux la recopiaient — le second sous
+     * forme JSON, ce qui la rendait encore plus facile à extraire d'un fichier.
+     */
     console.log(
-      "[Gateway][routeInitiateByFlow][strictBody.json]",
-      toSafeJson(strictBody)
+      "[Gateway][routeInitiateByFlow][strictBody]",
+      redactSensitive(strictBody)
     );
 
     if (!strictBody.effectivePricingId) {

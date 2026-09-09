@@ -810,8 +810,29 @@ async function fetchLiveRate(fromCur, toCur) {
       setCooldown(pairKey, err, "live-provider");
     }
 
+    /**
+     * ⚠️ `isSnapshotFreshEnough` — LE CONTRÔLE QUI MANQUAIT ICI.
+     *
+     * La branche de refroidissement, plus haut, vérifie bien la fraîcheur de
+     * l'instantané avant de l'appliquer. Celle-ci — le repli sur ERREUR du
+     * fournisseur — ne la vérifiait pas : `if (snap)` suffisait.
+     *
+     * Conséquence : quand le fournisseur tombe, un taux d'âge NON BORNÉ était
+     * appliqué à une tarification. Un taux vieux de trois semaines s'applique
+     * exactement comme un taux frais — `stale: true` le signale, mais rien ne
+     * refuse. C'est la forme que la règle B.2 interdit sur une frontière de
+     * change : une donnée financière périmée doit ARRÊTER l'opération, pas la
+     * teinter d'un drapeau que personne ne lit.
+     *
+     * Et c'est le pire moment pour être laxiste : le fournisseur est en panne,
+     * donc l'instantané est déjà, par construction, le plus vieux qu'il puisse
+     * être.
+     *
+     * Un instantané périmé n'est plus retenu : on retombe sur l'ancrage
+     * (`pegRate`) juste en dessous, puis sur l'échec — dans cet ordre.
+     */
     const snap = await getSnapshotFromDb(fromCur, toCur);
-    if (snap) {
+    if (snap && isSnapshotFreshEnough(snap)) {
       const out = {
         rate: Number(snap.rate),
         source: snap.source || "db-snapshot",
@@ -861,14 +882,33 @@ async function getExchangeRate(from, to, opts = {}) {
   const fromCur = normCcy(from);
   const toCur = normCcy(to);
 
+  /**
+   * ⚠️ ÉCHEC EN FERMETURE — CE BLOC RENDAIT `rate: 1`.
+   *
+   * Une devise illisible produisait un taux de change de **1 pour 1**. Sur une
+   * frontière de change, c'est la pire valeur de repli imaginable : elle est
+   * plausible (beaucoup de paires valent à peu près 1), elle ne lève aucune
+   * alerte, et elle convertit un montant en le laissant tel quel. Une
+   * tarification en sortait avec un prix faux et l'air parfaitement normal.
+   *
+   * `source: "invalid"` était censé le dire — mais aucun appelant ne lit ce
+   * champ : `pricingController.getMarketRateDirect` ne regarde que `out.rate`,
+   * et 1 est un nombre fini parfaitement acceptable.
+   *
+   * La règle B.2 est explicite : une donnée financière illisible ARRÊTE
+   * l'opération avec une erreur explicite ; elle ne prend jamais de valeur par
+   * défaut. On lève donc, avec un code nommé pour que l'appelant sache quoi
+   * répondre.
+   */
   if (!fromCur || !toCur) {
-    return {
-      rate: 1,
-      source: "invalid",
-      provider: "invalid",
-      stale: false,
-      asOfDate: new Date().toISOString(),
-    };
+    const err = new Error(
+      `Devise illisible pour la conversion : from="${from}" to="${to}". ` +
+        "Aucun taux n'est appliqué — un repli à 1 pour 1 produirait un prix faux " +
+        "sans que rien ne le signale."
+    );
+    err.code = "FX_INVALID_CURRENCY";
+    err.status = 400;
+    throw err;
   }
 
   const mode = String(opts.mode || "live").trim().toLowerCase();

@@ -31,17 +31,8 @@ const TransactionSchema = new mongoose.Schema({
   provider: {
     type: String,
     required: true,
-    enum: [
-      "paynoval",
-      "stripe",
-      "bank",
-      "mobilemoney",
-      "visa_direct",
-      "cashin",
-      "cashout",
-      "stripe2momo",
-      "flutterwave",
-    ],
+    // Périmètre arrêté le 2026-09-08 — voir `tools/amlLimits.js`.
+    enum: ["paynoval", "mobilemoney", "visa_direct"],
   },
 
   // ✅ FLOW (ajout)

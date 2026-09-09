@@ -38,18 +38,6 @@ const paynovalPaymentSchema = Joi.object({
   securityCode: Joi.string().max(32).allow('').optional(),
 });
 
-const stripePaymentSchema = Joi.object({
-  ...commonMetaFields,
-  provider: Joi.string().valid('stripe').required(),
-  amount: Joi.number().min(1).required(),
-  currency: Joi.string().length(3).uppercase().required(),
-  cardNumber: Joi.string().creditCard().required(),
-  expMonth: Joi.number().min(1).max(12).required(),
-  expYear: Joi.number().min(new Date().getFullYear()).max(new Date().getFullYear() + 20).required(),
-  cvc: Joi.string().pattern(/^\d{3,4}$/).required(),
-  cardHolder: Joi.string().max(64).required(),
-  toEmail: Joi.string().email().required(),
-});
 
 const mobileMoneyPaymentSchema = Joi.object({
   ...commonMetaFields,
@@ -61,21 +49,16 @@ const mobileMoneyPaymentSchema = Joi.object({
   country: Joi.string().max(32).required(),
 });
 
-const bankPaymentSchema = Joi.object({
-  ...commonMetaFields,
-  provider: Joi.string().valid('bank').required(),
-  amount: Joi.number().min(1).required(),
-  iban: Joi.string().pattern(/^[A-Z0-9]{15,34}$/).required(),
-  bankName: Joi.string().max(128).required(),
-  accountHolder: Joi.string().max(128).required(),
-  country: Joi.string().max(32).required(),
-  swift: Joi.string().pattern(/^[A-Z0-9]{8,11}$/).optional(),
-});
 
 const visaDirectSchema = Joi.object({
   ...commonMetaFields,
   provider: Joi.string().valid('visa_direct').required(),
   amount: Joi.number().min(1).required(),
+  // `currency` manquait ici alors que le rail carte remplace `stripe`, qui
+  // l'exigeait. Avec `stripUnknown: true`, l'absence de la clé ne produisait
+  // aucune erreur : la devise était SILENCIEUSEMENT supprimée du corps avant
+  // routage. Une devise perdue sur un chemin d'argent n'est pas un détail.
+  currency: Joi.string().length(3).uppercase().required(),
   cardNumber: Joi.string().creditCard().required(),
   expMonth: Joi.number().min(1).max(12).required(),
   expYear: Joi.number().min(new Date().getFullYear()).max(new Date().getFullYear() + 20).required(),
@@ -85,46 +68,25 @@ const visaDirectSchema = Joi.object({
   country: Joi.string().max(32).optional(),
 });
 
-const stripe2momoSchema = Joi.object({
-  ...commonMetaFields,
-  provider: Joi.string().valid('stripe2momo').required(),
-  amount: Joi.number().min(1).required(),
-  // Stripe part
-  cardNumber: Joi.string().creditCard().required(),
-  expMonth: Joi.number().min(1).max(12).required(),
-  expYear: Joi.number().min(new Date().getFullYear()).max(new Date().getFullYear() + 20).required(),
-  cvc: Joi.string().pattern(/^\d{3,4}$/).required(),
-  cardHolder: Joi.string().max(64).required(),
-  // MoMo part
-  phoneNumber: Joi.string().pattern(/^[0-9+]{8,16}$/).required(),
-  operator: Joi.string().valid('orange', 'mtn', 'moov', 'wave').required(),
-  country: Joi.string().max(32).required(),
-});
 
-// --- FLUTTERWAVE SCHEMA ---
-const flutterwavePaymentSchema = Joi.object({
-  ...commonMetaFields,
-  provider: Joi.string().valid('flutterwave').required(),
-  amount: Joi.number().min(1).required(),
-  currency: Joi.string().length(3).uppercase().required(),
-  // Ces champs peuvent être adaptés selon ton flux Flutterwave
-  phoneNumber: Joi.string().pattern(/^[0-9+]{8,16}$/).required(),
-  operator: Joi.string().max(64).optional(),
-  recipientName: Joi.string().max(128).optional(),
-  country: Joi.string().max(32).required(),
-  bankCode: Joi.string().max(32).optional(),
-  accountNumber: Joi.string().max(32).optional(),
-  // Ajoute ici d'autres champs spécifiques si tu veux
-});
 
+/**
+ * Les rails servis par `POST /api/v1/pay`. Périmètre arrêté le 2026-09-08.
+ *
+ * Quatre schémas ont été retirés : `stripe`, `bank`, `stripe2momo` et
+ * `flutterwave`. Les trois premiers sont hors périmètre produit ; `flutterwave`
+ * n'est pas un rail mais un OPÉRATEUR du rail mobile money, et lui laisser une
+ * entrée propre créait un second chemin vers le même argent, échappant aux
+ * plafonds du rail `mobilemoney`.
+ *
+ * ⚠️ Le schéma retiré `stripe2momo` acceptait un numéro de carte ET un numéro
+ * de téléphone dans la MÊME requête : un pont carte → mobile money en un appel,
+ * sans étape intermédiaire au grand livre.
+ */
 const SCHEMAS = {
   paynoval: paynovalPaymentSchema,
-  stripe: stripePaymentSchema,
-  bank: bankPaymentSchema,
   mobilemoney: mobileMoneyPaymentSchema,
   visa_direct: visaDirectSchema,
-  stripe2momo: stripe2momoSchema,
-  flutterwave: flutterwavePaymentSchema,
 };
 
 // Détection du bon schéma selon body.provider ou body.destination

@@ -119,11 +119,5 @@ async function forwardWebhookToProvider(req, res, providerName) {
 exports.mobilemoneyWebhook = async (req, res) =>
   forwardWebhookToProvider(req, res, "mobilemoney");
 
-exports.bankWebhook = async (req, res) =>
-  forwardWebhookToProvider(req, res, "bank");
-
-exports.stripeWebhook = async (req, res) =>
-  forwardWebhookToProvider(req, res, "stripe");
-
 exports.visaDirectWebhook = async (req, res) =>
   forwardWebhookToProvider(req, res, "visa_direct");

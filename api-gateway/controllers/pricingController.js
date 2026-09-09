@@ -91,7 +91,6 @@ function normalizeMethod(v) {
       "VISA",
       "VISA_DIRECT",
       "MASTERCARD",
-      "STRIPE",
       "CARTE",
     ].includes(raw)
   ) {

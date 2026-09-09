@@ -21,20 +21,18 @@ function cleanSensitiveMeta(meta = {}) {
   return clone;
 }
 
-// Mapping provider → URL du microservice de paiement
+/**
+ * Mapping rail → URL du microservice de paiement. Périmètre du 2026-09-08 :
+ * `stripe`, `bank`, `stripe2momo` et `flutterwave` en ont été retirés.
+ *
+ * Un rail absent de cette table est refusé par `resolveProviderKey` — il n'est
+ * pas routé « quelque part par défaut ».
+ */
 const PROVIDER_TO_ENDPOINT = {
   paynoval: `${config.microservices.paynoval}/pay`,
-  stripe: `${config.microservices.stripe}/pay`,
-  bank: `${config.microservices.bank}/pay`,
   mobilemoney: `${config.microservices.mobilemoney}/pay`,
   visa_direct: config.microservices.visa_direct
     ? `${config.microservices.visa_direct}/pay`
-    : undefined,
-  stripe2momo: config.microservices.stripe2momo
-    ? `${config.microservices.stripe2momo}/pay`
-    : undefined,
-  flutterwave: config.microservices.flutterwave
-    ? `${config.microservices.flutterwave}/pay`
     : undefined,
 };
 

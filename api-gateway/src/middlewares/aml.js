@@ -25,7 +25,6 @@ const {
     sameDestShortTime: 0,
   }),
   getPEPOrSanctionedStatus = async () => null,
-  getMLScore = async () => 0,
   getBusinessKYBStatus = null,
 } = amlServices;
 
@@ -45,10 +44,23 @@ const {
 const amlLimits =
   reqAny(["../tools/amlLimits", "../../src/tools/amlLimits"], {}) || {};
 
-const {
-  getDailyLimit = () => 10000000,
-  getSingleTxLimit = () => 10000000,
-} = amlLimits;
+/**
+ * ⚠️ AUCUN REPLI. Ces deux valeurs par défaut étaient `() => 10000000` : si le
+ * module de plafonds devenait introuvable — chemin cassé, fichier renommé,
+ * erreur de build — le contrôle AML continuait de s'exécuter en autorisant dix
+ * millions par transaction, sans une ligne de journal. Un service qui ne peut
+ * pas charger sa politique de conformité ne démarre pas ; il ne se rabat pas
+ * sur une politique généreuse (règles B.2 et B.6).
+ */
+const { getDailyLimit, getSingleTxLimit, AmlLimitUnavailableError } = amlLimits;
+
+if (typeof getSingleTxLimit !== "function" || typeof getDailyLimit !== "function") {
+  throw new Error(
+    "[AML] `tools/amlLimits` introuvable ou incomplet — les plafonds de " +
+      "conformité ne peuvent pas être chargés. Le service refuse de démarrer " +
+      "plutôt que d'appliquer un plafond inventé."
+  );
+}
 
 const sanctionsService =
   reqAny(
@@ -1276,46 +1288,27 @@ module.exports = async function amlMiddleware(req, res, next) {
       });
     }
 
-    if (typeof getMLScore === "function") {
-      const score = await getMLScore(body, user);
-
-      if (score && score >= 0.9) {
-        logger.warn?.("[AML] ML scoring élevé", {
-          user: user.email,
-          score,
-        });
-
-        await logTransaction({
-          userId: user._id,
-          type: "initiate",
-          provider,
-          amount,
-          currency: currencyCode,
-          toEmail,
-          details: maskSensitive(body),
-          flagged: true,
-          flagReason: "Scoring ML élevé",
-          ip: req.ip,
-        });
-
-        await safeSendFraudAlert({
-          user,
-          type: "ml_suspect",
-          provider,
-          score,
-        });
-
-        return res.status(403).json({
-          success: false,
-          error:
-            "Transaction bloquée pour vérification supplémentaire (sécurité renforcée).",
-          code: "AML_ML_BLOCK",
-          details: {
-            score,
-          },
-        });
-      }
-    }
+    /**
+     * ⚠️ LE BLOC DE « SCORING ML » A ÉTÉ RETIRÉ LE 2026-09-02 — IL ÉTAIT MORT.
+     *
+     * Il appelait `getMLScore`, bloquait en 403 `AML_ML_BLOCK` au-delà de 0.9,
+     * marquait la transaction `flagged` et envoyait une alerte de fraude.
+     * Aucune de ces trois choses ne pouvait se produire :
+     *
+     *   - `getMLScore` renvoyait `0.92` si le montant dépassait la limite
+     *     unitaire — mais ce plafond est appliqué PLUS HAUT dans cette même
+     *     fonction (`AML_SINGLE_LIMIT`), donc ce cas n'arrivait jamais ici ;
+     *   - sinon elle renvoyait `Math.random() * 0.4`, qui ne peut pas
+     *     atteindre 0.9.
+     *
+     * Le contrôle avait donc l'apparence d'un modèle de risque et la portée de
+     * rien. Le retirer ne change aucun comportement observable — vérifié par
+     * `test/security/noRandomRiskScore.test.js`.
+     *
+     * Le vrai moteur, déterministe et à trois bandes (allow / review / block),
+     * vit dans Tx Core : `api-paynoval/src/services/risk/riskScore.js`.
+     * L'invariant 12 en fait l'autorité.
+     */
 
     await logTransaction({
       userId: user._id,
@@ -1366,6 +1359,44 @@ module.exports = async function amlMiddleware(req, res, next) {
 
     return next();
   } catch (e) {
+    /**
+     * Un plafond introuvable est un REFUS DE POLITIQUE, pas une panne.
+     *
+     * Sans cette branche le refus sortait en « AML_SYSTEM_ERROR / 500 », ce qui
+     * est un mensonge de journal (règle B.6) : l'exploitation cherche une panne
+     * qui n'existe pas, pendant que la vraie cause — un rail ou une devise hors
+     * politique — reste invisible. Le blocage était correct ; c'est sa
+     * DÉSIGNATION qui ne l'était pas.
+     */
+    if (e instanceof AmlLimitUnavailableError || String(e?.code || "").startsWith("AML_")) {
+      logger.warn("[AML] Plafond indéterminable — transaction REFUSÉE", {
+        provider,
+        currency: currencyCode,
+        code: e?.code,
+      });
+
+      try {
+        await logTransaction({
+          userId: user?._id || null,
+          type: "initiate",
+          provider,
+          amount,
+          currency: currencyCode,
+          toEmail,
+          details: maskSensitive(body),
+          flagged: true,
+          flagReason: `Plafond indéterminable (${e?.code || "AML_LIMIT_UNAVAILABLE"})`,
+          ip: req.ip,
+        });
+      } catch {}
+
+      return res.status(403).json({
+        success: false,
+        error: "Ce moyen de paiement n'est pas disponible pour cette devise.",
+        code: e?.code || "AML_LIMIT_UNAVAILABLE",
+      });
+    }
+
     logger.error?.("[AML] Exception", {
       err: e?.message || String(e),
       stack: e?.stack || "",

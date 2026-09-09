@@ -492,29 +492,42 @@ async function getPEPOrSanctionedStatus(user, { toEmail }) {
   };
 }
 
-async function getMLScore(payload, user) {
-  const provider = String(
-    payload?.provider || payload?.destination || payload?.funds || "paynoval"
-  )
-    .trim()
-    .toLowerCase();
+/* -------------------------------------------------------------------------- */
+/* `getMLScore` A ÉTÉ RETIRÉ LE 2026-09-02 — C'ÉTAIT UN GÉNÉRATEUR ALÉATOIRE  */
+/* -------------------------------------------------------------------------- */
 
-  const currencyISO =
-    normalizeIso(payload?.currencySource) ||
-    normalizeIso(payload?.currencyCode) ||
-    normalizeIso(payload?.senderCurrencyCode) ||
-    normalizeIso(payload?.currency) ||
-    normalizeIso(payload?.senderCurrencySymbol) ||
-    "USD";
-
-  const amt = safeNumber(payload?.amountSource ?? payload?.amount);
-
-  const singleLimit = getSingleTxLimit(provider, currencyISO);
-
-  if (amt > singleLimit) return 0.92;
-
-  return Math.random() * 0.4;
-}
+/**
+ * Cette fonction renvoyait `Math.random() * 0.4`, ou `0.92` si le montant
+ * dépassait la limite unitaire. Le même retrait avait déjà été fait dans Tx
+ * Core (`api-paynoval/src/services/aml.js`) ; **il n'avait jamais été reporté
+ * ici**. Les deux `aml.js` ont divergé, chacun recevant la moitié des
+ * correctifs — c'est la cause structurelle, et elle dépasse ce retrait.
+ *
+ * ⚠️ CE BLOC ÉTAIT INTÉGRALEMENT MORT, et c'est démontrable :
+ *
+ *   1. la branche « montant au-dessus de la limite » est INATTEIGNABLE.
+ *      `middlewares/aml.js` applique déjà ce plafond bien plus haut dans la
+ *      MÊME fonction (`AML_SINGLE_LIMIT`, 403) : une transaction qui dépasse
+ *      n'arrive jamais jusqu'ici ;
+ *   2. il ne restait donc que `Math.random() * 0.4`, quand le seuil de blocage
+ *      valait `>= 0.9`. **Le tirage ne pouvait pas l'atteindre.** Ni le 403, ni
+ *      le marquage `flagged`, ni l'alerte de fraude ne se déclenchaient jamais.
+ *
+ * Ce n'était donc pas une approximation en attendant mieux : c'était un tirage
+ * au sort portant un nom qui laissait croire à un modèle, dans un contrôle qui
+ * ne pouvait rien contrôler. Le §B.7 interdit d'affirmer une capacité sans
+ * mesure ; un faux contrôle est pire — il occupe la place du vrai.
+ *
+ * ⚠️ NE PAS LE RÉINTRODUIRE, sous quelque nom que ce soit. Un score de risque
+ * non reproductible est pire que pas de score : lors d'un litige ou d'un
+ * contrôle, le score d'une transaction passée serait irreproductible — ni
+ * explicable au client, ni justifiable devant un régulateur.
+ *
+ * Le remplacement DÉTERMINISTE existe et vit dans Tx Core :
+ * `api-paynoval/src/services/risk/riskScore.js`, appelé par
+ * `api-paynoval/src/middleware/aml.js`. C'est lui qui fait autorité, l'invariant
+ * 12 plaçant Tx Core au centre.
+ */
 
 async function getBusinessKYBStatus() {
   return "validé";
@@ -524,7 +537,6 @@ module.exports = {
   logTransaction,
   getUserTransactionsStats,
   getPEPOrSanctionedStatus,
-  getMLScore,
   getBusinessKYBStatus,
 
   // utiles pour tests/debug

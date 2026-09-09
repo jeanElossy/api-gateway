@@ -45,9 +45,7 @@ const schema = Joi.object({
   SERVICE_PAYNOVAL_URL: Joi.string().uri().required(),
   SERVICE_BANK_URL: Joi.string().uri().allow("").optional(),
   SERVICE_MOBILEMONEY_URL: Joi.string().uri().allow("").optional(),
-  SERVICE_STRIPE_URL: Joi.string().uri().allow("").optional(),
   SERVICE_VISA_DIRECT_URL: Joi.string().uri().allow("").optional(),
-  SERVICE_STRIPE2MOMO_URL: Joi.string().uri().allow("").optional(),
   SERVICE_CASHIN_URL: Joi.string().uri().allow("").optional(),
   SERVICE_CASHOUT_URL: Joi.string().uri().allow("").optional(),
   SERVICE_FLUTTERWAVE_URL: Joi.string().uri().allow("").optional(),
@@ -133,16 +131,50 @@ const legacyToken = normStr(env.INTERNAL_TOKEN || "");
 const gatewayInternalToken = normStr(env.GATEWAY_INTERNAL_TOKEN || "") || legacyToken;
 const principalInternalToken = normStr(env.PRINCIPAL_INTERNAL_TOKEN || "") || legacyToken;
 
-// Guard prod: recommandé d'avoir au moins le token gateway
+/**
+ * ============================================================================
+ * DEUX JETONS INTERNES, DEUX POIDS — CORRIGÉ LE 2026-08-28
+ * ============================================================================
+ *
+ * `GATEWAY_INTERNAL_TOKEN` manquant faisait `process.exit(1)`. C'est le bon
+ * comportement : sans lui, les routes internes de la passerelle sont ouvertes.
+ *
+ * `PRINCIPAL_INTERNAL_TOKEN` manquant ne produisait qu'un `console.warn`, et
+ * son message hésitait : « ça peut échouer ». **Il n'y a rien d'incertain.**
+ * `app.js` n'ajoute `x-internal-token` aux requêtes proxifiées que si le jeton
+ * existe : sans lui, CHAQUE requête proxifiée part vers le backend principal
+ * sans jeton interne. Ce n'est pas un risque, c'est un état.
+ *
+ * Deux issues, et aucune n'est acceptable en silence :
+ *   · le backend refuse → toute la passerelle est en panne, mais on l'apprend
+ *     par les utilisateurs plutôt que par le démarrage ;
+ *   · le backend accepte → sa frontière interne ne protège plus rien, et
+ *     personne ne le sait.
+ *
+ * La règle B.6 est explicite : un service qui démarre dégradé doit l'annoncer
+ * **avec sa conséquence**. Ici la conséquence est une frontière de sécurité
+ * absente : on refuse de démarrer, comme pour l'autre jeton.
+ *
+ * ⚠️ La condition reste `PRINCIPAL_URL` non vide — on n'exige le jeton que si
+ * la passerelle proxifie réellement vers le backend. Une passerelle qui ne
+ * parle pas au principal n'a pas à porter un secret dont elle ne se sert pas.
+ */
 if (env.NODE_ENV === "production") {
   if (!gatewayInternalToken) {
     console.error("❌ GATEWAY_INTERNAL_TOKEN manquant (ou INTERNAL_TOKEN fallback).");
     process.exit(1);
   }
+
   if (!principalInternalToken && normStr(env.PRINCIPAL_URL || "")) {
-    console.warn(
-      "⚠️ PRINCIPAL_INTERNAL_TOKEN manquant: si tu proxifies vers le backend principal avec x-internal-token, ça peut échouer."
+    console.error(
+      "❌ PRINCIPAL_INTERNAL_TOKEN manquant alors que PRINCIPAL_URL est configurée.\n" +
+        "   CONSÉQUENCE : chaque requête proxifiée vers le backend principal partirait\n" +
+        "   SANS `x-internal-token` — soit le backend refuse tout, soit sa frontière\n" +
+        "   interne ne protège plus rien. Aucune des deux ne doit arriver en silence.\n" +
+        "   Poser PRINCIPAL_INTERNAL_TOKEN, ou retirer PRINCIPAL_URL si la passerelle\n" +
+        "   ne doit pas proxifier vers le principal."
     );
+    process.exit(1);
   }
 }
 
@@ -292,16 +324,18 @@ module.exports = {
   principalTxListPath,
   principalTxTimeoutMs,
 
+  /**
+   * Les microservices réellement routés. Périmètre arrêté le 2026-09-08.
+   *
+   * Six entrées ont été retirées — `bank`, `stripe`, `stripe2momo`, `cashin`,
+   * `cashout`, `flutterwave` : aucune n'était lue par quoi que ce soit après le
+   * resserrage de `PROVIDER_TO_ENDPOINT`, et une URL de service configurable
+   * pour un rail qui n'existe plus est une invitation à le rebrancher.
+   */
   microservices: {
     paynoval: normStr(env.SERVICE_PAYNOVAL_URL || "").replace(/\/+$/, ""),
-    bank: normStr(env.SERVICE_BANK_URL || "").replace(/\/+$/, ""),
     mobilemoney: normStr(env.SERVICE_MOBILEMONEY_URL || "").replace(/\/+$/, ""),
-    stripe: normStr(env.SERVICE_STRIPE_URL || "").replace(/\/+$/, ""),
     visa_direct: normStr(env.SERVICE_VISA_DIRECT_URL || "").replace(/\/+$/, ""),
-    stripe2momo: normStr(env.SERVICE_STRIPE2MOMO_URL || "").replace(/\/+$/, ""),
-    cashin: normStr(env.SERVICE_CASHIN_URL || "").replace(/\/+$/, ""),
-    cashout: normStr(env.SERVICE_CASHOUT_URL || "").replace(/\/+$/, ""),
-    flutterwave: normStr(env.SERVICE_FLUTTERWAVE_URL || "").replace(/\/+$/, ""),
   },
 
   cors: {

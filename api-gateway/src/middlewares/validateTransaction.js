@@ -25,18 +25,23 @@ const { getUserTransactionsStats } = require("../services/aml");
  * --------------------------------------------------------------------------
  */
 
-const PROVIDERS = [
-  "paynoval",
-  "stripe",
-  "bank",
-  "mobilemoney",
-  "visa_direct",
-  "stripe2momo",
-  "flutterwave",
-  "card",
-];
+/**
+ * Les rails que le produit opère. Toute autre valeur est refusée par Joi.
+ *
+ * `stripe`, `bank`, `stripe2momo` et `flutterwave` en ont été retirés le
+ * 2026-09-08 : les trois premiers ne sont plus au périmètre, et `flutterwave`
+ * n'est pas un rail mais un opérateur — il se sert derrière `mobilemoney`, et
+ * lui laisser une entrée de rail ouvrait un second chemin vers le même argent,
+ * hors des plafonds du rail mobile money.
+ *
+ * `card` est accepté comme ALIAS de `visa_direct` : le partenaire carte à venir
+ * sert Visa, Mastercard et les autres réseaux, et le rail ne doit pas porter le
+ * nom d'un seul d'entre eux.
+ */
+const PROVIDERS = ["paynoval", "mobilemoney", "visa_direct", "card"];
 
-const MOBILEMONEY_OPERATORS = ["orange", "mtn", "moov", "wave", "flutterwave"];
+/** Opérateurs du rail mobile money — des prestataires, pas des rails. */
+const MOBILEMONEY_OPERATORS = ["orange", "mtn", "moov", "wave"];
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
@@ -49,8 +54,12 @@ function low(v) {
 function normalizeProviderLike(v) {
   const s = low(v);
 
-  if (["visadirect", "visa-direct"].includes(s)) return "visa_direct";
-  if (s === "mobile_money") return "mobilemoney";
+  // Le rail carte, quel que soit le réseau ou le nom qu'on lui donne.
+  if (["visadirect", "visa-direct", "visa", "card", "mastercard"].includes(s)) {
+    return "visa_direct";
+  }
+
+  if (["mobile_money", "mobile-money", "momo"].includes(s)) return "mobilemoney";
 
   return s;
 }
@@ -451,20 +460,47 @@ function validateTransaction(action) {
       }
     }
 
-    let maxLimit = 10000000;
+    /**
+     * Plafond par envoi — SANS REPLI.
+     *
+     * Ce bloc valait `maxLimit = 10000000` par défaut, et le `catch {}` était
+     * vide : si la résolution du plafond échouait, pour quelque raison que ce
+     * soit, le schéma Joi acceptait jusqu'à dix millions sans que rien ne
+     * l'écrive nulle part. Un plafond de conformité ne se remplace pas par une
+     * constante généreuse quand on ne sait pas le calculer (règle B.2), et une
+     * erreur ne se tait pas (règle B.1).
+     */
+    let maxLimit = null;
     let currencyForMsg = "F CFA";
 
     if (action === "initiate") {
+      const cur = resolveCurrencyForLimits(body);
+      currencyForMsg = cur || currencyForMsg;
+
       try {
-        const cur = resolveCurrencyForLimits(body);
-        currencyForMsg = cur || currencyForMsg;
         maxLimit = getSingleTxLimit(providerSelected, cur || currencyForMsg);
-      } catch {}
+      } catch (e) {
+        logger.warn("[validateTransaction] Plafond par envoi indéterminable", {
+          providerSelected,
+          currency: cur || currencyForMsg,
+          code: e?.code || "UNKNOWN",
+        });
+
+        return res.status(403).json({
+          success: false,
+          error:
+            "Ce moyen de paiement n'est pas disponible pour cette devise.",
+          code: e?.code || "AML_LIMIT_UNAVAILABLE",
+          details: [],
+        });
+      }
     }
 
     let schema;
 
     if (action === "initiate" && initiateSchemas[providerSelected]) {
+      // `maxLimit` est garanti non nul ici : le bloc ci-dessus a rendu la main
+      // en 403 si le plafond n'a pas pu être déterminé.
       schema = initiateSchemas[providerSelected].keys({
         amount: Joi.number().min(1).max(maxLimit).required(),
         action: Joi.string().valid("send", "deposit", "withdraw").optional(),
@@ -630,7 +666,34 @@ function validateTransaction(action) {
 
           if (userId) {
             const cur = resolveCurrencyForLimits(req.body);
-            const dailyLimit = getDailyLimit(req.providerSelected, cur);
+
+            /**
+             * La résolution du plafond est DÉTERMINISTE : elle ne dépend que du
+             * couple rail/devise, jamais de la base. Si elle échoue, c'est que
+             * le couple n'est pas couvert par la politique — on refuse, on ne
+             * laisse pas passer. Le `catch` général plus bas, lui, ne couvre
+             * que l'indisponibilité des statistiques.
+             */
+            let dailyLimit;
+
+            try {
+              dailyLimit = getDailyLimit(req.providerSelected, cur);
+            } catch (e) {
+              logger.warn("[validateTransaction] Plafond journalier indéterminable", {
+                providerSelected: req.providerSelected,
+                currency: cur,
+                code: e?.code || "UNKNOWN",
+              });
+
+              if (res.headersSent) return;
+
+              return res.status(403).json({
+                success: false,
+                error: "Ce moyen de paiement n'est pas disponible pour cette devise.",
+                code: e?.code || "AML_LIMIT_UNAVAILABLE",
+                details: [],
+              });
+            }
 
             const stats = await getUserTransactionsStats(
               userId,
@@ -668,9 +731,27 @@ function validateTransaction(action) {
           if (res.headersSent) return;
           next();
         } catch (e) {
-          logger.error("[validateTransaction] Erreur vérification daily limit", {
-            error: e?.message,
-          });
+          /**
+           * On n'arrive ici que si la LECTURE DES STATISTIQUES a échoué — la
+           * résolution du plafond, elle, a déjà refusé plus haut si le couple
+           * rail/devise n'était pas couvert.
+           *
+           * ⚠️ REPLI OUVERT ASSUMÉ, ET SIGNALÉ. Une panne de base laisse passer
+           * la transaction sans contrôle de cumul journalier. C'est un choix de
+           * DISPONIBILITÉ : refuser tout paiement dès le premier hoquet Mongo
+           * est l'autre extrême. Le compromis n'a jamais été tranché
+           * explicitement — il est ici nommé pour qu'il puisse l'être, plutôt
+           * que de rester une conséquence involontaire d'un `catch`.
+           */
+          logger.error(
+            "[validateTransaction] Cumul journalier NON VÉRIFIÉ — statistiques " +
+              "indisponibles, la transaction est laissée passer",
+            {
+              error: e?.message,
+              providerSelected: req.providerSelected,
+              userId: req.user && (req.user._id || req.user.id),
+            }
+          );
 
           if (res.headersSent) return;
           next();

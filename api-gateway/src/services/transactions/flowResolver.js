@@ -21,7 +21,8 @@ function low(v) {
 
 function normalizeRail(v) {
   const s = low(v);
-  if (["visa_direct", "visadirect", "stripe"].includes(s)) return "card";
+  /* « stripe » retiré le 2026-09-09 avec le rail. */
+  if (["visa_direct", "visadirect"].includes(s)) return "card";
   return s;
 }
 
@@ -74,9 +75,24 @@ function resolveTransactionFlow(payload = {}) {
    * plutôt que d'être routée vers un rail de remplacement, ce qui déplacerait
    * de l'argent par un chemin que personne n'a choisi.
    *
-   * Les CONSTANTES de flux bancaires sont conservées : des transactions
-   * héritées peuvent les porter, et l'admin doit pouvoir les lire, les annuler
-   * et les rembourser. On ferme la création, pas la lecture.
+   * ⚠️ CORRIGÉ LE 2026-09-02 — ce commentaire disait le contraire du code.
+   *
+   * Il affirmait : « Les CONSTANTES de flux bancaires sont conservées : des
+   * transactions héritées peuvent les porter, et l'admin doit pouvoir les lire,
+   * les annuler et les rembourser. » C'était vrai à l'intention, faux au code.
+   *
+   * `transactionFlow.constants.js:18-19` ne porte AUCUNE constante bancaire —
+   * seulement le commentaire de leur retrait — et
+   * `test/transactions/noBankFlow.test.js:98-99` EXIGE que
+   * `BANK_TRANSFER_TO_PAYNOVAL` et `PAYNOVAL_TO_BANK_PAYOUT` valent `undefined`.
+   *
+   * Autrement dit : on ferme la création ET les constantes n'existent plus. Si
+   * la lecture des transactions héritées devient nécessaire, elle passera par
+   * la valeur stockée en base, pas par une constante de ce module — et ce sera
+   * une décision à prendre, pas un acquis à supposer.
+   *
+   * Le commentaire avait survécu au code qu'il décrivait. C'est la raison pour
+   * laquelle on le corrige au lieu de l'effacer.
    */
 
   return TRANSACTION_FLOWS.UNKNOWN_FLOW;

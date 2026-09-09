@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 PayNoval **API Gateway** : un service Express en frontal de
 
 1. un **backend principal** (le monolithe : auth, users, balance, KYC, notifications, cagnottes…), atteint par proxy HTTP, et
-2. des **microservices de paiement par rail** (paynoval, mobilemoney, bank, stripe, visa_direct, cashin, cashout, flutterwave), atteints par des appels axios orchestrés.
+2. des **emplacements de microservices de paiement par rail** (paynoval, mobilemoney, stripe, visa_direct, cashin, cashout, flutterwave), atteints par des appels axios orchestrés. ⚠️ **Seul `SERVICE_PAYNOVAL_URL` est obligatoire au démarrage** (`src/config/index.js:45`) ; les autres sont `optional()` et vides — aucun n'est déployé. Le rail **`bank` a été retiré le 2026-08-26** : sa clé survit en configuration (`src/config/index.js:331`, `providerRegistry.js:33`) mais `flowResolver.js` ne peut plus produire de flux bancaire.
 
 Le gateway *possède* aussi nativement quelques domaines (pricing/FX/frais, conformité AML & sanctions, orchestration des transactions) adossés à sa propre base MongoDB.
 
@@ -19,7 +19,7 @@ CommonJS, JavaScript uniquement, pas d'étape de build, aucun linter configuré.
 
 ```bash
 npm start                  # node src/server.js
-npm test                   # node --test "test/**/*.test.js" — 61 tests dans test/{moderation,pricing}
+npm test                   # node --test "test/**/*.test.js" — 211 tests, verts (mesuré le 2026-09-02)
 node --test test/pricing/diff.test.js   # un seul fichier de test
 node generate-secrets.js   # régénère JWT_SECRET / INTERNAL_TOKEN et réécrit .env
 ```
@@ -109,9 +109,9 @@ En sortie vers le principal, le proxy injecte `x-internal-token: PRINCIPAL_INTER
 [routes/transactions.js](routes/transactions.js) → [controllers/transactionsController.js](controllers/transactionsController.js) (mince, uniquement la mise en forme des erreurs) → [src/services/transactions/](src/services/transactions/).
 
 - **Le flow est la vérité métier ; le provider n'est qu'un détail d'exécution.** `flowResolver` mappe `(action, funds, destination)` vers une constante `TRANSACTION_FLOWS` ([transactionFlow.constants.js](src/services/transactions/transactionFlow.constants.js)) ; le provider est déduit du flow. Ne pas router sur un `body.provider` brut seul.
-- Pour `confirm`/`cancel`/actions admin, l'orchestrateur récupère d'abord la **transaction canonique** depuis PayNoval / TX Core et route sur *son* flow ; le body de la requête est le dernier recours. `transactionOrchestratorByFlow.js` + `providerAdapters/{paynoval,mobilemoney,bank,card}Adapter.js` font le dispatch, `adminFlowRouter.js` gère les actions admin.
+- Pour `confirm`/`cancel`/actions admin, l'orchestrateur récupère d'abord la **transaction canonique** depuis PayNoval / TX Core et route sur *son* flow ; le body de la requête est le dernier recours. `transactionOrchestratorByFlow.js` + `providerAdapters/{paynoval,mobilemoney,card}Adapter.js` font le dispatch (⚠️ **`bankAdapter.js` n'existe pas** — retiré avec le rail bancaire le 2026-08-26), `adminFlowRouter.js` gère les actions admin.
 - `providerRegistry.js` associe un nom de provider à l'URL de base d'un microservice via `config.microservices` (variables `SERVICE_*_URL`). Les opérateurs mobile money (`wave`, `orange`, `mtn`, `moov`, `flutterwave`) sont ramenés au provider `mobilemoney`, l'opérateur étant déplacé dans `body.metadata.provider`.
-- Tout appel sortant vers un provider passe par `safeAxiosRequest` ([httpClient.js](src/services/transactions/httpClient.js)) : User-Agent gateway, détection des challenges Cloudflare, et **cooldown** LRU par origine sur 429/challenge qui court-circuite les appels suivants en 503 avec `retryAfterSec`.
+- Tout appel sortant vers un provider passe par `safeAxiosRequest` ([httpClient.js](src/services/transactions/httpClient.js)) : User-Agent gateway, détection des challenges Cloudflare, et **disjoncteur à trois états** (`fermé` / `ouvert` / `demi-ouvert`, [circuitBreaker.js](src/services/circuitBreaker.js)) branché en `httpClient.js:61-66`. Seuil `PROVIDER_FAIL_THRESHOLD` = 5, ouverture `PROVIDER_FAIL_COOLDOWN_MS` = 30 s, plafond `PROVIDER_MAX_OPEN_MS` = 5 min. ⚠️ Ce n'est **plus** un « cooldown LRU par origine » : ce mécanisme coupait un prestataire cinq minutes sur un **seul** 429. Le nom `setProviderCooldown` a été conservé pour ne pas casser les importateurs (`httpClient.js:77-80`) — le nom trompe, le mécanisme non. Une 4xx ne compte pas comme un échec de disponibilité.
 - `providers.json` / [src/providers.js](src/providers.js) est une surface *séparée*, utilisée uniquement par `GET /status` ; le routage ne la lit pas.
 
 ## Éligibilité & conformité

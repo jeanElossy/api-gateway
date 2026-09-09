@@ -7,9 +7,62 @@ const { secureCompare } = require("../utils/secureCompare");
 const { getUsersConnection } = require("../db");
 const getUserModel = require("../models/userModel");
 const logger = require("../logger");
+const { getVerificationKey, readKid } = require("../utils/jwtKeyring");
 
-// À implémenter si besoin (redis / db blacklist)
-const isTokenBlacklisted = async (_token) => false;
+/**
+ * Émetteur et audiences attendus — mêmes variables que celles employées à la
+ * SIGNATURE par le backend principal (`controllers/authController.js:307-315`).
+ * La passerelle vérifie ce que le backend écrit ; toute divergence ici rejette
+ * des jetons valides.
+ */
+const JWT_ISSUER = String(process.env.JWT_ISSUER || "").trim();
+const JWT_AUDIENCES = String(
+  process.env.JWT_AUDIENCES || process.env.JWT_AUDIENCE || ""
+)
+  .split(",")
+  .map((v) => v.trim())
+  .filter(Boolean);
+
+/**
+ * ⚠️ LE BOUCHON DE LISTE NOIRE A ÉTÉ RETIRÉ LE 2026-09-03.
+ *
+ * Il valait :
+ *
+ *     // À implémenter si besoin (redis / db blacklist)
+ *     const isTokenBlacklisted = async (_token) => false;
+ *
+ * appelé plus bas avec un refus « Token révoqué » qui n'arrivait jamais.
+ *
+ * ── Pourquoi le retirer plutôt que l'implémenter ──────────────────────────
+ *
+ * 1. **La révocation existe déjà, et elle fonctionne.**
+ *    `Device.sessionInvalidBefore` est comparé à `payload.iat` dans
+ *    `paynoval-backend/middleware/authMiddleware.js:335-337`. Elle est branchée
+ *    sur `POST /devices/:id/revoke-sessions` et, depuis le 2026-09-02, sur
+ *    `changePassword` et `resetPassword`. Une seconde couche ne révoquerait
+ *    rien de plus.
+ *
+ * 2. **Une liste noire en Redis heurterait l'invariant 1 du projet.** Redis
+ *    n'est jamais source de vérité, et sa perte doit être sans conséquence. Ici
+ *    la perte d'une clé ferait REDEVENIR VALIDE un jeton révoqué : un repli en
+ *    ouverture sur une frontière de sécurité, exactement ce que la règle B.2
+ *    interdit.
+ *
+ * 3. **Un contrôle qui rend toujours `false` est pire qu'un contrôle absent.**
+ *    Le nom promettait une protection, le refus « Token révoqué » juste en
+ *    dessous la rendait crédible, et un relecteur pressé cochait la case. C'est
+ *    le même motif que la garde `typeof notifySecurityAlert === "function"`
+ *    trouvée la veille dans le backend : du code rassurant qui ne s'exécute
+ *    jamais.
+ *
+ * Si une révocation par jeton devient nécessaire un jour — pour couper un jeton
+ * précis sans toucher aux autres sessions de l'appareil — elle devra être
+ * DURABLE (Mongo), pas un cache. Et elle devra dire ce qu'elle fait quand son
+ * magasin est indisponible.
+ *
+ * La révocation passe par `Device.sessionInvalidBefore`. Voir
+ * `docs/security/DIAGNOSTIC.md` §3.b.
+ */
 
 /**
  * ✅ Limite l'auth interne aux routes internes uniquement
@@ -101,13 +154,6 @@ const authMiddleware = async (req, res, next) => {
       });
     }
 
-    if (await isTokenBlacklisted(token)) {
-      return res.status(401).json({
-        success: false,
-        error: "Token révoqué. Merci de vous reconnecter.",
-      });
-    }
-
     const secret = getJwtSecret();
     if (!secret) {
       logger?.error?.("[AUTH] JWT secret missing (JWT_SECRET/config.jwtSecret)");
@@ -119,9 +165,42 @@ const authMiddleware = async (req, res, next) => {
 
     let payload;
     try {
-      payload = jwt.verify(token, secret, {
-        algorithms: ["HS256", "HS512"],
-      });
+      /**
+       * ⚠️ `HS512` RETIRÉ, `issuer`/`audience` AJOUTÉS — 2026-09-02.
+       *
+       * Cette vérification acceptait `HS256` ET `HS512`. Or il n'existe qu'UN
+       * émetteur de jetons utilisateur dans tout le système —
+       * `paynoval-backend/controllers/authController.js:269` — et il signe en
+       * `HS256`, explicitement. Personne n'émet de HS512.
+       *
+       * Accepter un algorithme que rien n'émet n'apporte aucune compatibilité :
+       * cela élargit seulement ce qu'un attaquant peut présenter. La règle est
+       * d'accepter exactement ce que l'on émet, et rien de plus.
+       *
+       * `issuer` et `audience` : le backend les POSE à la signature quand
+       * `JWT_ISSUER` / `JWT_AUDIENCES` sont configurés, et rien ne les
+       * vérifiait — ni ici, ni dans le middleware du backend. Des revendications
+       * signées et jamais lues ne protègent de rien. La condition est
+       * symétrique à celle de la signature : sans configuration, on ne vérifie
+       * pas, sinon on rejetterait des jetons valides.
+       */
+      const verifyOpts = { algorithms: ["HS256"] };
+      if (JWT_ISSUER) verifyOpts.issuer = JWT_ISSUER;
+      if (JWT_AUDIENCES.length) verifyOpts.audience = JWT_AUDIENCES;
+
+      /**
+       * ⚠️ CLÉ CHOISIE PAR `kid` — POSÉ LE 2026-09-03.
+       *
+       * La passerelle vérifie ce que le backend signe. Depuis que celui-ci
+       * signe avec un trousseau, elle doit savoir choisir la même clé : sans
+       * cela, la première rotation refuserait tous les jetons ici.
+       *
+       * Un jeton sans `kid` retombe sur le secret hérité — la branche qui rend
+       * le déploiement insensible.
+       */
+      const cle = getVerificationKey(readKid(token)) || secret;
+
+      payload = jwt.verify(token, cle, verifyOpts);
     } catch (err) {
       if (err?.name === "TokenExpiredError") {
         return res.status(401).json({

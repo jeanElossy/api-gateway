@@ -27,7 +27,17 @@ const FLOW_TO_DEFAULT_PROVIDER = Object.freeze({
   [TRANSACTION_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL]: "mobilemoney",
   [TRANSACTION_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT]: "mobilemoney",
 
-  [TRANSACTION_FLOWS.CARD_TOPUP_TO_PAYNOVAL]: "stripe",
+  /**
+   * ⚠️ Valait « stripe » — un rail RETIRÉ du périmètre le 2026-09-08, dont
+   * l'adapter a été supprimé. Le dépôt par carte pointait donc, depuis la
+   * passerelle, vers un prestataire que plus rien ne sert : la requête partait,
+   * la transaction se créait, et le règlement était impossible.
+   *
+   * Même faute que celle corrigée côté Tx Core le 2026-09-08 : supprimer un
+   * prestataire ne consiste pas à supprimer son fichier, mais à s'assurer que
+   * plus rien ne le NOMME comme repli.
+   */
+  [TRANSACTION_FLOWS.CARD_TOPUP_TO_PAYNOVAL]: "visa_direct",
   [TRANSACTION_FLOWS.PAYNOVAL_TO_CARD_PAYOUT]: "visa_direct",
 
 

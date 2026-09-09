@@ -65,11 +65,10 @@ function getProviderForAdminAction({ flow, body, canonicalTx = null }) {
     case TRANSACTION_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT:
       return "mobilemoney";
 
+    /* Rail carte : Visa Direct dans les deux sens depuis le retrait de Stripe
+       (2026-09-09). Aucun repli ne doit plus NOMMER un rail supprimé. */
     case TRANSACTION_FLOWS.CARD_TOPUP_TO_PAYNOVAL:
-      return "stripe";
-
     case TRANSACTION_FLOWS.PAYNOVAL_TO_CARD_PAYOUT:
-      if (txProvider === "stripe" || hinted === "stripe") return "stripe";
       return "visa_direct";
 
     case TRANSACTION_FLOWS.UNKNOWN_FLOW:
@@ -82,10 +81,9 @@ function getProviderForAdminAction({ flow, body, canonicalTx = null }) {
       ) {
         return "mobilemoney";
       }
-      if (hinted === "stripe" || hinted === "visa_direct" || hinted === "visadirect") {
-        return hinted === "stripe" ? "stripe" : "visa_direct";
+      if (["visa_direct", "visadirect", "card"].includes(hinted)) {
+        return "visa_direct";
       }
-      if (hinted === "bank") return "bank";
       return "paynoval";
   }
 }
@@ -131,8 +129,9 @@ async function routeAdminActionByFlow(req, action) {
         body,
       });
 
-    case "stripe":
+    /* « stripe » retiré du routage le 2026-09-09. */
     case "visa_direct":
+    case "visadirect":
       return postToCardService({
         req,
         serviceUrl,

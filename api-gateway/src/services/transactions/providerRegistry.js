@@ -19,25 +19,19 @@ function reqAny(paths) {
 
 const config = reqAny(["../../src/config", "../../config"]);
 
-const MOBILEMONEY_PROVIDERS = new Set([
-  "wave",
-  "orange",
-  "mtn",
-  "moov",
-  "flutterwave",
-]);
+const MOBILEMONEY_PROVIDERS = new Set(["wave", "orange", "mtn", "moov"]);
 
+// Périmètre arrêté le 2026-09-08 : trois rails, et rien d'autre.
+// `stripe`, `bank`, `stripe2momo`, `flutterwave`, `cashin` et `cashout` en ont
+// été retirés — les quatre premiers ne sont plus au périmètre produit,
+// `flutterwave` est un OPÉRATEUR du rail mobile money (pas un rail), et
+// cashin/cashout n'ont jamais été routés nulle part. Voir `tools/amlLimits.js`.
 const PROVIDER_TO_SERVICE = {
   paynoval: process.env.PAYNOVAL_SERVICE_URL || config.microservices?.paynoval,
-  stripe: config.microservices?.stripe,
-  bank: config.microservices?.bank,
   mobilemoney: config.microservices?.mobilemoney,
   visa_direct: config.microservices?.visa_direct,
   visadirect: config.microservices?.visa_direct,
-  cashin: config.microservices?.cashin,
-  cashout: config.microservices?.cashout,
-  stripe2momo: config.microservices?.stripe2momo,
-  flutterwave: config.microservices?.flutterwave,
+  card: config.microservices?.visa_direct,
 };
 
 function low(v) {
@@ -56,7 +50,9 @@ function normalizeProviderForRouting(provider) {
 function normalizeRail(v) {
   const s = low(v);
   if (MOBILEMONEY_PROVIDERS.has(s)) return "mobilemoney";
-  if (["visa_direct", "visadirect", "stripe"].includes(s)) return "card";
+  if (["visa_direct", "visadirect", "card", "visa", "mastercard"].includes(s)) {
+    return "card";
+  }
   return s;
 }
 

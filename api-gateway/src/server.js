@@ -84,16 +84,30 @@ const logger = require('./logger');
       process.exit(1);
     });
 
-    // 6️⃣ (Optionnel) Log si stop manuel
-    process.on('SIGTERM', () => {
-      logger.info(
-        '[Gateway] SIGTERM reçu. Arrêt propre du serveur...'
-      );
-      server.close(() => {
-        logger.info('[Gateway] Serveur arrêté.');
-        process.exit(0);
-      });
-    });
+    /**
+     * ========================================================================
+     * IL Y AVAIT ICI UN SECOND GESTIONNAIRE `SIGTERM` — RETIRÉ
+     * ========================================================================
+     *
+     * Un `process.on('SIGTERM', …)` supplémentaire fermait le serveur
+     * IMMÉDIATEMENT et appelait `process.exit(0)`, en plus du `shutdown`
+     * enregistré plus haut.
+     *
+     * Node exécute TOUS les gestionnaires d'un même signal, dans l'ordre
+     * d'enregistrement. Celui-ci partait donc en parallèle du vidage de 5 s —
+     * et son `process.exit(0)` pouvait tuer le processus AVANT que `shutdown`
+     * ait fini d'attendre. Autrement dit : le second gestionnaire écourtait
+     * exactement la garantie que le premier existe pour tenir.
+     *
+     * L'effet ne se voyait qu'au redéploiement, sous forme de requêtes de
+     * paiement coupées en vol côté mobile — un symptôme qu'on n'attribue
+     * jamais spontanément à un gestionnaire de signal en double.
+     *
+     * ⚠️ Ne pas « rajouter un log d'arrêt » ici. `shutdown` en journalise déjà
+     * un (`Arrêt demandé (SIGTERM) — vidage en cours`) ; un second
+     * gestionnaire, même purement informatif, est un `process.exit` de plus qui
+     * attend d'être écrit.
+     */
   } catch (err) {
     logger.error('[Gateway] Erreur fatale au démarrage :', err);
     process.exit(1);

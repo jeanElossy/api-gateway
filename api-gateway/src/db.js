@@ -47,6 +47,43 @@ function buildMongooseOpts() {
   };
 }
 
+/**
+ * Instrumente le pool de connexions d'une connexion Mongoose (§41).
+ *
+ * ⚠️ IL FAUT ATTENDRE LE `MongoClient`, PAS SEULEMENT L'APPEL À `connect`.
+ * `conn.getClient()` rend `undefined` tant que le pilote ne l'a pas construit —
+ * et `connectToUsersDB` n'attend justement rien (`createConnection` se connecte
+ * en tâche de fond). S'abonner à rien produirait des jauges plates qu'on
+ * prendrait pour un pool au repos, exactement le contresens que §41 doit
+ * empêcher.
+ *
+ * On tente donc tout de suite si le client existe déjà, et on repasse sur
+ * `connected` sinon. `trackPool` dédoublonne par identité de client : être
+ * appelé deux fois (première connexion puis reconnexion) ne compte jamais un
+ * événement deux fois.
+ */
+function attachPoolMetrics(conn, name) {
+  const track = () => {
+    try {
+      const client = conn?.getClient?.();
+      if (!client) return false;
+
+      require('./services/mongoPoolMetrics').trackPool(client, name, { logger });
+      return true;
+    } catch (err) {
+      // Une métrique ne doit JAMAIS empêcher une connexion à la base.
+      logger.warn(
+        `[metrics] pool Mongo « ${name} » non instrumenté : ${err?.message || err}`
+      );
+      return true; // inutile de réessayer sur chaque reconnexion
+    }
+  };
+
+  if (track()) return;
+
+  conn?.on?.('connected', track);
+}
+
 async function connectToGatewayDB() {
   const uri = config.dbUris.gateway;
   if (!uri) {
@@ -57,7 +94,17 @@ async function connectToGatewayDB() {
   const opts = buildMongooseOpts();
 
   try {
+    /**
+     * Sur quelles données travaille-t-on ? (règle B.6, défaut A1)
+     * Refuse un démarrage dont NODE_ENV contredit la base visée.
+     */
+    require("./utils/dbEnvironmentGuard").assertDatabaseEnvironment(uri, {
+      label: "base Gateway",
+      logger,
+    });
+
     await mongoose.connect(uri, opts);
+    attachPoolMetrics(mongoose.connection, 'gateway');
     logger.info('[DB] Connexion MongoDB Gateway établie', {
       serverSelectionTimeoutMS: opts.serverSelectionTimeoutMS,
       maxPoolSize: opts.maxPoolSize,
@@ -82,12 +129,25 @@ async function connectToUsersDB() {
   }
   try {
     /**
+     * Sur quelles données travaille-t-on ? (règle B.6, défaut A1)
+     *
+     * La passerelle ouvre DEUX connexions vers DEUX bases distinctes. Vérifier
+     * la première seulement ne prouve rien sur la seconde : le 2026-09-03, la
+     * base Gateway était annoncée et celle des utilisateurs ne l'était pas.
+     */
+    require("./utils/dbEnvironmentGuard").assertDatabaseEnvironment(uri, {
+      label: "base Users",
+      logger,
+    });
+
+    /**
      * Pas de `await` ici : `createConnection` rend la connexion immédiatement et
      * se connecte en tâche de fond. Les mêmes options s'appliquent — sans elles,
      * cette seconde connexion gardait les trente secondes de défaut alors que la
      * première venait d'en être débarrassée.
      */
     usersConnection = mongoose.createConnection(uri, buildMongooseOpts());
+    attachPoolMetrics(usersConnection, 'users');
     logger.info('[DB] Connexion MongoDB Users établie');
   } catch (err) {
     logger.error('[DB] Erreur de connexion MongoDB Users :', err);

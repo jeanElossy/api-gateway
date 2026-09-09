@@ -181,6 +181,68 @@ const metrics = createMetrics({ client: require("prom-client") });
 // Monté TÔT : doit englober les limiteurs, la validation et le proxy.
 app.use(metrics.httpMiddleware);
 
+/**
+ * ─────────────────────────────────────────────────────────────
+ * MÉTRIQUES DES DÉPENDANCES : REDIS (§37) ET POOL MONGO (§41)
+ * ─────────────────────────────────────────────────────────────
+ *
+ * On PASSE le client déjà ouvert par `services/rateLimitStore.js`, on n'en
+ * construit aucun : invariant 8 — aucune requête HTTP ne crée de connexion
+ * Redis. C'est le même client que celui du cache de référentiel de change
+ * (`fxRulesService`), donc UNE connexion pour trois usages.
+ *
+ * ═══ DEUX TAUX DE SUCCÈS, QUI NE MESURENT PAS LA MÊME CHOSE ══════════════
+ *
+ * `redis_keyspace_hits` / `redis_keyspace_misses` comptent les lectures vues
+ * par le SERVEUR Redis, tous usages confondus — limitation de débit incluse.
+ * `app_cache_hits` / `app_cache_misses` comptent ce que le cache de référentiel
+ * de change a servi sans relire Mongo.
+ *
+ * Les deux peuvent diverger complètement : un cache applicatif à 5 % de succès
+ * pendant que le serveur en affiche 99 % est parfaitement possible, et c'est ce
+ * premier chiffre qui dit qu'un cache ne sert à rien. Publier l'un pour l'autre
+ * ferait conclure l'inverse de la réalité — d'où les deux familles de séries.
+ *
+ * `__cacheStats()` construit le cache paresseusement s'il ne l'est pas encore :
+ * c'est sans effet de bord, il est mémoïsé et réutilise le même client Redis.
+ *
+ * Les jauges de pool Mongo s'enregistrent maintenant, alors qu'aucune connexion
+ * n'est encore ouverte (`db.js` s'en charge au démarrage) : elles parcourent le
+ * registre de pools AU MOMENT de la scrutation, donc un pool connecté ensuite
+ * apparaît de lui-même. Voir `services/mongoPoolMetrics.js`.
+ */
+const { registerRedisMetrics } = require("./services/redisMetrics");
+const { registerMongoPoolMetrics } = require("./services/mongoPoolMetrics");
+
+registerRedisMetrics(metrics, {
+  getClient: () => {
+    try {
+      return require("./services/rateLimitStore").getClient();
+    } catch (err) {
+      logger.warn(`[metrics] client Redis introuvable : ${err?.message || err}`);
+      return null;
+    }
+  },
+  appCacheStats: () => {
+    try {
+      return require("./services/fxRulesService").__cacheStats();
+    } catch {
+      /**
+       * Une source indisponible ne doit pas casser toute la page. On rend
+       * `contourne: true` plutôt que `null` : sans stats lisibles, le cache ne
+       * sert AUCUNE lecture, et `app_cache_enabled` doit valoir 0. Rendre `null`
+       * publierait 1 — un cache déclaré actif alors qu'il ne l'est pas est
+       * exactement le genre de métrique qui ment (règle B.6). Les compteurs,
+       * eux, restent non renseignés plutôt que remis à zéro.
+       */
+      return { contourne: true };
+    }
+  },
+  logger,
+});
+
+registerMongoPoolMetrics(metrics, { logger });
+
 /* -------------------------------------------------------------------------- */
 /* Identifiant de corrélation                                                 */
 /* -------------------------------------------------------------------------- */
@@ -271,7 +333,6 @@ const ALLOWED_HEADERS = [
   "Accept",
   "Origin",
 
-  "stripe-signature",
   "x-signature",
   "x-paynoval-signature",
 
