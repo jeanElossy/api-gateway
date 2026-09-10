@@ -43,7 +43,10 @@ const schema = Joi.object({
 
   // microservices
   SERVICE_PAYNOVAL_URL: Joi.string().uri().required(),
-  SERVICE_BANK_URL: Joi.string().uri().allow("").optional(),
+  /* SERVICE_BANK_URL retirée le 2026-09-10. Le rail bancaire est hors
+     périmètre de lancement — PayNoval opère sur trois rails : interne,
+     mobile money, carte Visa. Une variable déclarée pour un rail qui n'existe
+     pas laisse croire qu'il suffirait de la renseigner pour l'activer. */
   SERVICE_MOBILEMONEY_URL: Joi.string().uri().allow("").optional(),
   SERVICE_VISA_DIRECT_URL: Joi.string().uri().allow("").optional(),
   SERVICE_CASHIN_URL: Joi.string().uri().allow("").optional(),

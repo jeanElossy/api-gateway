@@ -278,6 +278,24 @@ const baseInitiateSchema = {
 /* Initiate schemas                                                           */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * ⚠️ UN SCHÉMA PAR RAIL DU PÉRIMÈTRE, ET RIEN D'AUTRE.
+ *
+ * Quatre schémas ont été retirés le 2026-09-10 — `bank`, `stripe`,
+ * `stripe2momo`, `flutterwave`. Leurs rails avaient quitté le périmètre
+ * (le bancaire le 2026-08-26, Stripe le 2026-09-09), mais leurs schémas de
+ * validation étaient restés.
+ *
+ * Ce n'était pas inerte. `initiateSchemas[providerSelected]` les retrouvait,
+ * et une charge bancaire recevait donc un verdict « bien formée » avant d'être
+ * refusée plus loin par le routage. Une validation qui approuve ce que le
+ * moteur refusera n'informe personne : elle déplace juste l'échec plus tard,
+ * dans un message qui ne dit plus pourquoi.
+ *
+ * Périmètre de lancement arrêté : **PayNoval interne, mobile money, carte Visa**.
+ * Un `providerSelected` hors de ces trois ne trouve plus de schéma — la
+ * validation générique s'applique, et le routage refuse.
+ */
 const initiateSchemas = {
   paynoval: Joi.object({
     ...baseInitiateSchema,
@@ -292,20 +310,6 @@ const initiateSchemas = {
     description: Joi.string().max(500).optional(),
   }),
 
-  stripe: Joi.object({
-    ...baseInitiateSchema,
-    currency: Joi.string().length(3).uppercase().required(),
-    cardNumber: Joi.string().creditCard().required(),
-    expMonth: Joi.number().min(1).max(12).required(),
-    expYear: Joi.number()
-      .min(new Date().getFullYear())
-      .max(new Date().getFullYear() + 20)
-      .required(),
-    cvc: Joi.string().pattern(/^\d{3,4}$/).required(),
-    cardHolder: Joi.string().max(64).required(),
-    toEmail: Joi.string().email().optional(),
-    country: Joi.string().max(64).optional(),
-  }),
 
   mobilemoney: Joi.object({
     ...baseInitiateSchema,
@@ -315,15 +319,6 @@ const initiateSchemas = {
     country: Joi.string().max(64).required(),
   }),
 
-  bank: Joi.object({
-    ...baseInitiateSchema,
-    iban: Joi.string().pattern(/^[A-Z0-9]{15,34}$/).optional(),
-    bankName: Joi.string().max(128).optional(),
-    accountHolder: Joi.string().max(128).optional(),
-    accountNumber: Joi.string().max(64).optional(),
-    country: Joi.string().max(64).required(),
-    swift: Joi.string().pattern(/^[A-Z0-9]{8,11}$/).optional(),
-  }).or("iban", "accountNumber"),
 
   visa_direct: Joi.object({
     ...baseInitiateSchema,
@@ -340,24 +335,7 @@ const initiateSchemas = {
     country: Joi.string().max(64).optional(),
   }),
 
-  stripe2momo: Joi.object({
-    ...baseInitiateSchema,
-    phoneNumber: Joi.string().pattern(/^[0-9+]{8,16}$/).required(),
-    operator: Joi.string().valid(...MOBILEMONEY_OPERATORS).required(),
-    country: Joi.string().max(64).required(),
-    stripeRef: Joi.string().max(128).optional(),
-  }),
 
-  flutterwave: Joi.object({
-    ...baseInitiateSchema,
-    currency: Joi.string().length(3).uppercase().optional(),
-    phoneNumber: Joi.string().pattern(/^[0-9+]{8,16}$/).optional(),
-    operator: Joi.string().max(64).optional(),
-    recipientName: Joi.string().max(128).optional(),
-    country: Joi.string().max(64).required(),
-    bankCode: Joi.string().max(32).optional(),
-    accountNumber: Joi.string().max(32).optional(),
-  }),
 };
 
 /* -------------------------------------------------------------------------- */
