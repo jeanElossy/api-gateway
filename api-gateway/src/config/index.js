@@ -88,8 +88,9 @@ const schema = Joi.object({
   PUBLIC_SIGNATURE_TTL_SEC: Joi.number().integer().min(10).default(60),
 
   // DB URIs (optionnels)
-  MONGO_URI_USERS: Joi.string().uri().allow("").optional(),
-  MONGO_URI_GATEWAY: Joi.string().uri().allow("").optional(),
+  /* MONGO_URI_USERS / MONGO_URI_GATEWAY : retirées le 2026-09-10 — la
+     passerelle n'ouvre plus aucune base. `.unknown()` plus bas les laisse
+     passer si elles traînent encore dans l'environnement. */
 
   // AML/fraude alertes
   FRAUD_ALERT_EMAIL: Joi.string().email().allow("").optional(),
@@ -307,8 +308,6 @@ if (!wantsWildcardCors) {
 
 // ---------------- URLs / DB ----------------
 const principalUrl = normStr(env.PRINCIPAL_URL || "").replace(/\/+$/, "");
-const mongoUsers = normStr(env.MONGO_URI_USERS || "");
-const mongoGateway = normStr(env.MONGO_URI_GATEWAY || "");
 
 // ✅ principal tx list path/timeout
 const principalTxListPath = normalizePath(
@@ -375,10 +374,19 @@ module.exports = {
     },
   },
 
-  dbUris: {
-    users: mongoUsers || null,
-    gateway: mongoGateway || null,
-  },
+  /**
+   * ⚠️ `dbUris` A ÉTÉ RETIRÉ — 2026-09-10.
+   *
+   * Il portait `MONGO_URI_USERS` et `MONGO_URI_GATEWAY`. Les deux connexions
+   * ont été fermées : la passerelle ne déclare aucun modèle, ne lit aucune
+   * collection, n'émet aucune requête. Exposer encore ces URI ici aurait
+   * conservé deux chaînes de connexion — identifiants compris — dans la
+   * configuration du service le plus exposé d'Internet, pour rien.
+   *
+   * Le schéma Joi accepte les clés inconnues (`.unknown()`) : les variables
+   * peuvent rester en place sur l'hébergeur sans empêcher le démarrage, le
+   * temps de les retirer.
+   */
 
   fraudAlert: {
     email: normStr(env.FRAUD_ALERT_EMAIL || "") || null,

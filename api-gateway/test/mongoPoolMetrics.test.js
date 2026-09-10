@@ -387,57 +387,41 @@ test("aucune adresse de serveur n'apparaît sur la page", async () => {
  * Le câblage doit donc repasser sur l'événement `connected`. Ce test lit la
  * source : il tombe si le repli disparaît.
  */
-test("db.js instrumente le seul pool qui reste, et il n'y en a plus qu'un", () => {
-  const brut = fs.readFileSync(path.join(__dirname, "../src/db.js"), "utf8");
-
+test("la passerelle n'instrumente AUCUN pool Mongo — elle n'en a plus", () => {
   /**
-   * On teste le CODE, pas ce qu'on en dit : un commentaire qui évoque la
-   * connexion supprimée ferait échouer ce test sans qu'aucune connexion ne soit
-   * rouverte. La leçon vient de `redisMetrics.test.js`, tombé sur exactement ce
-   * piège.
+   * ⚠️ CE TEST A CHANGÉ DEUX FOIS, ET LE SENS S'EST INVERSÉ À CHAQUE FOIS.
+   *
+   *   · il exigeait DEUX pools instrumentés ;
+   *   · puis UN SEUL, la connexion à la base des utilisateurs ayant été fermée
+   *     le 2026-09-10 au matin ;
+   *   · il exige maintenant qu'il n'y en ait AUCUN.
+   *
+   * La connexion restante, `MONGO_URI_GATEWAY`, a été retirée le même jour :
+   * mesuré sur tout le dépôt, la passerelle ne déclarait plus aucun modèle, ne
+   * lisait aucune collection et n'émettait aucune requête. Elle ouvrait
+   * pourtant la base à chaque démarrage, en sortait en `exit(1)` si celle-ci
+   * était injoignable, et refusait huit préfixes de routes en 500.
+   *
+   * Un test suit son INVARIANT, pas son fichier. L'invariant n'a jamais été
+   * « db.js instrumente son pool » — c'était « tout pool ouvert par le bord est
+   * observable ». Sans pool, il se lit : le bord n'en ouvre aucun, et ne
+   * prétend pas en observer un.
    */
-  const source = brut
+  const app = fs.readFileSync(path.join(__dirname, "../src/app.js"), "utf8");
+
+  const code = app
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/^\s*\/\/.*$/gm, "");
 
-  assert.match(source, /attachPoolMetrics\(mongoose\.connection, 'gateway'\)/);
-
-  /**
-   * ⚠️ CE TEST EXIGEAIT DEUX POOLS JUSQU'AU 2026-09-10.
-   *
-   * La passerelle ouvrait une seconde connexion vers la base des utilisateurs.
-   * Après la fusion de l'AML dans Tx-Core, plus aucun code du bord ne la
-   * lisait : un pool maintenu pour rien, et les identifiants de la base des
-   * utilisateurs présents dans l'environnement de la surface la plus exposée
-   * d'Internet.
-   *
-   * L'assertion s'est donc INVERSÉE. Elle exige maintenant que la seconde
-   * connexion ne revienne pas : sa réapparition serait le signe qu'un domaine
-   * est en train de reconquérir le bord.
-   */
   assert.doesNotMatch(
-    source,
-    /createConnection/,
-    "la passerelle a rouvert une seconde connexion Mongo — le bord ne détient " +
-      "aucune base au-delà de la sienne"
+    code,
+    /registerMongoPoolMetrics\s*\(/,
+    "la passerelle publie de nouveau des jauges de pool Mongo alors qu'elle " +
+      "n'ouvre aucune base : une capacité affirmée sans sujet (règle B.7)"
   );
 
-  assert.doesNotMatch(source, /usersConnection/);
-
-  const fn = source.slice(
-    source.indexOf("function attachPoolMetrics"),
-    source.indexOf("async function connectToGatewayDB")
-  );
-
-  // Repli sur `connected` : indispensable pour la connexion non attendue.
-  assert.match(fn, /connected/);
-  // Une métrique ne doit JAMAIS empêcher une connexion à la base.
-  assert.match(fn, /try\s*\{/);
-  assert.match(fn, /catch/);
-
-  // Le pool `gateway` n'est instrumenté qu'APRÈS le `await mongoose.connect`.
   assert.ok(
-    source.indexOf("await mongoose.connect(uri, opts)") <
-      source.indexOf("attachPoolMetrics(mongoose.connection, 'gateway')")
+    !fs.existsSync(path.join(__dirname, "../src/db.js")),
+    "src/db.js est revenu"
   );
 });

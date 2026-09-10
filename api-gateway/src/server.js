@@ -3,35 +3,54 @@
 require('dotenv').config();
 const app = require('./app');
 const config = require('./config');
-const { connectToGatewayDB } = require('./db');
 const logger = require('./logger');
 
 // Fonction d'init globale (DB puis serveur Express)
 (async () => {
   try {
-    // 1️⃣ Connexion à la base MongoDB "api-gateway"
-    await connectToGatewayDB();
-
     /**
-     * ⚠️ LA CONNEXION À LA BASE DES UTILISATEURS N'EST PLUS OUVERTE — 2026-09-10.
+     * ════════════════════════════════════════════════════════════════════════
+     * LA PASSERELLE N'OUVRE PLUS AUCUNE BASE — 2026-09-10
+     * ════════════════════════════════════════════════════════════════════════
      *
-     * Elle l'était à chaque démarrage, et depuis la fusion de l'AML **plus
-     * aucun code du bord ne la lisait**. Il restait une connexion ouverte en
-     * permanence, un pool à maintenir, des identifiants de la base des
-     * utilisateurs présents dans l'environnement de la surface la plus exposée
-     * d'Internet — et un `/health` qui annonçait fièrement son état.
+     * Deux connexions partaient d'ici. La première, vers la base des
+     * utilisateurs, a été retirée plus tôt le même jour : depuis la fusion de
+     * l'AML dans Tx-Core, plus aucun code du bord ne la lisait.
      *
-     * C'est le dernier morceau de ce que « le bord ne détient aucune base »
-     * veut dire : la passerelle vérifie une signature de jeton et relaie. Elle
-     * n'a plus besoin de savoir qu'une base d'utilisateurs existe.
+     * La seconde, `connectToGatewayDB()`, vient de partir pour la même raison.
+     * Mesuré sur l'ensemble du dépôt avant de la retirer :
      *
-     * ⚠️ `MONGO_URI_USERS` peut être RETIRÉE de l'environnement de ce service —
-     * c'est une action d'exploitation, à faire après le déploiement.
+     *     modèles déclarés     0        (`src/models/` est vide)
+     *     collections lues     0
+     *     requêtes émises      0
      *
-     * Verrouillé par `test/security/gatewayIsStateless.test.js`.
+     * Le dernier lecteur était `TrustedDepositNumber`, parti dans Tx-Core avec
+     * la décision de confiance des numéros de dépôt.
+     *
+     * ── Ce que la connexion coûtait, elle qui ne servait plus ───────────────
+     *
+     *   · `process.exit(1)` si la base était injoignable : une panne Atlas sur
+     *     une base que personne ne lit empêchait le bord de démarrer ;
+     *   · `readiness required: ["main"]` : elle le sortait de la rotation ;
+     *   · huit préfixes de routes — tous de purs relais vers Tx-Core —
+     *     refusaient en 500 tant que `readyState !== 1`. La tarification
+     *     tombait à cause d'une base qu'elle n'interroge pas.
+     *
+     * Le bord fait du TLS, du routage, de la vérification de signature de
+     * jeton, de la limitation de débit et de la corrélation. Il ne possède
+     * aucun domaine, donc aucune base.
+     *
+     * ⚠️ `MONGO_URI_GATEWAY` et `MONGO_URI_USERS` peuvent être RETIRÉES de
+     * l'environnement de ce service. C'est une action d'exploitation : les
+     * laisser n'a d'autre effet que de conserver deux secrets inutiles sur la
+     * surface la plus exposée d'Internet.
+     *
+     * Verrouillé par `test/security/gatewayIsStateless.test.js`. Ne pas
+     * rouvrir : le besoin qui le justifierait est le signe qu'un domaine est
+     * en train de revenir au bord.
      */
 
-    // La connexion nécessaire est ouverte : /readyz peut passer au vert.
+    // Rien à attendre : /readyz peut passer au vert immédiatement.
     app.get("readiness")?.markStarted();
 
     // 3️⃣ Démarrage du serveur Express

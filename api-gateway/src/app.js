@@ -72,7 +72,6 @@ const mongoSanitize = require("express-mongo-sanitize");
 const xssClean = require("xss-clean");
 const hpp = require("hpp");
 const morgan = require("morgan");
-const mongoose = require("mongoose");
 const { createReadiness } = require("./services/readiness");
 const axios = require("axios");
 const rateLimit = require("./middlewares/rateLimiter");
@@ -167,13 +166,18 @@ const shouldLogVerbose = !IS_PRODUCTION && config.nodeEnv !== "test";
  * refuser la tarification, à cause d'une base dont elle n'a plus besoin.
  */
 const readiness = createReadiness({
-  readConnections: () => {
-    const states = ["disconnected", "connected", "connecting", "disconnecting"];
-    const label = (rs) => states[rs] || "unknown";
-
-    return { main: label(mongoose.connection.readyState) };
-  },
-  required: ["main"],
+  /**
+   * AUCUNE connexion à rapporter : la passerelle n'ouvre plus de base
+   * (`src/server.js`, 2026-09-10). Une sonde ne doit annoncer que ce qu'elle
+   * mesure — rapporter l'état d'une connexion que personne n'ouvre revenait à
+   * maintenir ce service hors rotation en permanence.
+   *
+   * Sa disponibilité tient désormais à ce qu'il fait réellement : écouter, et
+   * ne pas être en cours de vidage. C'est `markStarted()` / `beginDraining()`
+   * qui le disent.
+   */
+  readConnections: () => ({}),
+  required: [],
   logger,
 });
 
@@ -227,13 +231,20 @@ app.use(metrics.httpMiddleware);
  * `__cacheStats()` construit le cache paresseusement s'il ne l'est pas encore :
  * c'est sans effet de bord, il est mémoïsé et réutilise le même client Redis.
  *
- * Les jauges de pool Mongo s'enregistrent maintenant, alors qu'aucune connexion
- * n'est encore ouverte (`db.js` s'en charge au démarrage) : elles parcourent le
- * registre de pools AU MOMENT de la scrutation, donc un pool connecté ensuite
- * apparaît de lui-même. Voir `services/mongoPoolMetrics.js`.
+ * ⚠️ LES JAUGES DE POOL MONGO NE SONT PLUS ENREGISTRÉES — 2026-09-10.
+ *
+ * Elles observaient le pool ouvert par `src/db.js`. La passerelle n'ouvre plus
+ * aucune base : il n'y a plus de pool, donc plus de sujet. Les publier quand
+ * même aurait produit une famille de séries vide en permanence — une capacité
+ * affirmée sans mesure (règle B.7), et un tableau de bord qui laisse croire
+ * qu'une base est surveillée ici.
+ *
+ * ⚠️ `services/mongoPoolMetrics.js` (537 l.) et son test (443 l., 13 tests)
+ * restent sur le disque et n'ont plus AUCUN appelant dans ce dépôt. À
+ * supprimer — c'est une décision qui appartient à l'auteur du dépôt, pas un
+ * effet de bord de ce correctif.
  */
 const { registerRedisMetrics } = require("./services/redisMetrics");
-const { registerMongoPoolMetrics } = require("./services/mongoPoolMetrics");
 
 registerRedisMetrics(metrics, {
   getClient: () => {
@@ -267,7 +278,6 @@ registerRedisMetrics(metrics, {
   logger,
 });
 
-registerMongoPoolMetrics(metrics, { logger });
 
 /* -------------------------------------------------------------------------- */
 /* Identifiant de corrélation                                                 */
@@ -1277,38 +1287,29 @@ app.use((req, res, next) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* Mongo readiness for native gateway routes only                             */
+/* ⚠️ LA PORTE « MONGO REQUIS » A ÉTÉ RETIRÉE — 2026-09-10                     */
 /* -------------------------------------------------------------------------- */
-
-const mongoRequiredPrefixes = [
-  "/api/v1/aml",
-  "/api/v1/fees",
-  "/api/v1/commissions",
-  "/api/v1/exchange-rates",
-  "/api/v1/pricing",
-  "/api/v1/fx-rules",
-  "/api/v1/pricing-rules",
-  "/api/v1/pricing-change-requests",
-];
-
-app.use((req, res, next) => {
-  const needsMongo = mongoRequiredPrefixes.some(
-    (prefix) => req.path === prefix || req.path.startsWith(prefix + "/")
-  );
-
-  if (!needsMongo) return next();
-
-  if (mongoose.connection.readyState !== 1) {
-    logErrorInNonProd("[MONGO] Requête refusée, MongoDB non connecté !");
-
-    return res.status(500).json({
-      success: false,
-      error: "MongoDB non connecté",
-    });
-  }
-
-  return next();
-});
+/*
+ * Huit préfixes refusaient en 500 tant que `mongoose.connection.readyState`
+ * valait autre chose que 1 :
+ *
+ *     /api/v1/aml            /api/v1/pricing
+ *     /api/v1/fees           /api/v1/fx-rules
+ *     /api/v1/commissions    /api/v1/pricing-rules
+ *     /api/v1/exchange-rates /api/v1/pricing-change-requests
+ *
+ * Cette porte a été juste : ces routes lisaient la base de la passerelle. Elles
+ * sont TOUTES devenues de purs relais vers Tx-Core — l'AML y a été fusionnée,
+ * puis le domaine des prix y a été déplacé. Aucune ne touche plus une base
+ * d'ici, et la passerelle n'en ouvre plus (`src/server.js`).
+ *
+ * Conservée, elle aurait produit exactement l'inverse de son intention : un
+ * refus systématique en 500 de la tarification, faute d'une connexion que plus
+ * personne n'ouvre. Une garde dont la condition n'est plus mesurée ne protège
+ * pas — elle bloque.
+ *
+ * Verrouillé par `test/security/gatewayIsStateless.test.js`.
+ */
 
 /* -------------------------------------------------------------------------- */
 /* Native gateway routes                                                      */

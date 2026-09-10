@@ -257,22 +257,6 @@ test("PLUS AUCUN chemin du bord ne lit un document de la base utilisateurs", () 
       lecteurs.join(", ")
   );
 
-  /**
-   * ⚠️ ET LA CONNEXION ELLE-MÊME N'EST PLUS OUVERTE.
-   *
-   * Sans cette seconde assertion, quelqu'un pourrait rouvrir la connexion sans
-   * la lire — un pool maintenu pour rien, et surtout les identifiants de la
-   * base des utilisateurs conservés dans l'environnement de la surface la plus
-   * exposée d'Internet. La lecture est le symptôme ; la connexion est la porte.
-   */
-  const db = sansCommentaires(lire("src", "db.js"));
-
-  assert.ok(
-    !db.includes("createConnection"),
-    "src/db.js rouvre une connexion secondaire : le bord ne détient aucune " +
-      "base au-delà de la sienne"
-  );
-
   const demarrage = sansCommentaires(lire("src", "server.js"));
 
   assert.ok(
@@ -283,6 +267,79 @@ test("PLUS AUCUN chemin du bord ne lit un document de la base utilisateurs", () 
   assert.ok(
     !fs.existsSync(path.join(RACINE, "src", "models", "userModel.js")),
     "le modèle utilisateur est revenu au bord"
+  );
+});
+
+/**
+ * ============================================================================
+ * LE BORD N'OUVRE PLUS AUCUNE BASE — 2026-09-10
+ * ============================================================================
+ *
+ * L'invariant précédent — « le bord ne lit plus la base des utilisateurs » —
+ * est devenu un cas particulier de celui-ci.
+ *
+ * Mesure qui a précédé le retrait, sur l'ensemble du dépôt hors scripts et
+ * tests : 0 modèle déclaré, 0 collection nommée, 0 requête émise. La passerelle
+ * ouvrait pourtant `MONGO_URI_GATEWAY` à chaque démarrage.
+ *
+ * Ce que cette connexion coûtait, elle qui ne servait plus :
+ *
+ *   · `process.exit(1)` si la base était injoignable — une panne Atlas sur une
+ *     base que personne ne lit empêchait le bord de DÉMARRER ;
+ *   · `readiness required: ["main"]` l'écartait de la rotation ;
+ *   · huit préfixes de routes, tous devenus de purs relais vers Tx-Core,
+ *     refusaient en 500 tant que `readyState !== 1`. La tarification tombait à
+ *     cause d'une base qu'elle n'interroge pas.
+ *
+ * ── La PAIRE, sans laquelle un déplacement n'est pas prouvé ─────────────────
+ *
+ * Absence à l'origine (aucun ouvreur de connexion) ET absence du fichier qui
+ * la portait. Vérifier seulement la première laisserait revenir un `db.js`
+ * dormant, qu'un seul `require` suffirait à réveiller.
+ */
+test("le bord n'ouvre AUCUNE connexion à une base", () => {
+  const OUVERTURE =
+    /require\(\s*["']mongoose["']\s*\)|mongoose\.connect|createConnection|new\s+MongoClient/;
+
+  const fautifs = [];
+
+  for (const f of fichiersSource()) {
+    const code = sansCommentaires(fs.readFileSync(f, "utf8"));
+    if (OUVERTURE.test(code)) fautifs.push(path.relative(RACINE, f));
+  }
+
+  assert.deepEqual(
+    fautifs,
+    [],
+    "un chemin du bord ouvre de nouveau une base : " + fautifs.join(", ")
+  );
+
+  assert.ok(
+    !fs.existsSync(path.join(RACINE, "src", "db.js")),
+    "src/db.js est revenu — il ne portait plus qu'une connexion que personne " +
+      "ne lisait, et un fichier dormant se réveille d'un seul require"
+  );
+});
+
+test("le détecteur d'ouverture de base MORD", () => {
+  /* Un garde-fou muet passe toujours : on le vérifie sur les quatre formes. */
+  const OUVERTURE =
+    /require\(\s*["']mongoose["']\s*\)|mongoose\.connect|createConnection|new\s+MongoClient/;
+
+  for (const forme of [
+    'const m = require("mongoose");',
+    "await mongoose.connect(uri);",
+    "const c = mongoose.createConnection(uri);",
+    "const cli = new MongoClient(uri);",
+  ]) {
+    assert.ok(OUVERTURE.test(forme), forme);
+  }
+
+  /* ...et il laisse passer l'histoire écrite en commentaire. */
+  assert.ok(
+    !OUVERTURE.test(
+      sansCommentaires('/* elle appelait mongoose.connect(uri) avant */')
+    )
   );
 });
 
