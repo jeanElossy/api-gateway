@@ -17,7 +17,6 @@ const {
   initiateTransactionOrThrow,
   forwardSimpleActionOrThrow,
   forwardAdminActionOrThrow,
-  logInternalTransactionOrThrow,
 } = require("../src/services/transactions/orchestrator");
 
 /**
@@ -376,34 +375,3 @@ exports.relaunchTransaction = async (req, res) => {
   }
 };
 
-exports.logInternalTransaction = async (req, res) => {
-  try {
-    console.log("[Gateway][Controller][logInternalTransaction] request", {
-      body: redactBody(req?.body),
-    });
-
-    const out = await logInternalTransactionOrThrow(req);
-
-    console.log("[Gateway][Controller][logInternalTransaction] success", {
-      status: out?.status || 201,
-      hasBody: !!out?.body,
-    });
-
-    return res.status(out.status || 201).json(out.body);
-  } catch (err) {
-    console.error(
-      "[Gateway][Controller][logInternalTransaction] error",
-      buildErrorDetails(err)
-    );
-
-    const status = err?.status || 500;
-    const message = err?.message || "Erreur lors de la création du log interne.";
-
-    return res.status(status).json({
-      success: false,
-      message,
-      error: message,
-      details: [],
-    });
-  }
-};

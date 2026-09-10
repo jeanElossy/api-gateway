@@ -47,11 +47,21 @@ const schema = Joi.object({
      périmètre de lancement — PayNoval opère sur trois rails : interne,
      mobile money, carte Visa. Une variable déclarée pour un rail qui n'existe
      pas laisse croire qu'il suffirait de la renseigner pour l'activer. */
-  SERVICE_MOBILEMONEY_URL: Joi.string().uri().allow("").optional(),
-  SERVICE_VISA_DIRECT_URL: Joi.string().uri().allow("").optional(),
-  SERVICE_CASHIN_URL: Joi.string().uri().allow("").optional(),
-  SERVICE_CASHOUT_URL: Joi.string().uri().allow("").optional(),
-  SERVICE_FLUTTERWAVE_URL: Joi.string().uri().allow("").optional(),
+  /**
+   * ⚠️ CINQ VARIABLES DE SERVICE RETIRÉES LE 2026-09-10.
+   *
+   * `SERVICE_MOBILEMONEY_URL`, `SERVICE_VISA_DIRECT_URL`, `SERVICE_CASHIN_URL`,
+   * `SERVICE_CASHOUT_URL` et `SERVICE_FLUTTERWAVE_URL` désignaient des
+   * microservices par rail JAMAIS déployés. Vides, elles faisaient répondre
+   * `400 « Aucun service configuré pour le provider »` au bord — les rails
+   * mobile money et carte étaient donc FERMÉS avant même d'atteindre le moteur,
+   * qui possède pourtant les cinq adaptateurs réels.
+   *
+   * Une variable déclarée pour un service qui n'existe pas est pire qu'absente :
+   * elle laisse croire qu'il suffirait de la renseigner pour activer un rail.
+   *
+   * Le bord n'a plus qu'une destination : Tx-Core, via `SERVICE_PAYNOVAL_URL`.
+   */
 
   // CORS
   CORS_ORIGINS: Joi.string().default("*"),
@@ -337,8 +347,6 @@ module.exports = {
    */
   microservices: {
     paynoval: normStr(env.SERVICE_PAYNOVAL_URL || "").replace(/\/+$/, ""),
-    mobilemoney: normStr(env.SERVICE_MOBILEMONEY_URL || "").replace(/\/+$/, ""),
-    visa_direct: normStr(env.SERVICE_VISA_DIRECT_URL || "").replace(/\/+$/, ""),
   },
 
   cors: {

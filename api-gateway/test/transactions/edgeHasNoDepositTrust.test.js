@@ -62,9 +62,18 @@ const PHONE_SECURITY = sansCommentaires(
   lire("src", "services", "transactions", "phoneSecurity.js")
 );
 
-const ORCHESTRATEUR = sansCommentaires(
-  lire("src", "services", "transactions", "transactionOrchestratorByFlow.js")
-);
+/**
+ * ⚠️ CE TEST LISAIT `transactionOrchestratorByFlow.js`, SUPPRIMÉ LE 2026-09-10.
+ *
+ * L'invariant n'a pas disparu, il s'est RENFORCÉ : il n'y a plus d'orchestrateur
+ * au bord du tout. On surveille donc l'ensemble de la couche transactions —
+ * un test suit son invariant, pas son fichier.
+ */
+const COUCHE_TRANSACTIONS = fs
+  .readdirSync(path.join(RACINE, "src", "services", "transactions"))
+  .filter((f) => f.endsWith(".js"))
+  .map((f) => sansCommentaires(lire("src", "services", "transactions", f)))
+  .join("\n");
 
 test("phoneSecurity ne porte plus la décision de confiance", () => {
   assert.ok(
@@ -89,11 +98,11 @@ test("phoneSecurity n'ouvre plus aucune lecture en base", () => {
   );
 });
 
-test("l'orchestrateur n'appelle plus le contrôle de confiance", () => {
+test("aucun module du bord n'appelle le contrôle de confiance", () => {
   assert.ok(
-    !/await\s+enforceDepositPhoneTrust\s*\(/.test(ORCHESTRATEUR),
-    "L'orchestrateur du bord rappelle `enforceDepositPhoneTrust`. Le contrôle " +
-      "est désormais sur la chaîne de `/initiate` de TX Core " +
+    !/await\s+enforceDepositPhoneTrust\s*\(/.test(COUCHE_TRANSACTIONS),
+    "Un module du bord rappelle `enforceDepositPhoneTrust`. Le contrôle est " +
+      "sur la chaîne de `/initiate` de TX Core " +
       "(`middleware/requireTrustedDepositPhone`)."
   );
 });

@@ -123,17 +123,16 @@ function verifyInternalToken(req, res, next) {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Route technique interne.
- * Ne doit pas demander de JWT user.
+ * ⚠️ `POST /internal/log` A ÉTÉ RETIRÉE LE 2026-09-10.
  *
- * Exemple :
- * POST /api/v1/transactions/internal/log
+ * Elle écrivait une transaction dans la base DU BORD, via
+ * `src/models/Transaction` — un fichier supprimé avec la base du bord. Elle
+ * rendait donc déjà 500 (« Model Transaction introuvable »), et AUCUN appelant
+ * n'existe dans le workspace.
+ *
+ * Sur le fond : le bord ne possède aucun domaine et n'a pas de grand livre. Une
+ * transaction s'écrit dans Tx-Core, qui en est le moteur (invariant 12).
  */
-router.post(
-  "/internal/log",
-  verifyInternalToken,
-  controller.logInternalTransaction
-);
 
 /* -------------------------------------------------------------------------- */
 /* Protected user/admin routes                                                */

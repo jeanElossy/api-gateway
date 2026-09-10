@@ -16,7 +16,6 @@
  * --------------------------------------------------------------------------
  */
 
-const mongoose = require("mongoose");
 
 function reqAny(paths) {
   for (const p of paths) {
@@ -41,27 +40,16 @@ const { safeAxiosRequest, getProviderCooldown } = require("./httpClient");
 const {
   normalizeTxForResponse,
   normalizeTxArray,
-  normalizeCurrencyCode,
   extractTxArrayFromProviderPayload,
   injectTxArrayIntoProviderPayload,
 } = require("./normalizers");
-const {
-  getTargetService,
-  resolveProviderForRequest,
-  normalizeProviderForRouting,
-} = require("./providerRegistry");
 const { getUserId, auditForwardHeaders } = require("./phoneSecurity");
 const {
   listTxCache,
   listTxInflight,
   buildListTxCacheKey,
 } = require("./listCache");
-const {
-  routeInitiateByFlow,
-  routeActionByFlow,
-  fetchCanonicalTransaction,
-} = require("./transactionOrchestratorByFlow");
-const { routeAdminActionByFlow } = require("./adminFlowRouter");
+const { baseTxCore, appelerTxCore } = require("./txCore");
 
 function cleanBaseUrl(url) {
   return String(url || "").replace(/\/+$/, "");
@@ -75,21 +63,24 @@ async function getTransactionOrThrow(req) {
   const userId = getUserId(req);
   const { id } = req.params;
 
-  const canonicalTx = await fetchCanonicalTransaction(req, id);
-  if (!canonicalTx) {
+  const { body } = await appelerTxCore({
+    req,
+    method: "get",
+    chemin: `/transactions/${encodeURIComponent(String(id))}`,
+    timeout: 12000,
+  });
+
+  const brut = body?.data || body?.transaction || body;
+
+  if (!brut || typeof brut !== "object" || Array.isArray(brut)) {
     const e = new Error("Transaction introuvable");
     e.status = 404;
     throw e;
   }
 
-  const normalized = normalizeTxForResponse(canonicalTx, userId);
-
   return {
     status: 200,
-    body: {
-      success: true,
-      data: normalized,
-    },
+    body: { success: true, data: normalizeTxForResponse(brut, userId) },
   };
 }
 
@@ -147,10 +138,17 @@ function listFailure({ status, code, message, retryAfterSec = null }) {
 }
 
 async function listTransactionsOrFallback(req) {
-  const provider = normalizeProviderForRouting(
-    resolveProviderForRequest(req, "paynoval")
-  );
-  const targetService = getTargetService(provider);
+  /**
+   * ⚠️ PLUS DE RÉSOLUTION DE PRESTATAIRE ICI — 2026-09-10.
+   *
+   * Ce handler choisissait un prestataire (`resolveProviderForRequest`) puis
+   * son microservice (`getTargetService`). Les deux seules issues possibles
+   * étaient Tx-Core (pour `paynoval`) ou une chaîne vide — les autres URL de
+   * service ne sont pas déployées. La liste des transactions d'un utilisateur
+   * n'a d'ailleurs jamais dépendu d'un rail : elle est la même quel que soit
+   * le moyen de paiement.
+   */
+  const targetService = baseTxCore();
 
   const userId = getUserId(req);
   if (!userId) {
@@ -168,7 +166,7 @@ async function listTransactionsOrFallback(req) {
 
   const cacheKey = buildListTxCacheKey({
     userId,
-    provider,
+    provider: "txcore",
     query: req.query,
   });
 
@@ -188,9 +186,9 @@ async function listTransactionsOrFallback(req) {
     if (!targetService) {
       return listFailure({
         status: 503,
-        code: "no_provider_service",
+        code: "tx_core_unconfigured",
         message:
-          "Le service de paiement n'est pas configuré. Réessayez dans un instant.",
+          "Le moteur de transactions n'est pas configuré. Réessayez dans un instant.",
       });
     }
 
@@ -260,7 +258,6 @@ async function listTransactionsOrFallback(req) {
       logger.error?.("[Gateway][TX] Erreur GET transactions", {
         status,
         error,
-        provider,
       });
 
       /**
@@ -320,95 +317,114 @@ async function listTransactionsOrFallback(req) {
   }
 }
 
+/**
+ * ============================================================================
+ * INITIER, CONFIRMER, ANNULER, ADMINISTRER — TOUT VA AU MOTEUR
+ * ============================================================================
+ *
+ * Ces quatre fonctions passaient par `routeInitiateByFlow`, `routeActionByFlow`
+ * et `routeAdminActionByFlow` : 1 051 lignes qui résolvaient un flux, en
+ * déduisaient un prestataire, cherchaient son microservice, puis appelaient l'un
+ * des trois adaptateurs.
+ *
+ * Deux des trois adaptateurs visaient des URL vides — les rails mobile money et
+ * carte étaient donc FERMÉS au bord, en 400, avant d'atteindre le moteur. Le
+ * troisième pointait sur Tx-Core.
+ *
+ * Tx-Core, lui, résout le flux (`flowHelpers.resolveExternalFlow`), choisit le
+ * prestataire (`resolveProviderForFlow`) et possède les cinq adaptateurs réels.
+ * Le bord dupliquait une décision qu'il n'avait pas les moyens d'exécuter.
+ *
+ * ⚠️ LE CORPS PART TEL QUE `normalizers` L'A TRADUIT, et le statut revient
+ * VERBATIM. Réécrire un statut ici ferait perdre la distinction entre « ta
+ * demande est invalide » (4xx) et « je n'ai pas pu » (5xx) — la seule qui
+ * permette au client de savoir s'il doit corriger ou réessayer.
+ */
+
 async function initiateTransactionOrThrow(req) {
-  return routeInitiateByFlow(req);
+  const userId = getUserId(req);
+
+  const { status, body } = await appelerTxCore({
+    req,
+    method: "post",
+    chemin: "/transactions/initiate",
+    body: req.body,
+    timeout: 20000,
+  });
+
+  return { status, body: traduireReponse(body, userId) };
 }
 
 async function forwardSimpleActionOrThrow(req, action) {
-  return routeActionByFlow(req, action);
-}
+  const userId = getUserId(req);
 
-async function forwardAdminActionOrThrow(req, action) {
-  return routeAdminActionByFlow(req, action);
-}
-
-async function logInternalTransactionOrThrow(req) {
-  if (mongoose.connection.readyState !== 1) {
-    const e = new Error("MongoDB non connecté (log interne indisponible).");
-    e.status = 503;
-    throw e;
-  }
-
-  let Transaction = null;
-  try {
-    Transaction = reqAny([
-      "../../src/models/Transaction",
-      "../../models/Transaction",
-    ]);
-  } catch {
-    const e = new Error("Model Transaction introuvable (log interne).");
-    e.status = 500;
-    throw e;
-  }
-
-  const now = new Date();
-  const userId = getUserId(req) || req.body?.userId || null;
-
-  if (!userId) {
-    const e = new Error("userId manquant pour loguer la transaction.");
-    e.status = 400;
-    throw e;
-  }
-
-  const {
-    provider = "paynoval",
-    amount,
-    status = "confirmed",
-    currency,
-    reference,
-    meta = {},
-  } = req.body || {};
-
-  const numAmount = Number(amount);
-  if (!Number.isFinite(numAmount) || numAmount <= 0) {
-    const e = new Error("amount invalide ou manquant.");
-    e.status = 400;
-    throw e;
-  }
-
-  const countryHint =
-    req.body?.country ||
-    meta?.country ||
-    meta?.recipientInfo?.country ||
-    meta?.recipientInfo?.pays ||
-    "";
-
-  const legacyCurrency = normalizeCurrencyCode(currency, countryHint) || null;
-  const outMeta =
-    typeof meta === "object" && meta && !Array.isArray(meta) ? { ...meta } : {};
-
-  const doc = await Transaction.create({
-    userId,
-    provider,
-    amount: numAmount,
-    status,
-    currency: legacyCurrency || undefined,
-    reference: reference || undefined,
-    meta: outMeta,
-    createdAt: now,
-    updatedAt: now,
-    confirmedAt: status === "confirmed" ? now : undefined,
+  const { status, body } = await appelerTxCore({
+    req,
+    method: "post",
+    chemin: `/transactions/${encodeURIComponent(String(action))}`,
+    body: req.body,
+    timeout: 20000,
   });
 
-  const out = normalizeTxForResponse(
-    doc.toObject ? doc.toObject() : doc,
-    userId
-  );
+  return { status, body: traduireReponse(body, userId) };
+}
 
-  return {
-    status: 201,
-    body: { success: true, data: out },
-  };
+/**
+ * Les actions d'administration empruntent le MÊME chemin.
+ *
+ * `adminFlowRouter.js` en faisait un cas à part : il relisait la transaction
+ * canonique pour en déduire le flux, puis routait. Tx-Core applique déjà
+ * `requireRole` sur ces chemins et connaît le flux de la transaction — il n'a
+ * jamais eu besoin qu'on le lui dise.
+ */
+async function forwardAdminActionOrThrow(req, action) {
+  return forwardSimpleActionOrThrow(req, action);
+}
+
+/**
+ * Traduit la réponse du moteur vers la forme attendue par le client. C'est la
+ * couche anti-corruption en SORTIE : Stripe fait la même chose pour ses
+ * anciennes versions d'API.
+ *
+ * ⚠️ TROIS FORMES, ET LA TROISIÈME EST CELLE D'`/initiate`.
+ *
+ * Tx-Core enveloppe tantôt dans `data`, tantôt dans `transaction`, et rend
+ * parfois un corps PLAT — `/transactions/initiate` répond
+ * `{ success, transactionId, reference, flow, status, pricing, … }` sans
+ * aucune clé d'enveloppe (`initiateInternal.js:962`).
+ *
+ * L'adaptateur remplacé traitait ce cas : il normalisait alors le corps ENTIER.
+ * Ne pas le reproduire aurait privé la réponse d'initiation des champs dérivés
+ * (`money`, `id`, devises normalisées) que l'application mobile lit — une
+ * régression de contrat invisible aux tests, qui ne serait apparue qu'au
+ * premier virement.
+ *
+ * `normalizeTxForResponse` ENRICHIT sans retirer (`const out = { ...tx }`) :
+ * appliquer la normalisation à un corps plat lui ajoute les champs dérivés
+ * sans toucher aux siens.
+ */
+function traduireReponse(payload, userId) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload;
+  }
+
+  if (payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)) {
+    return { ...payload, data: normalizeTxForResponse(payload.data, userId) };
+  }
+
+  if (
+    payload.transaction &&
+    typeof payload.transaction === "object" &&
+    !Array.isArray(payload.transaction)
+  ) {
+    return {
+      ...payload,
+      transaction: normalizeTxForResponse(payload.transaction, userId),
+    };
+  }
+
+  /* Corps plat — le cas d'`/initiate`. */
+  return normalizeTxForResponse(payload, userId);
 }
 
 module.exports = {
@@ -417,5 +433,4 @@ module.exports = {
   initiateTransactionOrThrow,
   forwardSimpleActionOrThrow,
   forwardAdminActionOrThrow,
-  logInternalTransactionOrThrow,
 };

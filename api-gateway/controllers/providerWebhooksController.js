@@ -75,10 +75,28 @@ const logger = reqAny([
 ]);
 
 const { safeAxiosRequest } = require("../src/services/transactions/httpClient");
-const {
-  getTargetService,
-  normalizeRail,
-} = require("../src/services/transactions/providerRegistry");
+const { baseTxCore } = require("../src/services/transactions/txCore");
+
+/**
+ * ⚠️ `normalizeRail` VENAIT DE `providerRegistry`, SUPPRIMÉ LE 2026-09-10.
+ *
+ * Il est repris ICI, à trois lignes, plutôt qu'importé d'un module de routage
+ * que le bord n'a plus. La table `RAILS` juste en dessous est la source de
+ * vérité de ce fichier ; ce normalisateur ne fait que ramener les alias connus
+ * à ses deux clés.
+ */
+const OPERATEURS_MOBILEMONEY = Object.freeze(["wave", "orange", "mtn", "moov"]);
+
+function normalizeRail(v) {
+  const s = String(v || "").trim().toLowerCase();
+
+  if (OPERATEURS_MOBILEMONEY.includes(s)) return "mobilemoney";
+  if (["visa_direct", "visadirect", "card", "visa", "mastercard"].includes(s)) {
+    return "card";
+  }
+
+  return s;
+}
 
 /**
  * Rails acceptés, et opérateurs de chacun. Table CLOSE : un rail ou un
@@ -195,14 +213,29 @@ function corpsBrut(req) {
 }
 
 async function relayerVersTxCore(req, res, { rail, provider }) {
-  const serviceUrl = getTargetService(rail === "card" ? "visa_direct" : rail);
+  /**
+   * ⚠️ CE RELAIS CHERCHAIT L'URL DU RAIL, PAS CELLE DE TX CORE — corrigé le
+   * 2026-09-10.
+   *
+   * Il faisait `getTargetService(rail === "card" ? "visa_direct" : rail)`,
+   * c'est-à-dire qu'il demandait `SERVICE_VISA_DIRECT_URL` ou
+   * `SERVICE_MOBILEMONEY_URL` — deux variables que la configuration laisse
+   * vides, pour des microservices qui n'ont jamais été déployés.
+   *
+   * Résultat : **tout rappel prestataire mobile money ou carte repartait en
+   * 503**, alors que la fonction s'appelle `relayerVersTxCore` et que son
+   * commentaire cite le chemin exact servi par Tx-Core. Le défaut était
+   * invisible faute de prestataire branché ; il se serait manifesté au PREMIER
+   * rappel réel — c'est-à-dire au moment où l'argent arrive.
+   */
+  const serviceUrl = baseTxCore();
 
   if (!serviceUrl) {
-    logger.error?.("[Gateway][Webhook] service non configuré", { rail, provider });
+    logger.error?.("[Gateway][Webhook] Tx-Core non configuré", { rail, provider });
 
     return res.status(503).json({
       success: false,
-      error: `Aucun service configuré pour le rail ${rail}.`,
+      error: "Moteur de transactions non configuré.",
       code: "WEBHOOK_SERVICE_UNCONFIGURED",
     });
   }
