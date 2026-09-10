@@ -73,7 +73,6 @@ const xssClean = require("xss-clean");
 const hpp = require("hpp");
 const morgan = require("morgan");
 const mongoose = require("mongoose");
-const { getUsersConnection } = require("./db");
 const { createReadiness } = require("./services/readiness");
 const axios = require("axios");
 const rateLimit = require("./middlewares/rateLimiter");
@@ -115,6 +114,7 @@ const adminComplianceRoutes = require("../routes/adminComplianceRoutes");
 const internalTransactionsRouter = require("../routes/internalTransactions");
 const internalRoutes = require("../routes/internalRoutes");
 const pricingRoutes = require("../routes/pricingRoutes");
+const phoneVerificationRoutes = require("../routes/phoneVerificationRoutes");
 const fxRulesRoutes = require("../routes/fxRules");
 const publicRoutes = require("../routes/publicRoutes");
 const requirePublicSignature = require("./middlewares/requirePublicSignature");
@@ -134,25 +134,46 @@ const shouldLogVerbose = !IS_PRODUCTION && config.nodeEnv !== "test";
 /**
  * Sondes de disponibilité — voir `src/services/readiness.js`.
  *
- * `main` est la connexion mongoose globale de la passerelle, `users` la
- * connexion secondaire ouverte par `createConnection`. Les deux sont requises :
- * une passerelle qui ne peut pas lire les utilisateurs ne peut authentifier
- * personne.
+ * ⚠️ `users` A ÉTÉ RETIRÉE DES CONNEXIONS REQUISES — 2026-09-10.
+ *
+ * Le commentaire disait : « une passerelle qui ne peut pas lire les
+ * utilisateurs ne peut authentifier personne ». Ce n'est plus vrai, et c'est
+ * l'aboutissement du déplacement : `middlewares/auth.js` vérifie une SIGNATURE
+ * et lit les revendications du jeton — il n'ouvre plus la base. Le dernier
+ * lecteur, `middlewares/aml.js`, est parti avec l'AML dans Tx-Core.
+ *
+ * La connexion n'est donc plus ouverte du tout (`src/server.js`). Exiger dans
+ * `/readyz` l'état d'une connexion que personne n'ouvre aurait maintenu ce
+ * service HORS ROTATION en permanence — une sonde qui ment dans le sens
+ * défavorable coûte aussi cher qu'une sonde qui ment dans l'autre.
+ *
+ * ⚠️ `main` RESTE EXIGÉE ALORS QUE PLUS AUCUN CODE NE LA LIT — 2026-09-10.
+ *
+ * Cette ligne disait : « la base de la passerelle porte encore
+ * `TrustedDepositNumber`, lu par `services/transactions/phoneSecurity.js` ».
+ * C'était son DERNIER lecteur. Il est parti dans TX Core avec la décision de
+ * confiance, et `src/models/` est désormais VIDE : la passerelle ne déclare
+ * plus un seul modèle et n'effectue plus une seule lecture en base.
+ *
+ * Conséquence à trancher, volontairement laissée en l'état plutôt que corrigée
+ * en silence — c'est un changement de comportement de déploiement :
+ *
+ *   · `required: ["main"]` sort ce service de la rotation si une base que
+ *     personne n'utilise devient injoignable ;
+ *   · `mongoRequiredPrefixes` (plus bas) refuse en 500 huit préfixes qui sont
+ *     tous devenus de purs RELAIS vers TX Core — aucun ne touche cette base.
+ *
+ * Autrement dit : la passerelle peut aujourd'hui être déclarée indisponible, et
+ * refuser la tarification, à cause d'une base dont elle n'a plus besoin.
  */
 const readiness = createReadiness({
   readConnections: () => {
     const states = ["disconnected", "connected", "connecting", "disconnecting"];
     const label = (rs) => states[rs] || "unknown";
 
-    let users = "not_initialized";
-    try {
-      const conn = getUsersConnection?.();
-      if (conn) users = label(conn.readyState);
-    } catch {}
-
-    return { main: label(mongoose.connection.readyState), users };
+    return { main: label(mongoose.connection.readyState) };
   },
-  required: ["main", "users"],
+  required: ["main"],
   logger,
 });
 
@@ -223,21 +244,26 @@ registerRedisMetrics(metrics, {
       return null;
     }
   },
-  appCacheStats: () => {
-    try {
-      return require("./services/fxRulesService").__cacheStats();
-    } catch {
-      /**
-       * Une source indisponible ne doit pas casser toute la page. On rend
-       * `contourne: true` plutôt que `null` : sans stats lisibles, le cache ne
-       * sert AUCUNE lecture, et `app_cache_enabled` doit valoir 0. Rendre `null`
-       * publierait 1 — un cache déclaré actif alors qu'il ne l'est pas est
-       * exactement le genre de métrique qui ment (règle B.6). Les compteurs,
-       * eux, restent non renseignés plutôt que remis à zéro.
-       */
-      return { contourne: true };
-    }
-  },
+  /**
+   * ⚠️ LA PASSERELLE NE POSSÈDE PLUS DE CACHE APPLICATIF — ELLE DOIT LE DIRE.
+   *
+   * Cette sonde publiait les statistiques du cache des règles de change
+   * (`services/fxRulesService.__cacheStats()`). Ce cache a suivi la
+   * tarification dans Tx-Core le 2026-09-10.
+   *
+   * Laisser l'appel en place aurait produit exactement le défaut R-08 corrigé
+   * la veille côté backend : une jauge qui rapporte zéro parce que la source
+   * n'existe plus, et qu'un exploitant lit comme « cache sain ». Un zéro
+   * structurel affiché comme bonne santé est pire qu'aucune mesure
+   * (règles B.6 et B.7).
+   *
+   * `contourne: true` est la valeur qui met `app_cache_enabled` à 0 — le
+   * contrat déjà prévu par `registerRedisMetrics` pour dire « pas de cache
+   * ici ». Ce n'est plus un repli d'erreur : c'est l'état réel, affirmé.
+   *
+   * Le cache de tarification se mesure désormais dans Tx-Core, où il vit.
+   */
+  appCacheStats: () => ({ contourne: true }),
   logger,
 });
 
@@ -471,6 +497,44 @@ app.use(
 if (shouldLogVerbose) {
   app.use(morgan(config.logging?.level === "debug" ? "dev" : "combined"));
 }
+
+/* -------------------------------------------------------------------------- */
+/* Rappels prestataires : LES OCTETS BRUTS, AVANT TOUT PARSEUR                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ============================================================================
+ * UNE SIGNATURE PORTE SUR DES OCTETS, PAS SUR UN OBJET
+ * ============================================================================
+ *
+ * `express.json()` désérialise le corps ; l'objet obtenu est ensuite
+ * re-sérialisé par axios au moment de le transmettre. Les octets qui
+ * ressortent ne sont PAS ceux que le prestataire a signés : l'espacement
+ * disparaît, `1.0` devient `1`, l'échappement unicode change, une clé dupliquée
+ * est perdue. Le HMAC recalculé en aval porte alors sur une chaîne différente
+ * de celle qui a servi à le produire.
+ *
+ * `controllers/providerWebhooksController.js` faisait exactement cela
+ * (`data: req.body`). La vérification de signature de TX Core ne pouvait pas
+ * aboutir — et si elle avait abouti, c'eût été par hasard.
+ *
+ * Ce parseur `raw` est monté AVANT `express.json()` et UNIQUEMENT sur le
+ * préfixe des rappels : `req.body` y est un `Buffer` que l'on retransmet tel
+ * quel. C'est la posture de Stripe (`express.raw({type:'application/json'})` sur
+ * la route de webhook, documentée comme obligatoire) et d'Adyen.
+ *
+ * ⚠️ L'ORDRE EST STRUCTURANT. Déplacer cette ligne après `express.json()` la
+ * rendrait sans effet : le premier parseur qui consomme le flux gagne, et le
+ * second ne voit plus rien. Verrouillé par
+ * `test/security/webhookRawBodyForwarded.test.js`.
+ *
+ * ⚠️ 2 Mo comme les autres parseurs : un rappel prestataire est un petit objet
+ * JSON, et une limite haute sur une route non authentifiée est une invitation.
+ */
+app.use(
+  "/api/v1/provider-webhooks",
+  express.raw({ type: "*/*", limit: "2mb" })
+);
 
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
@@ -1304,6 +1368,21 @@ app.use(
 
 app.use("/api/v1/aml", amlRoutes);
 app.use("/api/v1/fees", feesRoutes);
+
+/**
+ * ⚠️ CE MONTAGE MANQUAIT — ET C'EST TOUT LE DÉFAUT.
+ *
+ * `routes/phoneVerificationRoutes.js` existait, avec 353 lignes de contrôleur
+ * natif derrière lui, et n'était référencé par AUCUN fichier. Le préfixe était
+ * également absent de `PRINCIPAL_PREFIXES`. Les trois appels que
+ * l'application mobile fait déjà (`tools/api.js`) rendaient donc 404, et un
+ * dépôt vers un numéro tiers ne pouvait jamais être débloqué.
+ *
+ * Le routeur est désormais un RELAIS vers Tx-Core, qui détient la décision et
+ * le registre. Le bord ne garde que ce qui lui revient : authentifier, puis
+ * transmettre.
+ */
+app.use("/api/v1/phone-verification", phoneVerificationRoutes);
 app.use("/api/v1/exchange-rates", exchangeRateRoutes);
 
 /**

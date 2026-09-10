@@ -22,9 +22,24 @@ const authzModule =
 const protect = authModule.protect || authModule.default || authModule;
 const requireRole = authzModule.requireRole || authzModule.default;
 
-const {
-  listComplianceTransactions,
-} = require("../controllers/adminCompliance.controller");
+/**
+ * ⚠️ LE CONTRÔLEUR NATIF A DISPARU, ET C'EST LE CORRECTIF.
+ *
+ * `controllers/adminCompliance.controller.js` (405 l.) appelait
+ * `/api/v1/internal/admin/compliance/transactions` — une route qui n'existait
+ * PAS dans Tx-Core — récoltait un 404, et se repliait en silence sur les 500
+ * dernières transactions qu'il filtrait en mémoire par fouille de JSON.
+ *
+ * Un blocage de sanctions survenu 600 transactions plus tôt était donc
+ * invisible au responsable conformité, sans que rien ne le dise. La route
+ * existe désormais dans Tx-Core, qui lit son propre journal `AMLLog` avec
+ * l'index prévu pour ça et ANNONCE la fenêtre couverte.
+ *
+ * Un relais ne réinterprète pas ce qu'il transporte : le filtrage, la
+ * pagination et les statistiques se calculent chez le propriétaire de la
+ * donnée.
+ */
+const { relayerVers } = require("../src/services/txCoreRelay");
 
 const router = express.Router();
 
@@ -53,7 +68,7 @@ router.use(protect);
 router.get(
   "/transactions",
   requireRole(["admin", "superadmin"]),
-  listComplianceTransactions
+  relayerVers("/api/v1/internal/admin/compliance")
 );
 
 module.exports = router;

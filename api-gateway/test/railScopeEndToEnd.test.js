@@ -17,7 +17,26 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const flows = require("../src/tools/allowedFlows");
-const { getSingleTxLimit, getDailyLimit } = require("../src/tools/amlLimits");
+/**
+ * ⚠️ LES PLAFONDS NE SONT PLUS IMPORTÉS ICI — 2026-09-10.
+ *
+ * Ce fichier liait la table des flux (que le bord décide) à la table des
+ * plafonds AML (`tools/amlLimits`). Les plafonds y étaient le TROISIÈME
+ * exemplaire d'une même règle — `middlewares/aml.js` du bord et
+ * `api-paynoval/src/middleware/aml.js` les appliquaient déjà. Ils ont été
+ * retirés du bord avec l'AML.
+ *
+ * Le test s'est scindé selon ce que chaque service possède :
+ *
+ *   · ICI — quels couples funds/destination sont recevables, et l'alias
+ *     `visa` → `visa_direct`. C'est de la validation de forme : la table choisit
+ *     le schéma Joi appliqué à la requête.
+ *   · `api-paynoval/test/railLimitsCoverage.test.js` — que chaque rail du
+ *     périmètre porte un plafond réel, et qu'un rail inconnu LÈVE au lieu de
+ *     recevoir un plafond de complaisance.
+ *
+ * Ne pas réimporter les plafonds ici : ce serait rouvrir la divergence.
+ */
 
 const low = (v) => String(v || "").toLowerCase().trim();
 
@@ -58,19 +77,18 @@ const LEGITIMES = [
 ];
 
 for (const [nom, body, devise] of LEGITIMES) {
-  test(`${nom} : le flux est autorisé et porte un plafond réel`, () => {
+  test(`${nom} : le flux est autorisé et se résout en rail canonique`, () => {
     assert.ok(fluxAutorise(body), "flux refusé alors qu'il est au périmètre");
 
     const rail = railRetenu(body);
-    const envoi = getSingleTxLimit(rail, devise);
-    const jour = getDailyLimit(rail, devise);
 
-    assert.ok(Number.isFinite(envoi) && envoi > 0);
-    assert.ok(Number.isFinite(jour) && jour >= envoi);
-
-    // Aucun de ces chemins ne doit retomber sur les anciennes constantes.
-    assert.notEqual(envoi, 1_000_000, "plafond de repli détecté");
-    assert.notEqual(jour, 5_000_000, "plafond de repli détecté");
+    /**
+     * Le rail retenu doit être une forme CANONIQUE. Un flux qui se résout en
+     * une chaîne libre atteindrait Tx-Core sous un nom qu'aucune politique ne
+     * connaît — et Tx-Core échouerait en fermeture, mais sur un 500 plutôt que
+     * sur un refus explicable.
+     */
+    assert.match(rail, /^[a-z_]+$/, `rail non canonique : « ${rail} »`);
   });
 }
 
@@ -102,23 +120,41 @@ for (const [nom, body] of REFUSES) {
   });
 }
 
-test("aucun flux autorisé ne repose sur un rail sans plafond", () => {
+test("aucun plafond de conformité n'est réintroduit au bord", () => {
   /**
-   * L'invariant qui manquait. `visa_direct` portait DEUX flux ouverts et zéro
-   * ligne dans la table des plafonds : le contrôle AML retombait alors sur
-   * 1 000 000, dans toutes les devises. Ce test lie les deux tables — un flux
-   * ne peut plus exister sans que sa politique existe.
+   * L'invariant « aucun flux autorisé ne repose sur un rail sans plafond » a
+   * déménagé dans `api-paynoval/test/railLimitsCoverage.test.js`, avec la table
+   * des plafonds. Ce qui reste ici est sa contrepartie : que le bord ne se
+   * remette pas à décider de plafonds.
+   *
+   * Sans cette assertion, quelqu'un rétablirait `tools/amlLimits.js` au bord au
+   * premier besoin, et les deux tables recommenceraient à diverger — ce qui a
+   * déjà laissé `visa_direct` rouler sur un repli de 1 000 000 dans toutes les
+   * devises.
    */
-  for (const f of flows) {
-    for (const côté of [f.funds, f.destination]) {
-      const rail = normalizeProviderLike(côté);
-      if (rail === "paynoval") continue;
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const racine = path.join(__dirname, "..");
 
-      assert.doesNotThrow(
-        () => getSingleTxLimit(rail, "EUR"),
-        `le flux ${f.funds} → ${f.destination} emprunte le rail « ${rail} », ` +
-          "qui n'a aucun plafond AML"
-      );
-    }
+  assert.ok(
+    !fs.existsSync(path.join(racine, "src", "tools", "amlLimits.js")),
+    "src/tools/amlLimits.js est revenu au bord — les plafonds vivent dans Tx-Core"
+  );
+
+  const validation = fs.readFileSync(
+    path.join(racine, "src", "middlewares", "validateTransaction.js"),
+    "utf8"
+  );
+
+  const codeVivant = validation
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+
+  for (const interdit of ["getSingleTxLimit", "getDailyLimit", "getUserTransactionsStats"]) {
+    assert.ok(
+      !codeVivant.includes(interdit),
+      `validateTransaction.js réapplique « ${interdit} » : la décision de ` +
+        "conformité est revenue au bord"
+    );
   }
 });

@@ -4,9 +4,18 @@
 const jwt = require("jsonwebtoken");
 const config = require("../config");
 const { secureCompare } = require("../utils/secureCompare");
-const { getUsersConnection } = require("../db");
-const getUserModel = require("../models/userModel");
 const logger = require("../logger");
+const { estRevoque } = require("../services/tokenRevocation");
+
+/*
+ * `getUsersConnection` et `getUserModel` ne sont plus importés : la passerelle
+ * n'ouvre plus la base des utilisateurs pour authentifier.
+ *
+ * C'est la disparition de ces deux symboles qui MESURE le correctif du
+ * 2026-09-10 — tant qu'ils étaient là, le `findById()` par requête pouvait
+ * revenir en une ligne. Voir `services/tokenRevocation.js` pour le raisonnement
+ * complet, et `test/security/gatewayIsStateless.test.js` pour la garde.
+ */
 const { getVerificationKey, readKid } = require("../utils/jwtKeyring");
 
 /**
@@ -225,52 +234,77 @@ const authMiddleware = async (req, res, next) => {
       });
     }
 
-    // Connexion DB utilisateurs
-    const usersConn = getUsersConnection();
-    const User = getUserModel(usersConn);
+    /* ══════════════════════════════════════════════════════════════════════
+     * L'IDENTITÉ VIENT DES REVENDICATIONS, PLUS D'UNE LECTURE EN BASE
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * Ce bloc faisait `User.findById(userId)` sur la connexion Mongo de la
+     * passerelle, puis relisait `isBlocked`, `staffStatus` et `accountStatus`.
+     *
+     * Trois raisons de l'avoir retiré, par ordre de gravité :
+     *
+     *   1. il plaçait une base de données sur la surface la plus exposée
+     *      d'Internet. Stripe, PayPal et Adyen posent tous une frontière réseau
+     *      entre « ce qui répond à Internet » et « ce qui sait quelque chose » ;
+     *   2. il ajoutait un aller-retour base à CHAQUE requête authentifiée, y
+     *      compris celles qui ne font que relayer ;
+     *   3. il DUPLIQUAIT un contrôle que le backend principal fait déjà dans
+     *      son `protect`, et qu'il fait mieux puisqu'il possède la donnée. Deux
+     *      implémentations du même contrôle divergent toujours.
+     *
+     * Le jeton porte déjà `id`, `email`, `role`, `userType`, `country`,
+     * `currency`, `isSandbox` et `isReviewerAccount` (`signAccessToken` du
+     * backend). Tout ce dont la passerelle a besoin pour router et autoriser.
+     *
+     * ⚠️ Ce que la signature ne peut PAS dire : « ce compte a-t-il été bloqué
+     * depuis l'émission ? ». C'est le rôle de la marque de révocation, dont la
+     * posture en cas de panne est détaillée dans `services/tokenRevocation.js`
+     * — fermeture pour les rôles à privilèges, ouverture pour les autres, dont
+     * les chemins d'argent restent contrôlés par les services propriétaires.
+     */
+    const role = String(payload.role || "").trim();
 
-    const user = await User.findById(userId);
-    if (!user) {
+    const revocation = await estRevoque({
+      userId,
+      issuedAtSeconds: payload.iat,
+      role,
+    });
+
+    if (revocation.revoked) {
+      logger.warn?.("[AUTH] jeton refusé", {
+        reason: revocation.reason,
+        role: role || null,
+      });
+
       return res.status(401).json({
         success: false,
-        error: "Utilisateur introuvable",
+        error: "Session invalide, reconnectez-vous.",
+        code: revocation.reason,
       });
     }
 
-    // ⚠️ Sécurité : le gateway se contentait auparavant de charger l'utilisateur
-    // sans regarder son statut. Un compte bloqué ou gelé restait donc autorisé
-    // sur toutes les routes NATIVES du gateway (pricing, FX, compliance…), qui
-    // ne passent jamais par le backend principal — seul endroit où ces contrôles
-    // existaient. On réplique ici les mêmes règles.
-    if (user.isBlocked === true) {
-      return res.status(403).json({
-        success: false,
-        error: "Compte bloqué",
-      });
-    }
+    /**
+     * `req.user` reste la forme attendue par le reste de la passerelle
+     * (`_id`, `id`, `role`), pour qu'aucun appelant n'ait à changer. Ce qui
+     * change, c'est la SOURCE : des revendications signées, plus une lecture.
+     */
+    req.user = {
+      _id: userId,
+      id: userId,
+      email: payload.email || "",
+      role,
+      userType: payload.userType || "",
+      country: payload.country || "",
+      currency: payload.currency || "",
+      isSandbox: payload.isSandbox === true,
+      isReviewerAccount: payload.isReviewerAccount === true,
+      deviceId: payload.did || null,
+      /** Trace de provenance : utile en journal, et honnête sur la source. */
+      __source: "jwt-claims",
+    };
 
-    const staffStatus = String(user.staffStatus || "").toLowerCase();
-    if (staffStatus === "disabled" || staffStatus === "suspended") {
-      return res.status(403).json({
-        success: false,
-        error: "Connexion désactivée pour ce compte",
-      });
-    }
-
-    if (String(user.accountStatus || "").toLowerCase() === "frozen") {
-      const frozenUntil = user.frozenUntil ? new Date(user.frozenUntil) : null;
-
-      // Un gel daté et échu ne bloque plus (cohérent avec le principal).
-      if (!frozenUntil || frozenUntil.getTime() > Date.now()) {
-        return res.status(403).json({
-          success: false,
-          error: "Compte temporairement gelé",
-        });
-      }
-    }
-
-    req.user = user.toObject ? user.toObject() : user;
     return next();
+
   } catch (err) {
     logger?.error
       ? logger.error("[AUTH] Erreur middleware:", err)

@@ -25,13 +25,13 @@
 // // 1) Fees simulate (READ-ONLY)
 // // GET /api/v1/public/fees/simulate
 // // -----------------------------------------------------------------------------
-// router.get("/fees/simulate", feesCtrl.simulateFee);
+// router.get("/fees/simulate", relaisFees);
 
 // // -----------------------------------------------------------------------------
 // // 2) FX rate public (READ-ONLY)
 // // GET /api/v1/public/exchange-rates/rate?from&to
 // // -----------------------------------------------------------------------------
-// router.get("/exchange-rates/rate", exchangeRatesCtrl.getRatePublic);
+// router.get("/exchange-rates/rate", relaisTaux);
 
 // // -----------------------------------------------------------------------------
 // // 3) Pricing quote (READ-ONLY)
@@ -148,10 +148,24 @@ const axios = require("axios");
 
 const config = require("../src/config");
 
-// Controllers existants
-const feesCtrl = require("../controllers/feesController");
-const exchangeRatesCtrl = require("../controllers/exchangeRatesController");
+/**
+ * ⚠️ RELAIS, PLUS DE CONTRÔLEURS NATIFS.
+ *
+ * Ces trois surfaces publiques servaient des contrôleurs qui lisaient la base
+ * de la passerelle. Le domaine de la tarification a été déplacé dans Tx-Core le
+ * 2026-09-10 : le bord route et signe, il ne calcule pas.
+ *
+ * ⚠️ Ce sont les seules surfaces de tarification OUVERTES SUR INTERNET (le
+ * mobile les lit avant connexion, derrière la signature HMAC vérifiée dans
+ * `app.js`). Les avoir oubliées aurait laissé la passerelle continuer de lire
+ * sa base sur exactement les chemins les plus exposés — l'inverse de ce que le
+ * déplacement cherchait.
+ */
 const pricingCtrl = require("../controllers/pricingController");
+const { relayerVers } = require("../src/services/txCoreRelay");
+
+const relaisFees = relayerVers("/api/v1/fees");
+const relaisTaux = relayerVers("/api/v1/exchange-rates");
 
 /**
  * Public read-only endpoints (HMAC signed) mounted at:
@@ -166,13 +180,13 @@ const pricingCtrl = require("../controllers/pricingController");
 // 1) Fees simulate (READ-ONLY)
 // GET /api/v1/public/fees/simulate
 // -----------------------------------------------------------------------------
-router.get("/fees/simulate", feesCtrl.simulateFee);
+router.get("/fees/simulate", relaisFees);
 
 // -----------------------------------------------------------------------------
 // 2) FX rate public (READ-ONLY)
 // GET /api/v1/public/exchange-rates/rate?from&to
 // -----------------------------------------------------------------------------
-router.get("/exchange-rates/rate", exchangeRatesCtrl.getRatePublic);
+router.get("/exchange-rates/rate", relaisTaux);
 
 // -----------------------------------------------------------------------------
 // 3) Pricing quote (READ-ONLY)

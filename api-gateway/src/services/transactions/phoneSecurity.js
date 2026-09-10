@@ -1,13 +1,36 @@
 "use strict";
 
 /**
- * --------------------------------------------------------------------------
- * Phone / Forward Headers / Deposit trust helpers
- * --------------------------------------------------------------------------
+ * ============================================================================
+ * PLOMBERIE DE RELAIS — CE QUE LE BORD GARDE
+ * ============================================================================
+ *
+ * ── Ce fichier portait DEUX choses, pas une ────────────────────────────────
+ *
+ * Son ancien nom — « Phone / Forward Headers / Deposit trust helpers » — le
+ * disait sans qu'on l'entende : trois sujets pour un module.
+ *
+ *   · une DÉCISION : « ce numéro de dépôt est-il de confiance ? », qui lisait
+ *     `TrustedDepositNumber` et refusait en 403 ;
+ *   · de la PLOMBERIE : reconstruire les en-têtes sortants du proxy, dont la
+ *     clé d'idempotence.
+ *
+ * La décision est partie dans TX Core le 2026-09-10
+ * (`services/risk/depositPhoneTrust.js` + `middleware/requireTrustedDepositPhone`).
+ * Un contrôle qui AUTORISE un mouvement d'argent appartient au service qui
+ * déplace l'argent : sinon il suffit d'atteindre le moteur autrement pour s'en
+ * affranchir.
+ *
+ * La plomberie reste. Elle n'a aucun sens ailleurs : le moteur ne proxifie
+ * rien, il n'a pas d'en-têtes sortants à reconstruire.
+ *
+ * ⚠️ NE PAS RÉINTRODUIRE ICI DE LECTURE EN BASE NI DE DÉCISION MÉTIER.
+ * Le bord fait du TLS, du routage, de la vérification de jeton, de la
+ * limitation de débit et de la corrélation. Il ne possède aucun domaine.
+ * `test/transactions/edgeHasNoDepositTrust.test.js` le vérifie.
  */
 
 const crypto = require("crypto");
-const mongoose = require("mongoose");
 
 function reqAny(paths) {
   for (const p of paths) {
@@ -22,102 +45,12 @@ function reqAny(paths) {
 }
 
 const config = reqAny(["../../src/config", "../../config"]);
-const logger = reqAny([
-  "../../src/logger",
-  "../../logger",
-  "../../src/utils/logger",
-  "../../utils/logger",
-]);
-const { safeAxiosRequest } = require("./httpClient");
 
-let TrustedDepositNumber = null;
-try {
-  TrustedDepositNumber = reqAny([
-    "../../src/models/TrustedDepositNumber",
-    "../../models/TrustedDepositNumber",
-  ]);
-} catch {
-  TrustedDepositNumber = null;
-}
 
-const COUNTRY_DIAL = {
-  CI: { dial: "+225", localMin: 8, localMax: 10 },
-  BF: { dial: "+226", localMin: 8, localMax: 8 },
-  ML: { dial: "+223", localMin: 8, localMax: 8 },
-  CM: { dial: "+237", localMin: 8, localMax: 9 },
-  SN: { dial: "+221", localMin: 9, localMax: 9 },
-  BJ: { dial: "+229", localMin: 8, localMax: 8 },
-  TG: { dial: "+228", localMin: 8, localMax: 8 },
-};
 
-function digitsOnly(v) {
-  return String(v || "").replace(/[^\d]/g, "");
-}
 
-function normalizePhoneE164(rawPhone, country) {
-  const raw = String(rawPhone || "").trim().replace(/\s+/g, "");
-  if (!raw) return "";
 
-  if (raw.startsWith("+")) {
-    const d = `+${digitsOnly(raw)}`;
-    if (d.length < 8 || d.length > 16) return "";
-    return d;
-  }
 
-  const c = String(country || "").toUpperCase().trim();
-  const cfg = COUNTRY_DIAL[c];
-  if (!cfg) return "";
-
-  const d = digitsOnly(raw);
-  if (!d) return "";
-  if (d.length < cfg.localMin || d.length > cfg.localMax) return "";
-  return `${cfg.dial}${d}`;
-}
-
-function pickUserPrimaryPhoneE164(user, countryFallback) {
-  if (!user) return "";
-
-  const direct =
-    user.phoneE164 || user.phoneNumber || user.phone || user.mobile || "";
-  const ctry = user.country || countryFallback || "";
-
-  let e164 = normalizePhoneE164(direct, ctry);
-  if (e164) return e164;
-
-  if (Array.isArray(user.mobiles)) {
-    const mm = user.mobiles.find((m) => m && (m.e164 || m.numero));
-    if (mm) {
-      e164 = normalizePhoneE164(mm.e164 || mm.numero, mm.country || ctry);
-      if (e164) return e164;
-    }
-  }
-
-  return "";
-}
-
-function getBaseUrlFromReq(req) {
-  const envBase =
-    process.env.GATEWAY_URL ||
-    process.env.APP_BASE_URL ||
-    process.env.GATEWAY_BASE_URL ||
-    config.gatewayUrl ||
-    "";
-
-  if (envBase) return String(envBase).replace(/\/+$/, "");
-
-  const proto = String(
-    req.headers["x-forwarded-proto"] || req.protocol || "https"
-  )
-    .split(",")[0]
-    .trim();
-
-  const host = String(req.headers["x-forwarded-host"] || req.get("host") || "")
-    .split(",")[0]
-    .trim();
-
-  if (!host) return "";
-  return `${proto}://${host}`.replace(/\/+$/, "");
-}
 
 function getUserId(req) {
   return req.user?._id || req.user?.id || null;
@@ -139,6 +72,94 @@ function safeUUID() {
   );
 }
 
+/**
+ * En-têtes d'idempotence acceptés en entrée, dans l'ordre de priorité.
+ *
+ * Les deux noms sont ceux que `api-paynoval/src/utils/idempotencyKeys.js`
+ * (`extractIdempotencyKey`) sait lire à l'autre bout. Toute divergence entre
+ * ces deux listes rouvrirait le défaut que ce module vient de fermer.
+ */
+const IDEMPOTENCY_HEADERS = ["idempotency-key", "x-idempotency-key"];
+
+/**
+ * Retrouve la clé d'idempotence dans une requête entrante, quelle que soit la
+ * casse employée par le client. Node normalise les en-têtes en minuscules, mais
+ * `req.headers` peut avoir été reconstruit en amont (tests, proxys, adaptateurs)
+ * sans cette garantie — on ne s'y fie donc pas.
+ */
+function pickIdempotencyHeader(req) {
+  const headers = req?.headers || {};
+
+  for (const attendu of IDEMPOTENCY_HEADERS) {
+    for (const nom of Object.keys(headers)) {
+      if (String(nom).toLowerCase() !== attendu) continue;
+
+      const brut = headers[nom];
+      const valeur = Array.isArray(brut) ? brut[0] : brut;
+      const propre = String(valeur ?? "").trim();
+
+      if (propre) return propre;
+    }
+  }
+
+  return "";
+}
+
+/**
+ * ============================================================================
+ * LA CLÉ D'IDEMPOTENCE SE TRANSMET — SINON TOUTE LA CHAÎNE EST INERTE
+ * ============================================================================
+ *
+ * Cette fonction ne RELAIE pas les en-têtes reçus : elle en RECONSTRUIT un jeu
+ * complet. C'est délibéré — on ne veut pas voir un en-tête arbitraire du client
+ * arriver sur un service interne. Mais la reconstruction avait un trou.
+ *
+ * ── Le défaut (mesuré le 2026-09-09) ────────────────────────────────────────
+ *
+ * `Idempotency-Key` ne figurait pas dans le jeu reconstruit. L'application
+ * mobile ne l'envoie QUE dans l'en-tête (`payNoval-master/tools/api.js` :
+ * `headers: { "Idempotency-Key": … }`, et le corps n'en porte aucune). La clé
+ * était donc jetée ici, et TX Core n'en voyait jamais la couleur.
+ *
+ * La conséquence n'était pas « une protection en moins » mais TROIS, qui
+ * tombaient ensemble :
+ *
+ *   1. `middleware/idempotency.js` ne trouvait aucune clé et laissait passer
+ *      (`IDEMPOTENCY_REQUIRED` vaut `false`) — aucun enregistrement dans
+ *      `idempotency_records`, donc aucune détection de rejeu ;
+ *   2. `resolvePersistedIdempotencyKey()` rendait `undefined`, donc le champ
+ *      `Transaction.idempotencyKey` restait ABSENT du document ;
+ *   3. les deux index uniques partiels `{sender, idempotencyKey}` et
+ *      `{userId, idempotencyKey}` portent un filtre
+ *      `idempotencyKey: { $type: "string", $gt: "" }` : un document sans le
+ *      champ en est EXCLU. Les index existaient et ne mordaient sur rien.
+ *
+ * Deux `/initiate` concurrents créaient donc deux transactions et RÉSERVAIENT
+ * LES FONDS DEUX FOIS. C'est exactement le scénario que l'en-tête de
+ * `api-paynoval/src/utils/idempotencyKeys.js` décrit comme fermé depuis le
+ * 2026-09-03 : le correctif avait été posé du bon côté de la frontière, mais
+ * rien ne traversait la frontière.
+ *
+ * ── Pourquoi la correction est ICI et pas dans les adaptateurs ──────────────
+ *
+ * Cinq appelants passent par cette fonction — `paynovalAdapter`,
+ * `mobilemoneyAdapter`, `cardAdapter`, `orchestrator` et
+ * `transactionOrchestratorByFlow`. Corriger chaque adaptateur aurait produit
+ * cinq occasions d'en oublier un ; ici il n'y en a qu'une seule à tenir, et
+ * c'est celle que `test/security/idempotencyHeaderForwarded.test.js` surveille.
+ *
+ * ── Pourquoi la propager aussi sur les chemins qui ne l'exploitent pas ──────
+ *
+ * `fetchOtpStatus` est un GET : la clé n'y sert à rien. On la transmet quand
+ * même, parce que la règle « on relaie le contexte d'audit du client » est plus
+ * sûre qu'une liste d'exceptions à maintenir. Un en-tête ignoré ne coûte rien ;
+ * un en-tête oublié coûte une double réservation de fonds.
+ *
+ * ⚠️ On NORMALISE le nom en `idempotency-key` en sortie. TX Core accepte les
+ * deux graphies, mais n'en émettre qu'une évite qu'un client envoyant les deux
+ * variantes avec des valeurs différentes ne rende le comportement dépendant de
+ * l'ordre d'itération des clés.
+ */
 function auditForwardHeaders(req) {
   const incomingAuth =
     req.headers.authorization || req.headers.Authorization || null;
@@ -158,6 +179,8 @@ function auditForwardHeaders(req) {
     config.internalToken ||
     "";
 
+  const idempotencyKey = pickIdempotencyHeader(req);
+
   const headers = {
     Accept: "application/json",
     "x-internal-token": internalToken,
@@ -167,6 +190,7 @@ function auditForwardHeaders(req) {
     ...(req.headers["x-device-id"]
       ? { "x-device-id": req.headers["x-device-id"] }
       : {}),
+    ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
   };
 
   if (hasAuth) headers.Authorization = incomingAuth;
@@ -174,158 +198,15 @@ function auditForwardHeaders(req) {
   return headers;
 }
 
-async function fetchOtpStatus({ req, phoneE164, country }) {
-  const base = getBaseUrlFromReq(req);
-  if (!base) return { ok: false, trusted: false, status: "unknown" };
-
-  const url = `${base}/api/v1/phone-verification/status`;
-
-  try {
-    const r = await safeAxiosRequest({
-      method: "get",
-      url,
-      params: { phoneNumber: phoneE164, country },
-      headers: auditForwardHeaders(req),
-      timeout: 8000,
-    });
-
-    const payload = r?.data || {};
-    const data = payload?.data || payload;
-
-    const status = String(data?.status || "none").toLowerCase();
-    const trusted = !!data?.trusted || status === "trusted";
-
-    return { ok: true, trusted, status, data };
-  } catch (e) {
-    logger?.warn?.("[Gateway][OTP] status call failed", { message: e?.message });
-    return { ok: false, trusted: false, status: "unknown" };
-  }
-}
-
-async function enforceDepositPhoneTrust(req) {
-  const userId = getUserId(req);
-  if (!userId) {
-    const e = new Error("Non autorisé (utilisateur manquant).");
-    e.status = 401;
-    throw e;
-  }
-
-  const actionNorm = String(req.body?.action || "send").toLowerCase();
-  const fundsNorm = String(req.body?.funds || "").toLowerCase();
-  const destNorm = String(req.body?.destination || "").toLowerCase();
-
-  if (
-    !(actionNorm === "deposit" && fundsNorm === "mobilemoney" && destNorm === "paynoval")
-  ) {
-    return;
-  }
-
-  const rawPhone =
-    req.body?.phoneNumber || req.body?.toPhone || req.body?.phone || "";
-  const country =
-    req.body?.country || req.user?.country || req.user?.selectedCountry || "";
-
-  const phoneE164 = normalizePhoneE164(rawPhone, country);
-
-  if (!phoneE164) {
-    const e = new Error(
-      "Numéro de dépôt invalide. Format attendu: E.164 (ex: +2250700000000) ou numéro local valide selon le pays."
-    );
-    e.status = 400;
-    e.code = "PHONE_INVALID";
-    throw e;
-  }
-
-  const userPhoneE164 = pickUserPrimaryPhoneE164(req.user, country);
-  const isSameAsUser =
-    userPhoneE164 && String(userPhoneE164) === String(phoneE164);
-
-  if (!isSameAsUser) {
-    let trusted = false;
-
-    const mongoUp = mongoose.connection.readyState === 1;
-    if (mongoUp && TrustedDepositNumber) {
-      try {
-        const trustedDoc = await TrustedDepositNumber.findOne({
-          userId,
-          phoneE164,
-          status: "trusted",
-        }).lean();
-        trusted = !!trustedDoc;
-      } catch {
-        trusted = false;
-      }
-    }
-
-    if (!trusted) {
-      const st = await fetchOtpStatus({ req, phoneE164, country });
-
-      if (st?.trusted) {
-        if (mongoose.connection.readyState === 1 && TrustedDepositNumber) {
-          try {
-            await TrustedDepositNumber.updateOne(
-              { userId, phoneE164 },
-              {
-                $set: {
-                  userId,
-                  phoneE164,
-                  status: "trusted",
-                  verifiedAt: new Date(),
-                  updatedAt: new Date(),
-                },
-                $setOnInsert: { createdAt: new Date() },
-              },
-              { upsert: true }
-            );
-          } catch {}
-        }
-      } else {
-        const pending = String(st?.status || "").toLowerCase() === "pending";
-
-        const e = new Error(
-          pending
-            ? "Vérification SMS déjà en cours pour ce numéro. Entre le code reçu (ne relance pas l’OTP)."
-            : "Ce numéro n’est pas vérifié. Vérifie d’abord le numéro par SMS avant de déposer."
-        );
-
-        e.status = 403;
-        e.code = pending
-          ? "PHONE_VERIFICATION_PENDING"
-          : "PHONE_NOT_TRUSTED";
-        e.payload = {
-          success: false,
-          error: e.message,
-          code: e.code,
-          otpStatus: {
-            status: st?.status || (pending ? "pending" : "none"),
-            skipStart: pending,
-          },
-          nextStep: {
-            status: "/api/v1/phone-verification/status",
-            start: "/api/v1/phone-verification/start",
-            verify: "/api/v1/phone-verification/verify",
-            phoneNumber: phoneE164,
-            country,
-            skipStart: pending,
-          },
-        };
-        throw e;
-      }
-    }
-  }
-
-  req.body.phoneNumber = phoneE164;
-}
-
 module.exports = {
-  COUNTRY_DIAL,
-  digitsOnly,
-  normalizePhoneE164,
-  pickUserPrimaryPhoneE164,
-  getBaseUrlFromReq,
   getUserId,
   safeUUID,
   auditForwardHeaders,
-  fetchOtpStatus,
-  enforceDepositPhoneTrust,
+
+  /**
+   * Exportés pour le test de garde. `IDEMPOTENCY_HEADERS` doit rester aligné
+   * sur `extractIdempotencyKey` de TX Core : le test le vérifie.
+   */
+  IDEMPOTENCY_HEADERS,
+  pickIdempotencyHeader,
 };

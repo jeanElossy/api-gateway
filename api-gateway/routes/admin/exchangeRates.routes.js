@@ -1,59 +1,37 @@
+"use strict";
+
+/**
+ * ⚠️ CETTE PASSERELLE NE CALCULE PLUS RIEN — ELLE RELAIE.
+ *
+ * Le domaine de la tarification a été déplacé dans Tx-Core le 2026-09-10 : il
+ * vivait ici avec sa propre base, et Tx-Core venait y chercher ses devis en
+ * HTTP — la dépendance remontait du moteur d'argent vers le bord. Stripe,
+ * PayPal et Adyen tiennent la règle inverse : les dépendances DESCENDENT, et le
+ * bord ne possède aucun domaine.
+ *
+ * ⚠️ LE CONTRÔLE DE RÔLE RESTE ICI, ET C'EST ESSENTIEL. Tx-Core ne revérifie
+ * pas de session : il fait confiance au canal interne. Si cette garde
+ * disparaissait, ses routes deviendraient accessibles à tout porteur du jeton
+ * interne. Verrouillé par `test/security/gatewayIsStateless.test.js`.
+ */
+
 const express = require("express");
 const router = express.Router();
-const ExchangeRate = require("../../src/models/ExchangeRate");
+
 const requireAdmin = require("../../src/middlewares/requireAdmin");
-const ctrl = require("../../controllers/exchangeRatesController");
+const { relayerVers } = require("../../src/services/txCoreRelay");
 
-// Endpoint public SANS auth, pour le mobile
-router.get('/rate', ctrl.getRatePublic);
+const relais = relayerVers("/api/v1/exchange-rates");
 
-// Toutes les routes suivantes sont réservées admin !
+/** Taux public, SANS auth : c'est celui que le mobile lit avant connexion. */
+router.get("/rate", relais);
+
+/** Tout le reste est réservé à l'administration. */
 router.use(requireAdmin);
 
-// Liste (admin)
-router.get("/", async (req, res) => {
-  try {
-    const filter = {};
-    if (req.query.from) filter.from = req.query.from.toUpperCase();
-    if (req.query.to) filter.to = req.query.to.toUpperCase();
-    if (req.query.active !== undefined) filter.active = req.query.active === "true";
-    const rates = await ExchangeRate.find(filter).sort({ updatedAt: -1 });
-    res.json({ success: true, data: rates });
-  } catch (e) {
-    res.status(500).json({ success: false, message: e.message || "Erreur serveur." });
-  }
-});
-
-// Création (admin)
-router.post("/", async (req, res) => {
-  try {
-    const rate = await ExchangeRate.create(req.body);
-    res.json({ success: true, data: rate });
-  } catch (e) {
-    res.status(400).json({ success: false, message: e.message });
-  }
-});
-
-// Update (admin)
-router.put("/:id", async (req, res) => {
-  try {
-    const rate = await ExchangeRate.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    if (!rate) return res.status(404).json({ success: false, message: "Taux introuvable" });
-    res.json({ success: true, data: rate });
-  } catch (e) {
-    res.status(400).json({ success: false, message: e.message });
-  }
-});
-
-// Delete (admin)
-router.delete("/:id", async (req, res) => {
-  try {
-    const deleted = await ExchangeRate.findByIdAndDelete(req.params.id);
-    if (!deleted) return res.status(404).json({ success: false, message: "Taux introuvable" });
-    res.json({ success: true });
-  } catch (e) {
-    res.status(400).json({ success: false, message: e.message });
-  }
-});
+router.get("/", relais);
+router.post("/", relais);
+router.put("/:id", relais);
+router.delete("/:id", relais);
 
 module.exports = router;

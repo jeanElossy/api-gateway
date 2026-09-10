@@ -393,7 +393,17 @@ test("app.js branche les jauges sur le client de rateLimitStore, pas sur un nouv
  * Ce test tombe si le branchement de `appCacheStats` disparaît d'`app.js`.
  */
 test("app.js expose AUSSI les compteurs du cache applicatif", () => {
-  const source = fs.readFileSync(path.join(__dirname, "../../src/app.js"), "utf8");
+  /**
+   * ⚠️ COMMENTAIRES RETIRÉS : on teste le CODE, pas ce qu'on en dit.
+   *
+   * Sans cela, le commentaire qui EXPLIQUE le retrait de `__cacheStats`
+   * contient lui-même le mot, et l'assertion échoue sur sa propre
+   * documentation.
+   */
+  const source = fs
+    .readFileSync(path.join(__dirname, "../../src/app.js"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
 
   const bloc = source.slice(
     source.indexOf("registerRedisMetrics(metrics"),
@@ -401,40 +411,43 @@ test("app.js expose AUSSI les compteurs du cache applicatif", () => {
   );
 
   assert.match(bloc, /appCacheStats/);
-  assert.match(bloc, /__cacheStats/);
+
+  /**
+   * ⚠️ `__cacheStats` N'EST PLUS ATTENDU — et c'est le correctif, pas un oubli.
+   *
+   * La sonde lisait `services/fxRulesService.__cacheStats()`. Ce cache a suivi
+   * le domaine de la tarification dans Tx-Core le 2026-09-10. La passerelle
+   * n'a plus de cache applicatif, et elle doit le DIRE : `appCacheStats` rend
+   * `{ contourne: true }`, ce qui met `app_cache_enabled` à 0.
+   *
+   * Continuer d'appeler une source disparue aurait produit exactement le défaut
+   * R-08 : une jauge à zéro parce que la source n'existe plus, lue comme
+   * « cache sain » (règles B.6 et B.7).
+   */
+  assert.ok(
+    !bloc.includes("__cacheStats"),
+    "la passerelle ne doit plus interroger un cache qu'elle ne possède pas"
+  );
+  assert.match(bloc, /contourne:\s*true/);
 });
 
 /**
- * `cacheService.stats()` est la source de `appCacheStats`. Les deux modules
- * vivent dans des dépôts... non, dans le même, mais leurs noms de champs sont
- * un CONTRAT implicite : `redisMetrics` lit `hits`, `misses`, `erreurs`,
- * `refus`, `contournements`, `contourne`. Renommer un champ de `cacheService`
- * ne casserait rien — les jauges cesseraient simplement d'être renseignées, en
- * silence. Ce test rend la rupture bruyante.
+ * ⚠️ LE CONTRAT DE CHAMPS `cacheService.stats()` ↔ `app_cache_*` A DÉMÉNAGÉ.
+ *
+ * Il vivait ici et vérifiait que `redisMetrics` et `cacheService` s'accordaient
+ * sur les noms `hits`, `misses`, `erreurs`, `refus`, `contournements`,
+ * `contourne` — un renommage n'aurait rien cassé, les jauges auraient
+ * simplement cessé d'être renseignées, en silence.
+ *
+ * Le module de cache a suivi la tarification dans Tx-Core le 2026-09-10, et son
+ * test avec lui (`api-paynoval/test/cache.test.js`). Le garder ici en aurait
+ * fait un test de code MORT : il aurait continué de passer en donnant
+ * l'impression de protéger un contrat que la passerelle n'a plus.
+ *
+ * Ce que la passerelle doit encore tenir — ne rien annoncer qu'elle ne mesure —
+ * est vérifié par le test ci-dessus et par
+ * `test/security/gatewayIsStateless.test.js`.
  */
-test("les noms de champs de cacheService.stats() correspondent aux jauges app_cache_*", async () => {
-  const { createCache } = require("../../src/services/cache/cacheService");
-  const { APP_CACHE_GAUGES } = require("../../src/services/redisMetrics");
-
-  // Sans client, le cache est inerte — mais `stats()` rend bien la forme réelle.
-  const cache = createCache({
-    client: null,
-    env: "test",
-    service: "gateway",
-    logger: { warn() {}, info() {}, error() {} },
-  });
-
-  const stats = cache.stats();
-
-  for (const [, field] of APP_CACHE_GAUGES) {
-    assert.ok(
-      Object.prototype.hasOwnProperty.call(stats, field),
-      `cacheService.stats() doit exposer « ${field} » — sinon la jauge reste vide en silence`
-    );
-  }
-
-  assert.ok(Object.prototype.hasOwnProperty.call(stats, "contourne"));
-});
 
 /**
  * `getClient()` doit RENDRE le client existant, jamais en fabriquer un. Sans

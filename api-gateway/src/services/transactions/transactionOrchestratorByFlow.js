@@ -37,11 +37,7 @@ const {
 } = require("./providerRegistry");
 
 const { resolveTransactionFlow } = require("./flowResolver");
-const {
-  enforceDepositPhoneTrust,
-  getUserId,
-  auditForwardHeaders,
-} = require("./phoneSecurity");
+const { getUserId, auditForwardHeaders } = require("./phoneSecurity");
 const { safeAxiosRequest } = require("./httpClient");
 
 const { postToPaynovalService } = require("./providerAdapters/paynovalAdapter");
@@ -430,9 +426,20 @@ async function resolveRouteContextForAction(req, action) {
       ? normalizeSecurityFields(req.body || {})
       : { ...(req.body || {}) };
 
+  /**
+   * ⚠️ `redactSensitive` N'EST PAS FACULTATIF ICI. Sur `action === "confirm"`,
+   * `body` sort de `normalizeSecurityFields()` : il porte le CODE DE
+   * CONFIRMATION en clair, recopié depuis `securityCode`/`validationCode`.
+   *
+   * Le masquage manquait, et le test de garde ne l'a pas vu : son motif ne
+   * reconnaissait que `req.body`, `bodyWithSecurity`, `strictBody` et
+   * `rawBody`. La variable s'appelle ici `body` — un nom qu'il ignorait. Le
+   * motif a été élargi en même temps que ce correctif (règle B.5 : un test qui
+   * passe avant ET après ne teste rien).
+   */
   console.log("[Gateway][resolveRouteContextForAction] input", {
     action,
-    body,
+    body: redactSensitive(body),
   });
 
   const transactionId = getTransactionIdFromReq(req);
@@ -484,11 +491,19 @@ async function resolveRouteContextForAction(req, action) {
 }
 
 async function dispatchToProvider({ req, provider, serviceUrl, endpoint, body }) {
+  /**
+   * ⚠️ `body` est ici le `strictBody` construit par `routeInitiateByFlow` : il
+   * DÉRIVE de `bodyWithSecurity` et porte donc la réponse à la question de
+   * sécurité en clair. L'appelant masque déjà sa propre copie
+   * (`[routeInitiateByFlow][strictBody]`) — celui-ci l'écrivait nu, trois
+   * lignes plus loin, sous un nom de variable que le test de garde ne
+   * surveillait pas.
+   */
   console.log("[Gateway][dispatchToProvider] start", {
     provider,
     serviceUrl,
     endpoint,
-    body,
+    body: redactSensitive(body),
   });
 
   try {
@@ -526,11 +541,24 @@ async function dispatchToProvider({ req, provider, serviceUrl, endpoint, body })
         break;
     }
 
+    /**
+     * Ici `body` est la RÉPONSE de TX Core, pas la requête du client. Le
+     * sérialiseur de transaction y retire déjà `securityCode`,
+     * `securityAnswerHash` et `verificationToken`, donc le risque est faible.
+     *
+     * On masque quand même, pour deux raisons. D'abord la défense en
+     * profondeur : ce masquage est la seule chose qui protégerait ce journal
+     * si un champ sensible réapparaissait un jour dans la réponse — et on ne
+     * veut pas que la protection dépende du souvenir qu'un autre fichier fait
+     * bien son travail. Ensuite la lisibilité de la règle : « aucun corps ne
+     * se journalise nu » n'a pas d'exception à retenir, donc pas d'exception à
+     * mal appliquer.
+     */
     console.log("[Gateway][dispatchToProvider] success", {
       provider,
       endpoint,
       status: out?.status,
-      body: out?.body,
+      body: redactSensitive(out?.body),
     });
 
     return out;
@@ -570,11 +598,25 @@ async function routeInitiateByFlow(req) {
       throw e;
     }
 
-    if (flow === TRANSACTION_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL) {
-      console.log("[Gateway][routeInitiateByFlow] enforceDepositPhoneTrust start");
-      await enforceDepositPhoneTrust(req);
-      console.log("[Gateway][routeInitiateByFlow] enforceDepositPhoneTrust success");
-    }
+    /**
+     * ⚠️ LA CONFIANCE DU NUMÉRO DE DÉPÔT N'EST PLUS CONTRÔLÉE ICI — 2026-09-10.
+     *
+     * Elle l'est par `middleware/requireTrustedDepositPhone` de TX Core, sur la
+     * chaîne de `POST /api/v1/transactions/initiate`. Trois raisons :
+     *
+     *   1. un contrôle qui AUTORISE un mouvement d'argent doit vivre dans le
+     *      service qui déplace l'argent, sinon il suffit de l'atteindre par un
+     *      autre chemin pour s'en affranchir (invariant 12) ;
+     *   2. la version d'ici interrogeait l'état de vérification par un APPEL
+     *      HTTP vers `/api/v1/phone-verification/status` — une route que ce
+     *      service ne montait PAS. Elle rendait 404, le `catch` traduisait en
+     *      « non vérifié », et le contrôle fonctionnait par accident ;
+     *   3. les deux `console.log` qui encadraient l'appel écrivaient sur le
+     *      chemin de l'argent à chaque encaissement.
+     *
+     * Ne pas le réintroduire ici. `test/transactions/edgeHasNoDepositTrust.test.js`
+     * échoue si la lecture de confiance revient au bord.
+     */
 
     const bodyWithSecurity = normalizeSecurityFields(req.body || {});
     const provider = getProviderForFlow({
@@ -671,21 +713,35 @@ async function routeInitiateByFlow(req) {
 
 async function routeActionByFlow(req, action) {
   try {
+    /**
+     * ⚠️ `routeActionByFlow` traite `confirm` et `cancel`. Le corps d'un
+     * `confirm` porte le CODE DE CONFIRMATION. Il était écrit nu.
+     *
+     * L'ancien motif du test de garde cherchait `req\.body` — avec un point
+     * littéral. `req?.body` ne lui correspondait donc PAS : l'écriture en
+     * chaînage optionnel traversait la garde sans la déclencher. C'est la
+     * deuxième cécité du même test, trouvée en élargissant la première.
+     */
     console.log("[Gateway][routeActionByFlow] start", {
       action,
-      body: req?.body,
+      body: redactSensitive(req?.body),
       params: req?.params,
       query: req?.query,
     });
 
     const ctx = await resolveRouteContextForAction(req, action);
 
+    /**
+     * `ctx.body` sort de `resolveRouteContextForAction`, qui applique
+     * `normalizeSecurityFields()` sur un `confirm` : même contenu sensible que
+     * ci-dessus, un pas plus loin dans la chaîne.
+     */
     console.log("[Gateway][routeActionByFlow] ctx", {
       action,
       flow: ctx.flow,
       provider: ctx.provider,
       serviceUrl: ctx.serviceUrl,
-      body: ctx.body,
+      body: redactSensitive(ctx.body),
     });
 
     return await dispatchToProvider({

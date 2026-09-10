@@ -344,6 +344,54 @@ const userLimiter = rateLimit({
   },
 });
 
+
+/* ------------------------------------------------------------------ */
+/* 8) Limiteur dédié aux encaissements PUBLICS (lien de cagnotte)      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * ⚠️ C'EST LA SEULE LIMITE QUI VOIT LA VRAIE ADRESSE DU PAYEUR.
+ *
+ * `POST /api/v1/pay` est ouvert : le contributeur n'a pas de compte. Tx-Core,
+ * en aval, EXEMPTE `/api/v1/collections/initiate` de son propre limiteur — et
+ * il a raison de le faire, puisqu'il ne voit que l'adresse de la passerelle et
+ * fondrait tous les payeurs en un seul compteur.
+ *
+ * Conséquence : si cette limite-ci disparaît, le chemin d'encaissement n'a plus
+ * AUCUNE limite de bout en bout. Un même client peut alors marteler les
+ * prestataires et faire naître autant d'intentions d'encaissement qu'il veut.
+ *
+ * Le seuil est volontairement bas : contribuer à une cagnotte est un geste
+ * unique, pas une rafale. Un rejeu légitime (double clic, réseau qui bégaie)
+ * porte la même clé d'idempotence et ne coûte rien — il n'a pas besoin d'un
+ * quota généreux.
+ */
+const publicCollectionLimiter = rateLimit({
+  name: "gw-public-collection",
+  windowMs: 10 * 60 * 1000,
+  max: Number(process.env.PUBLIC_COLLECTION_RL_MAX || 12),
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => `paycollect:${getClientIp(req)}`,
+  handler: (req, res, _next, options) => {
+    logger.warn("[RateLimit][public-collection] Limit hit", {
+      ip: getClientIp(req),
+      path: req.originalUrl,
+      method: req.method,
+    });
+
+    const retryAfter = setRetryAfter(res, options.windowMs);
+
+    return res.status(429).json({
+      success: false,
+      code: "TOO_MANY_COLLECTION_ATTEMPTS",
+      error: "Trop de tentatives de paiement. Réessayez dans quelques minutes.",
+      retryAfter,
+    });
+  },
+});
+
 module.exports = {
   globalIpLimiter,
   authLoginLimiter,
@@ -352,4 +400,5 @@ module.exports = {
   adminTransactionsLimiter,
   adminAdjustmentsLimiter,
   userLimiter,
+  publicCollectionLimiter,
 };

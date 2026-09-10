@@ -1,352 +1,373 @@
-// File: api-gateway/controllers/paymentController.js
-'use strict';
-
-const axios = require('axios');
-const crypto = require('crypto');
-const config = require('../src/config');
-const logger = require('../src/logger');
+"use strict";
 
 /**
- * Nettoie les champs sensibles UNIQUEMENT pour les logs / meta.
- * ⚠️ IMPORTANT: on ne doit PAS nettoyer le body AVANT de forward,
- * sinon on casse les providers (cardNumber/cvc...) et/ou securityCode.
+ * ============================================================================
+ * `POST /api/v1/pay` — ENCAISSEMENT DEPUIS UN LIEN PUBLIC DE CAGNOTTE
+ * ============================================================================
+ *
+ * Ce chemin sert UN cas : quelqu'un reçoit un lien de cagnotte, n'a pas de
+ * compte PayNoval, et contribue par mobile money ou par carte.
+ *
+ * ── Ce que faisait ce fichier avant le 2026-09-10 ───────────────────────────
+ *
+ * Quatre défauts, dont trois sur le chemin de l'argent :
+ *
+ * 1. IL VISAIT UN CHEMIN FERMÉ. `PROVIDER_TO_ENDPOINT` postait sur
+ *    `${SERVICE_PAYNOVAL_URL}/pay`, c'est-à-dire la route de Tx-Core RETIRÉE le
+ *    2026-09-03 parce qu'elle déplaçait de l'argent hors du grand livre. Elle
+ *    rend 410. La contribution par lien public ne pouvait donc PAS aboutir —
+ *    quel que soit le rail.
+ *
+ * 2. IL CRÉDITAIT LA CAGNOTTE SUR UNE RÉPONSE HTTP.
+ *    `notifyCagnotteExternalContribution` appelait le backend en
+ *    « fire-and-forget » dès que le prestataire rendait 2xx, avec
+ *    `status: "succeeded"` codé en dur. Or un 2xx d'un prestataire de
+ *    collecte veut dire « j'ai accepté de prélever », pas « j'ai prélevé » :
+ *    en mobile money, le client n'a même pas encore saisi son code. La cagnotte
+ *    était donc créditée AVANT que l'argent existe (règle B.3), et le « fire-
+ *    and-forget » garantissait que l'échec de ce crédit ne soit jamais vu de
+ *    l'appelant.
+ *
+ * 3. IL FAISAIT DE LA TARIFICATION. `computeDynamicFees` appliquait 0,5 %
+ *    codés en dur, en contournant le moteur de tarification de cette même
+ *    passerelle. Deux barèmes pour un même produit divergent toujours ; celui
+ *    qui est écrit en dur dans un contrôleur gagne, et personne ne sait
+ *    pourquoi le devis affiché ne correspond pas au montant prélevé.
+ *
+ * 4. IL TRANSPORTAIT LE NUMÉRO DE CARTE EN CLAIR, avec un commentaire
+ *    l'assumant explicitement (« on ne doit PAS nettoyer le body AVANT de
+ *    forward… sinon on casse les providers (cardNumber/cvc…) »). Voir plus bas.
+ *
+ * ── Ce qu'il fait maintenant : une passerelle ───────────────────────────────
+ *
+ *   valider → refuser toute donnée de carte → traduire en {rail, prestataire}
+ *   → relayer vers Tx-Core → rendre la réponse.
+ *
+ * Aucun calcul de frais, aucun effet de bord métier, aucune écriture. Le
+ * mouvement d'argent appartient à Tx-Core, la cagnotte appartient au backend
+ * principal, et la confirmation vient du rappel signé du prestataire.
  */
-function cleanSensitiveMeta(meta = {}) {
-  const clone = { ...meta };
-  if (clone.cardNumber) {
-    clone.cardNumber = '****' + String(clone.cardNumber).slice(-4);
+
+const axios = require("axios");
+const crypto = require("crypto");
+const logger = require("../src/logger");
+
+/**
+ * ============================================================================
+ * ⚠️ LE NUMÉRO DE CARTE N'ENTRE PAS
+ * ============================================================================
+ *
+ * La page de contribution publique postait `cardNumber`, `cvc`, `expMonth` et
+ * `expYear` en clair vers cette passerelle, qui les relayait à Tx-Core, qui les
+ * relayait au prestataire.
+ *
+ * Rien n'était stocké — ce n'est pas la question. Un PAN qui TRANSITE met le
+ * serveur traversé dans le périmètre PCI-DSS : l'attestation applicable passe
+ * de SAQ A à SAQ D, soit d'une trentaine de contrôles à plus de trois cents,
+ * avec analyse de vulnérabilités trimestrielle et test d'intrusion annuel. Et
+ * un PAN qui transite finit tôt ou tard dans un journal d'accès, une trace
+ * d'erreur ou le corps d'une requête capturée par un intermédiaire réseau.
+ *
+ * Stripe, Adyen et Checkout.com font tous la même chose : le navigateur du
+ * payeur envoie la carte DIRECTEMENT au prestataire, qui rend un jeton opaque.
+ * Le serveur du marchand ne voit qu'un jeton. C'est la voie retenue.
+ *
+ * Le refus est explicite et bruyant. L'ignorer silencieusement laisserait la
+ * page publique continuer d'émettre des PAN sans que personne ne l'apprenne —
+ * c'est-à-dire le périmètre PCI ouvert, et invisible.
+ */
+/**
+ * Une seule implémentation du refus, partagée avec le middleware qui l'applique
+ * en amont. Deux copies du même contrôle divergent : celle qu'on oublie de
+ * mettre à jour est celle qui laisse passer.
+ */
+const {
+  CHAMPS_CARTE_INTERDITS,
+  trouverChampCarte,
+} = require("../src/middlewares/refuseRawCardData");
+
+/**
+ * Traduction du vocabulaire public vers le couple {rail, prestataire} de
+ * Tx-Core. Table CLOSE, alignée sur `collectionService.RAILS` et sur
+ * `cagnotteController.RAIL_PAR_OPERATEUR`.
+ *
+ * Le rail désigne le compte de compensation d'entrée
+ * (`PROVIDER_INBOUND:<RAIL>`), donc le relevé prestataire auquel l'écriture
+ * sera rapprochée. Rien ne s'y devine (règle B.2).
+ */
+const OPERATEURS_MOBILE_MONEY = Object.freeze(["wave", "orange", "mtn", "moov"]);
+
+function resolverRail(corps = {}) {
+  const declare = String(corps.provider || corps.destination || "")
+    .trim()
+    .toLowerCase();
+
+  if (declare === "mobilemoney") {
+    const operateur = String(corps.operator || "").trim().toLowerCase();
+
+    if (!OPERATEURS_MOBILE_MONEY.includes(operateur)) {
+      return { erreur: "UNKNOWN_PROVIDER" };
+    }
+
+    return { rail: "mobilemoney", provider: operateur };
   }
-  if (clone.cvc) delete clone.cvc;
-  if (clone.securityCode) delete clone.securityCode;
-  return clone;
+
+  if (declare === "visa_direct") {
+    return { rail: "card", provider: "visa_direct" };
+  }
+
+  if (declare === "paynoval") {
+    /**
+     * Un titulaire de compte PayNoval qui participe à une cagnotte a un chemin
+     * à lui, qui débite son portefeuille et écrit au grand livre :
+     * `POST /api/v1/cagnottes/:id/participations/paynoval` sur le backend
+     * principal. Le faire passer par ici créerait un SECOND chemin vers le même
+     * argent — et deux implémentations d'un même mouvement divergent toujours.
+     */
+    return { erreur: "PAYNOVAL_RAIL_HAS_ITS_OWN_PATH" };
+  }
+
+  return { erreur: "UNKNOWN_RAIL" };
 }
 
-/**
- * Mapping rail → URL du microservice de paiement. Périmètre du 2026-09-08 :
- * `stripe`, `bank`, `stripe2momo` et `flutterwave` en ont été retirés.
- *
- * Un rail absent de cette table est refusé par `resolveProviderKey` — il n'est
- * pas routé « quelque part par défaut ».
- */
-const PROVIDER_TO_ENDPOINT = {
-  paynoval: `${config.microservices.paynoval}/pay`,
-  mobilemoney: `${config.microservices.mobilemoney}/pay`,
-  visa_direct: config.microservices.visa_direct
-    ? `${config.microservices.visa_direct}/pay`
-    : undefined,
-};
+function baseTxCore() {
+  const brute =
+    process.env.TRANSACTIONS_API_BASE_URL ||
+    process.env.TRANSACTIONS_SERVICE_URL ||
+    process.env.TX_CORE_URL ||
+    process.env.TXCORE_URL ||
+    process.env.SERVICE_PAYNOVAL_URL ||
+    "";
 
-/**
- * Safe request-id
- */
-function safeRequestId(req) {
+  return String(brute).replace(/\/+$/, "").replace(/\/api\/v1$/, "");
+}
+
+function jetonInterne() {
+  return String(
+    process.env.TX_CORE_INTERNAL_TOKEN ||
+      process.env.GATEWAY_INTERNAL_TOKEN ||
+      process.env.INTERNAL_TOKEN ||
+      ""
+  ).trim();
+}
+
+function identifiantRequete(req) {
   return (
-    req.headers['x-request-id'] ||
-    req.headers['x-correlation-id'] ||
-    (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()))
+    req.headers["x-request-id"] ||
+    req.headers["x-correlation-id"] ||
+    crypto.randomUUID()
   );
 }
 
 /**
- * Headers d’audit envoyés vers les microservices
- */
-function auditHeaders(req) {
-  const incomingAuth =
-    req.headers.authorization || req.headers.Authorization || null;
-
-  const hasAuth =
-    !!incomingAuth &&
-    String(incomingAuth).toLowerCase() !== 'bearer null' &&
-    String(incomingAuth).trim().toLowerCase() !== 'null';
-
-  const headers = {
-    Accept: 'application/json',
-    'x-internal-token': config.internalToken || '',
-    'x-request-id': safeRequestId(req),
-    'x-user-id': req.user?._id || req.user?.id || req.headers['x-user-id'] || '',
-    'x-session-id': req.headers['x-session-id'] || '',
-  };
-
-  if (hasAuth) {
-    headers.Authorization = incomingAuth;
-  }
-
-  if (req.headers['x-device-id']) {
-    headers['x-device-id'] = req.headers['x-device-id'];
-  }
-
-  return headers;
-}
-
-/**
- * Détection challenge Cloudflare (plus robuste)
- */
-function isCloudflareChallengeResponse(response) {
-  if (!response) return false;
-  const status = response.status;
-  const data = response.data;
-
-  const suspiciousStatus = status === 403 || status === 429 || status === 503;
-  if (!data || typeof data !== 'string') return false;
-
-  const lower = data.toLowerCase();
-  const looksLikeHtml = lower.includes('<html') || lower.includes('<!doctype html');
-  const hasCfMarkers =
-    lower.includes('just a moment') ||
-    lower.includes('attention required') ||
-    lower.includes('cdn-cgi/challenge-platform') ||
-    lower.includes('__cf_chl_') ||
-    lower.includes('cloudflare');
-
-  return suspiciousStatus && (hasCfMarkers || looksLikeHtml);
-}
-
-/**
- * Détection du provider à partir du body
- */
-function resolveProviderKey(body = {}) {
-  if (body.provider && PROVIDER_TO_ENDPOINT[body.provider]) return body.provider;
-  if (body.destination && PROVIDER_TO_ENDPOINT[body.destination]) return body.destination;
-  return null;
-}
-
-/**
- * 🔗 URL de base du backend qui gère les cagnottes
- */
-function getCagnottesBaseUrl() {
-  const base = config.microservices.cagnottes || config.microservices.paynoval || '';
-  return String(base || '').replace(/\/+$/, '');
-}
-
-/**
- * 🧮 Calcul dynamique des frais côté Gateway
- */
-function computeDynamicFees(body = {}) {
-  const provider = body.provider || body.destination || null;
-  const context = body.context || body.operator || null;
-  const rawAmount = Number(body.amount) || 0;
-
-  if (!rawAmount || rawAmount <= 0) return null;
-
-  // 🎯 Participation interne cagnotte PayNoval (wallet user → coffre)
-  if (provider === 'paynoval' && context === 'cagnotte') {
-    const rate = 0.005; // 0.5 %
-    const feeAmount = Math.round(rawAmount * rate * 100) / 100;
-
-    const currency =
-      body.currency ||
-      body.senderCurrencySymbol ||
-      body.localCurrencySymbol ||
-      null;
-
-    return {
-      feeRate: rate,
-      feeAmount,
-      feeCurrency: currency,
-      feeKind: 'paynoval_internal_cagnotte',
-    };
-  }
-
-  return null;
-}
-
-/**
- * Side-effect : informer le backend Cagnottes qu’un paiement
- * externe pour une cagnotte a été confirmé côté Gateway.
+ * Clé d'idempotence : EXIGÉE, jamais inventée.
  *
- * ⚠️ NE S’APPLIQUE PAS aux paiements internes PayNoval
+ * Une clé tirée au hasard côté serveur serait différente à chaque requête —
+ * autrement dit aucune idempotence du tout, présentée comme telle. Sur une page
+ * de paiement publique, un double clic ou un bouton « réessayer » prélèverait
+ * alors deux fois le payeur.
+ *
+ * C'est le client qui doit la fixer, une fois par tentative de paiement, comme
+ * l'exigent Stripe (`Idempotency-Key`) et PayPal (`PayPal-Request-Id`).
  */
-async function notifyCagnotteExternalContribution(req, providerKey, providerResponse) {
-  const { context, cagnotteId, cagnotteCode, donorName } = req.body || {};
+function cleIdempotence(req) {
+  const entetes = req?.headers || {};
 
-  if (providerKey === 'paynoval') return;
-  if (context !== 'cagnotte' || !cagnotteId) return;
-
-  const baseUrl = getCagnottesBaseUrl();
-  if (!baseUrl) {
-    logger.warn('[PAYMENT→CAGNOTTE] URL backend cagnottes non configurée', {
-      providerKey,
-    });
-    return;
+  for (const attendu of ["idempotency-key", "x-idempotency-key"]) {
+    for (const nom of Object.keys(entetes)) {
+      if (String(nom).toLowerCase() !== attendu) continue;
+      const brut = entetes[nom];
+      const valeur = Array.isArray(brut) ? brut[0] : brut;
+      const propre = String(valeur ?? "").trim();
+      if (propre) return propre;
+    }
   }
 
-  const url = `${baseUrl}/api/v1/cagnottes/${cagnotteId}/external-payment-callback`;
-
-  const amount = Number(req.body.amount) || 0;
-  if (!amount || amount <= 0) {
-    logger.warn('[PAYMENT→CAGNOTTE] Montant invalide pour cagnotte', {
-      cagnotteId,
-      amount: req.body.amount,
-    });
-    return;
-  }
-
-  const nom =
-    donorName ||
-    req.body.recipientName ||
-    req.user?.fullName ||
-    'Contributeur externe';
-
-  const externalRef =
-    providerResponse?.data?.reference ||
-    providerResponse?.data?.id ||
-    null;
-
-  const payload = {
-    amount,
-    nom,
-    status: 'succeeded',
-    provider: providerKey,
-    externalRef,
-    codeParticipation: cagnotteCode || req.body.codeParticipation || undefined,
-  };
-
-  try {
-    await axios.post(url, payload, {
-      timeout: 8000,
-      headers: {
-        'x-gateway-token': process.env.CAGNOTTE_GATEWAY_TOKEN || '',
-      },
-    });
-
-    logger.info('[PAYMENT→CAGNOTTE] Participation externe notifiée', {
-      cagnotteId,
-      amount,
-      provider: providerKey,
-      externalRef,
-    });
-  } catch (err) {
-    logger.error('[PAYMENT→CAGNOTTE] Échec callback externe', {
-      cagnotteId,
-      provider: providerKey,
-      error: err.response?.data || err.message,
-    });
-  }
+  return "";
 }
 
 exports.handlePayment = async (req, res) => {
-  const providerKey = resolveProviderKey(req.body);
-  const targetUrl = providerKey ? PROVIDER_TO_ENDPOINT[providerKey] : null;
+  const corps = req.body || {};
+  const reqId = identifiantRequete(req);
 
-  if (!targetUrl) {
-    logger.error('[PAYMENT] Provider non supporté demandé', {
-      provider: req.body?.provider,
-      destination: req.body?.destination,
-      ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+  /* ── 1. AUCUNE DONNÉE DE CARTE — SECONDE BARRIÈRE ─────────────────────── */
+  /**
+   * Le refus est déjà porté par `refuseRawCardData`, monté AVANT
+   * `validatePayment` (qui, lui, retirerait ces champs en silence). Ce second
+   * contrôle ne sert donc jamais tant que la route est correctement montée —
+   * et c'est précisément pourquoi il reste : un contrôleur atteint par un
+   * montage futur qui aurait oublié le middleware ne doit pas s'ouvrir. Il
+   * appelle la MÊME fonction, il ne peut pas diverger.
+   */
+  const champCarte = trouverChampCarte(corps);
+
+  if (champCarte) {
+    /**
+     * ⚠️ On journalise le NOM du champ, jamais sa valeur. Journaliser
+     * « cardNumber=4242… » pour expliquer qu'on refuse les numéros de carte
+     * serait précisément la fuite qu'on ferme.
+     */
+    logger.error("[PAY] donnée de carte en clair refusée", {
+      champ: champCarte,
+      reqId,
+      ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
     });
-    return res.status(400).json({ error: 'Provider non supporté.' });
+
+    return res.status(400).json({
+      success: false,
+      code: "RAW_CARD_DATA_REFUSED",
+      error:
+        "PayNoval n'accepte pas les données de carte en clair. La carte doit " +
+        "être transmise au prestataire depuis le navigateur, qui rend un jeton.",
+    });
   }
 
+  /* ── 2. RAIL ET PRESTATAIRE ───────────────────────────────────────────── */
+  const route = resolverRail(corps);
+
+  if (route.erreur) {
+    logger.warn("[PAY] rail non servi", {
+      code: route.erreur,
+      declare: String(corps.provider || corps.destination || ""),
+      reqId,
+    });
+
+    const statut = route.erreur === "PAYNOVAL_RAIL_HAS_ITS_OWN_PATH" ? 410 : 400;
+
+    return res.status(statut).json({
+      success: false,
+      code: route.erreur,
+      error:
+        route.erreur === "PAYNOVAL_RAIL_HAS_ITS_OWN_PATH"
+          ? "Une participation depuis un compte PayNoval passe par " +
+            "POST /api/v1/cagnottes/:id/participations/paynoval."
+          : "Moyen de paiement non servi.",
+    });
+  }
+
+  /* ── 3. IDEMPOTENCE ───────────────────────────────────────────────────── */
+  const idem = cleIdempotence(req);
+
+  if (idem.length < 8) {
+    logger.warn("[PAY] clé d'idempotence absente", { reqId });
+
+    return res.status(400).json({
+      success: false,
+      code: "IDEMPOTENCY_KEY_REQUIRED",
+      error:
+        "En-tête Idempotency-Key requis : sans lui, un double envoi " +
+        "prélèverait deux fois le payeur.",
+    });
+  }
+
+  /* ── 4. CONFIGURATION ─────────────────────────────────────────────────── */
+  const base = baseTxCore();
+  const jeton = jetonInterne();
+
+  if (!base || !jeton) {
+    /**
+     * Règle B.2 : le chemin de l'argent échoue en FERMETURE. Une URL ou un
+     * jeton manquants ne se remplacent pas par un défaut — on refuse, et on le
+     * dit, parce qu'un encaissement routé « quelque part » est pire qu'un
+     * encaissement refusé.
+     */
+    logger.error("[PAY] Tx-Core non configuré", {
+      urlPresente: Boolean(base),
+      jetonPresent: Boolean(jeton),
+      reqId,
+    });
+
+    return res.status(503).json({
+      success: false,
+      code: "COLLECTION_UNCONFIGURED",
+      error: "Encaissement indisponible.",
+    });
+  }
+
+  /* ── 5. RELAIS ────────────────────────────────────────────────────────── */
+  const charge = {
+    rail: route.rail,
+    provider: route.provider,
+    purpose: "cagnotte_participation",
+    amount: Number(corps.amount),
+    currency: String(corps.currency || corps.senderCurrencySymbol || "").toUpperCase(),
+    target: {
+      cagnotteId: String(corps.cagnotteId || ""),
+      cagnotteCode: String(corps.cagnotteCode || ""),
+    },
+    payer: {
+      phone: String(corps.phoneNumber || ""),
+      displayName: String(corps.donorName || corps.recipientName || ""),
+      country: String(corps.country || ""),
+    },
+    ...(corps.cardToken ? { cardToken: String(corps.cardToken) } : {}),
+  };
+
   try {
-    const dynamicFees = computeDynamicFees(req.body);
-
-    // ✅ IMPORTANT: on forward le body ORIGINAL (pas cleanSensitiveMeta)
-    const forwardBody = { ...(req.body || {}) };
-
-    if (dynamicFees) {
-      forwardBody.gatewayFee = dynamicFees.feeAmount;
-      forwardBody.gatewayFeeRate = dynamicFees.feeRate;
-      forwardBody.gatewayFeeCurrency = dynamicFees.feeCurrency;
-      forwardBody.gatewayFeeKind = dynamicFees.feeKind;
-    }
-
-    // ✅ Timeout dynamique: PayNoval/cagnotte prennent plus de temps (cold start + DB)
-    const isPaynoval = providerKey === 'paynoval';
-    const isCagnotte = String(req.body?.context || '') === 'cagnotte';
-    const timeoutMs = (isPaynoval || isCagnotte) ? 60_000 : 15_000;
-
-    const response = await axios.post(targetUrl, forwardBody, {
-      headers: auditHeaders(req),
-      timeout: timeoutMs,
-    });
-
-    logger.info(`[PAYMENT→${providerKey}] Paiement réussi`, {
-      provider: providerKey,
-      amount: req.body?.amount,
-      context: req.body?.context,
-      targetType: req.body?.targetType,
-      targetId: req.body?.targetId,
-      status: response.status,
-      user: req.user?.email || null,
-      ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
-      ref: response.data?.reference || response.data?.id || null,
-      dynamicFees,
-      timeoutMs,
-      bodyPreview: cleanSensitiveMeta(req.body || {}),
-    });
-
-    // ✅ On répond AU CLIENT immédiatement (ne pas bloquer sur le side-effect)
-    res.status(response.status).json(response.data);
-
-    // fire-and-forget (sans casser la réponse)
-    void notifyCagnotteExternalContribution(req, providerKey, response).catch((e) => {
-      logger.error('[PAYMENT] Erreur side-effect cagnotte (async)', {
-        provider: providerKey,
-        error: e?.message,
-      });
-    });
-
-    return;
-  } catch (err) {
-    // ✅ Timeout axios
-    if (err.code === 'ECONNABORTED' || String(err.message || '').toLowerCase().includes('timeout')) {
-      logger.error(`[PAYMENT→${providerKey}] Timeout vers microservice`, {
-        provider: providerKey,
-        targetUrl,
-        message: err.message,
-      });
-      return res.status(504).json({
-        error: `Timeout vers le service ${providerKey}. Merci de réessayer.`,
-        details: 'timeout',
-      });
-    }
-
-    if (err.response && isCloudflareChallengeResponse(err.response)) {
-      logger.error(`[PAYMENT→${providerKey}] Cloudflare challenge détecté`, {
-        status: err.response.status,
-      });
-      return res.status(503).json({
-        error:
-          'Service de paiement temporairement protégé par Cloudflare. Merci de réessayer dans quelques instants.',
-        details: 'cloudflare_challenge',
-      });
-    }
-
-    if (err.response) {
-      const status = err.response.status;
-      let errorMsg =
-        err.response.data?.error ||
-        err.response.data?.message ||
-        `Erreur interne ${providerKey}`;
-
-      if (status === 429) {
-        errorMsg =
-          'Trop de requêtes vers le service de paiement. Merci de patienter quelques instants avant de réessayer.';
+    const reponse = await axios.post(
+      `${base}/api/v1/collections/initiate`,
+      charge,
+      {
+        timeout: 30_000,
+        validateStatus: () => true,
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "x-internal-token": jeton,
+          "x-request-id": reqId,
+          "Idempotency-Key": idem,
+          "x-idempotency-key": idem,
+        },
       }
+    );
 
-      logger.error(`[PAYMENT→${providerKey}] Échec API`, {
-        provider: providerKey,
-        status,
-        data:
-          typeof err.response.data === 'string'
-            ? err.response.data.slice(0, 300)
-            : err.response.data,
-        ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
-        bodyPreview: cleanSensitiveMeta(req.body || {}),
-      });
-
-      return res.status(status).json({ error: errorMsg });
-    }
-
-    logger.error(`[PAYMENT→${providerKey}] Axios error: ${err.message}`, {
-      provider: providerKey,
-      targetUrl,
-      ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
-      bodyPreview: cleanSensitiveMeta(req.body || {}),
+    /**
+     * ⚠️ On relaie la réponse telle quelle, et on ne la réinterprète pas.
+     *
+     * `status: "pending"` veut dire « le prestataire prélève ». Le remplacer
+     * par un message de succès ferait afficher un remerciement pour un
+     * paiement qui peut encore échouer — c'est exactement ce que faisait
+     * l'ancien code en déclenchant le crédit de la cagnotte sur un 2xx.
+     */
+    logger.info("[PAY] encaissement relayé", {
+      rail: route.rail,
+      provider: route.provider,
+      status: reponse.status,
+      collectionStatus: reponse.data?.collection?.status || null,
+      reference: reponse.data?.collection?.reference || null,
+      reqId,
     });
 
-    return res.status(502).json({
-      error: `Service ${providerKey} temporairement indisponible.`,
+    return res.status(reponse.status).json(reponse.data);
+  } catch (err) {
+    const timeout =
+      err.code === "ECONNABORTED" ||
+      String(err.message || "").toLowerCase().includes("timeout");
+
+    logger.error("[PAY] Tx-Core injoignable", {
+      rail: route.rail,
+      provider: route.provider,
+      timeout,
+      message: err?.message,
+      reqId,
+    });
+
+    /**
+     * ⚠️ 502/504 ET SURTOUT PAS 200. Le prélèvement a PEUT-ÊTRE été demandé —
+     * l'intention est écrite avant l'appel prestataire côté Tx-Core. Le rejeu
+     * de l'appelant, porteur de la même clé d'idempotence, retrouvera l'état
+     * réel sans rien doubler.
+     */
+    return res.status(timeout ? 504 : 502).json({
+      success: false,
+      code: timeout ? "COLLECTION_TIMEOUT" : "COLLECTION_UNAVAILABLE",
+      error: "Encaissement momentanément indisponible. Merci de réessayer.",
     });
   }
 };
+
+module.exports.CHAMPS_CARTE_INTERDITS = CHAMPS_CARTE_INTERDITS;
+module.exports.OPERATEURS_MOBILE_MONEY = OPERATEURS_MOBILE_MONEY;
+module.exports.trouverChampCarte = trouverChampCarte;
+module.exports.resolverRail = resolverRail;
+module.exports.cleIdempotence = cleIdempotence;

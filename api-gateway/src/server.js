@@ -3,7 +3,7 @@
 require('dotenv').config();
 const app = require('./app');
 const config = require('./config');
-const { connectToGatewayDB, connectToUsersDB } = require('./db');
+const { connectToGatewayDB } = require('./db');
 const logger = require('./logger');
 
 // Fonction d'init globale (DB puis serveur Express)
@@ -12,11 +12,26 @@ const logger = require('./logger');
     // 1️⃣ Connexion à la base MongoDB "api-gateway"
     await connectToGatewayDB();
 
-    // 2️⃣ Connexion à la base MongoDB "users" (facultatif, selon besoin)
-    // Si tu veux initialiser cette connexion à chaque démarrage (recommandé si utilisé)
-    await connectToUsersDB();
+    /**
+     * ⚠️ LA CONNEXION À LA BASE DES UTILISATEURS N'EST PLUS OUVERTE — 2026-09-10.
+     *
+     * Elle l'était à chaque démarrage, et depuis la fusion de l'AML **plus
+     * aucun code du bord ne la lisait**. Il restait une connexion ouverte en
+     * permanence, un pool à maintenir, des identifiants de la base des
+     * utilisateurs présents dans l'environnement de la surface la plus exposée
+     * d'Internet — et un `/health` qui annonçait fièrement son état.
+     *
+     * C'est le dernier morceau de ce que « le bord ne détient aucune base »
+     * veut dire : la passerelle vérifie une signature de jeton et relaie. Elle
+     * n'a plus besoin de savoir qu'une base d'utilisateurs existe.
+     *
+     * ⚠️ `MONGO_URI_USERS` peut être RETIRÉE de l'environnement de ce service —
+     * c'est une action d'exploitation, à faire après le déploiement.
+     *
+     * Verrouillé par `test/security/gatewayIsStateless.test.js`.
+     */
 
-    // Les deux connexions sont ouvertes : /readyz peut passer au vert.
+    // La connexion nécessaire est ouverte : /readyz peut passer au vert.
     app.get("readiness")?.markStarted();
 
     // 3️⃣ Démarrage du serveur Express

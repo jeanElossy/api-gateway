@@ -1,618 +1,190 @@
 "use strict";
 
-const { v4: uuidv4 } = require("uuid");
+/**
+ * ============================================================================
+ * TARIFICATION — LA PASSERELLE RELAIE, ELLE NE CALCULE PLUS
+ * ============================================================================
+ *
+ * ── Ce que ce fichier contenait ─────────────────────────────────────────────
+ *
+ * 617 lignes de moteur de devis : sélection du barème, application de la marge
+ * de change, conversion en devise d'administration, pose du verrou de prix. La
+ * passerelle POSSÉDAIT donc le domaine des prix, avec ses huit modèles Mongoose
+ * et sa base de données.
+ *
+ * ── Pourquoi c'était un défaut, et pas une préférence ───────────────────────
+ *
+ * Tx-Core — le moteur d'argent — venait chercher ses devis ICI, en HTTP :
+ *
+ *     Mobile ──► Gateway ──► Tx-Core ──► Gateway ──► base tarification
+ *                                          ▲
+ *                                  dépendance qui REMONTE
+ *
+ * Tx-Core l'annonçait lui-même au démarrage : « GATEWAY_URL absente ⇒ toute
+ * transaction nécessitant un devis échouera en 503 ». Une panne de la
+ * passerelle n'empêchait donc pas seulement les clients d'entrer : **elle
+ * arrêtait les virements depuis l'intérieur du moteur**, et la passerelle ne
+ * pouvait plus être redéployée ni redémarrée seule.
+ *
+ * Et la base des barèmes vivait sur la surface la plus exposée d'Internet.
+ *
+ * ── La règle appliquée, celle de Stripe, PayPal et Adyen ────────────────────
+ *
+ * LES DÉPENDANCES DESCENDENT : bord → services → moteur, jamais l'inverse.
+ *
+ * Le bord fait cinq choses et pas une de plus : terminaison TLS et routage,
+ * vérification du jeton, limitation de débit, validation de forme et
+ * corrélation, observabilité. Il ne décide d'aucun prix, n'évalue aucun risque
+ * métier, ne possède aucun domaine et ne détient aucune base.
+ *
+ * Le moteur de devis vit désormais dans `api-paynoval/src/services/pricing/`.
+ * Tx-Core l'appelle en PROCESSUS ; la passerelle, elle, le relaie pour le monde
+ * extérieur. Ce fichier n'est plus qu'un relais.
+ *
+ * ── Ce qu'un relais ne doit pas faire ───────────────────────────────────────
+ *
+ * Réinterpréter la réponse. Un 404 « aucun barème ne couvre ce corridor » et un
+ * 503 « taux de change indisponible » sont des informations que l'appelant doit
+ * recevoir telles quelles. Les fondre en un 502 générique, ou pire en un 200
+ * avec un prix par défaut, ferait accepter un virement à un tarif que personne
+ * n'a décidé (règle B.2).
+ */
 
-const { getActiveRules } = require("../src/services/pricing/ruleCache");
-const { recordCoverageGap } = require("../src/services/pricing/coverage");
-const PricingQuote = require("../src/models/PricingQuote");
+const axios = require("axios");
+const crypto = require("crypto");
+const logger = require("../src/logger");
 
-const {
-  computeQuote,
-  roundMoney,
-  normalizeCountryISO2,
-} = require("../src/services/pricingEngine");
+const TIMEOUT_MS = Number(process.env.PRICING_PROXY_TIMEOUT_MS || 12000);
 
-const { getExchangeRate } = require("../src/services/exchangeRateService");
+function baseTxCore() {
+  const brute =
+    process.env.TRANSACTIONS_API_BASE_URL ||
+    process.env.TRANSACTIONS_SERVICE_URL ||
+    process.env.TX_CORE_URL ||
+    process.env.TXCORE_URL ||
+    process.env.SERVICE_PAYNOVAL_URL ||
+    "";
 
-const LOCK_TTL_MIN_RAW = Number(process.env.PRICING_LOCK_TTL_MIN || 10);
-const LOCK_TTL_MIN =
-  Number.isFinite(LOCK_TTL_MIN_RAW) && LOCK_TTL_MIN_RAW > 0
-    ? LOCK_TTL_MIN_RAW
-    : 10;
-
-/* -------------------------------------------------------------------------- */
-/* Helpers                                                                     */
-/* -------------------------------------------------------------------------- */
-
-function pickBody(req) {
-  return req.body && Object.keys(req.body).length ? req.body : req.query || {};
+  return String(brute).replace(/\/+$/, "").replace(/\/api\/v1$/, "");
 }
 
-const normStr = (v) => String(v ?? "").trim();
-const upper = (v) => normStr(v).toUpperCase();
-const lower = (v) => normStr(v).toLowerCase();
-
-function cleanId(v) {
-  const s = normStr(v);
-  return s || undefined;
+function jetonInterne() {
+  return String(
+    process.env.TX_CORE_INTERNAL_TOKEN ||
+      process.env.GATEWAY_INTERNAL_TOKEN ||
+      process.env.INTERNAL_TOKEN ||
+      ""
+  ).trim();
 }
 
-function compactObject(obj = {}) {
-  const out = {};
-
-  for (const [key, value] of Object.entries(obj || {})) {
-    if (value === undefined || value === null || value === "") continue;
-    out[key] = value;
-  }
-
-  return out;
-}
-
-function normalizeTxType(v) {
-  const raw = upper(v);
-  if (!raw) return "";
-
-  if (["TRANSFER", "DEPOSIT", "WITHDRAW"].includes(raw)) return raw;
-
-  const low = lower(v);
-
-  if (["send", "p2p", "transfer", "transfert"].includes(low)) {
-    return "TRANSFER";
-  }
-
-  if (["deposit", "depot", "dépôt", "cashin", "topup"].includes(low)) {
-    return "DEPOSIT";
-  }
-
-  if (
-    ["withdraw", "withdrawal", "cashout", "retrait", "payout"].includes(low)
-  ) {
-    return "WITHDRAW";
-  }
-
-  return raw;
-}
-
-function normalizeMethod(v) {
-  const raw = upper(v).replace(/[\s-]+/g, "_");
-  if (!raw) return "";
-
-  if (["MOBILEMONEY", "MOBILE_MONEY", "MOMO", "MM"].includes(raw)) {
-    return "MOBILEMONEY";
-  }
-
-  if (["BANK", "WIRE", "TRANSFER_BANK", "VIREMENT"].includes(raw)) {
-    return "BANK";
-  }
-
-  if (
-    [
-      "CARD",
-      "VISA",
-      "VISA_DIRECT",
-      "MASTERCARD",
-      "CARTE",
-    ].includes(raw)
-  ) {
-    return "CARD";
-  }
-
-  if (["INTERNAL", "WALLET", "PAYNOVAL"].includes(raw)) {
-    return "INTERNAL";
-  }
-
-  return raw;
-}
-
-function normalizeCountryForStore(country) {
-  if (!country) return null;
-
-  const iso2 = normalizeCountryISO2(country);
-  return upper(iso2 || country);
-}
-
-function pickRequestId(req) {
+function identifiantRequete(req) {
   return (
-    req.get("x-request-id") ||
-    req.get("x-correlation-id") ||
-    req.get("x-amzn-trace-id") ||
-    null
+    req.headers["x-request-id"] ||
+    req.headers["x-correlation-id"] ||
+    crypto.randomUUID()
   );
-}
-
-function pickCurrency(...values) {
-  for (const value of values) {
-    const s = upper(value);
-    if (!s) continue;
-
-    if (s === "€" || s.includes("EUR")) return "EUR";
-    if (s === "$" || s.includes("USD")) return "USD";
-    if (s.includes("CAD")) return "CAD";
-    if (s.includes("GBP") || s.includes("£")) return "GBP";
-    if (s.includes("XOF") || s.includes("FCFA") || s.includes("CFA")) {
-      return "XOF";
-    }
-    if (s.includes("XAF")) return "XAF";
-
-    const letters = s.replace(/[^A-Z]/g, "");
-    if (letters.length === 3) return letters;
-  }
-
-  return "";
-}
-
-async function getMarketRateDirect(from, to, { requestId } = {}) {
-  if (upper(from) === upper(to)) return 1;
-
-  const out = await getExchangeRate(from, to, { requestId });
-  const rate = Number(out?.rate ?? out);
-
-  return Number.isFinite(rate) ? rate : null;
 }
 
 /**
- * Convertit un montant vers la devise admin CAD.
+ * Le corps du devis. La passerelle ne le NORMALISE pas : c'est le service de
+ * tarification qui décide ce qu'est un corridor valide, et deux normalisations
+ * pour une même donnée divergent toujours — celle du bord gagnerait en silence.
  */
-async function convertToAdminCurrency({
-  amount,
-  fromCurrency,
-  adminCurrency = "CAD",
-  requestId,
-}) {
-  const safeAmount = Number(amount || 0);
-  const from = upper(fromCurrency);
-  const admin = upper(adminCurrency);
-
-  if (!Number.isFinite(safeAmount) || safeAmount <= 0) {
-    return {
-      adminCurrency: admin,
-      amountAdmin: 0,
-      conversionRate: 0,
-    };
-  }
-
-  if (from === admin) {
-    return {
-      adminCurrency: admin,
-      amountAdmin: roundMoney(safeAmount, admin),
-      conversionRate: 1,
-    };
-  }
-
-  const rate = await getMarketRateDirect(from, admin, { requestId });
-
-  if (!Number.isFinite(rate) || rate <= 0) {
-    return {
-      adminCurrency: admin,
-      amountAdmin: 0,
-      conversionRate: 0,
-    };
-  }
-
-  return {
-    adminCurrency: admin,
-    amountAdmin: roundMoney(safeAmount * rate, admin),
-    conversionRate: Number(rate),
-  };
+function chargeUtile(req) {
+  return req.body && Object.keys(req.body).length ? req.body : req.query || {};
 }
 
-function buildRequest(body = {}) {
-  const txType = normalizeTxType(
-    body.txType || body.transactionType || body.flow || body.type
-  );
-
-  const method = normalizeMethod(
-    body.method || body.methodType || body.rail || body.paymentMethod
-  );
-
-  const amount = Number(
-    body.amount ??
-      body.amountSource ??
-      body.grossFrom ??
-      body.netFrom ??
-      body.sourceAmount
-  );
-
-  const fromCurrency = pickCurrency(
-    body.fromCurrency,
-    body.currencySource,
-    body.senderCurrencyCode,
-    body.currency,
-    body.sourceCurrency,
-    body.selectedCurrency
-  );
-
-  const toCurrency =
-    pickCurrency(
-      body.toCurrency,
-      body.currencyTarget,
-      body.localCurrencyCode,
-      body.targetCurrency,
-      body.destinationCurrency,
-      body.localCurrencySymbol
-    ) || fromCurrency;
-
-  return {
-    txType,
-    method,
-    amount,
-    fromCurrency,
-    toCurrency,
-
-    country: normalizeCountryForStore(
-      body.country || body.destinationCountry || body.toCountry
-    ),
-
-    operator: body.operator
-      ? lower(body.operator)
-      : body.operatorName
-      ? lower(body.operatorName)
-      : body.mobileMoney
-      ? lower(body.mobileMoney)
-      : null,
-
-    provider: body.provider ? lower(body.provider) : null,
-
-    fromCountry: normalizeCountryForStore(
-      body.fromCountry || body.sourceCountry
-    ),
-
-    toCountry: normalizeCountryForStore(
-      body.toCountry || body.targetCountry || body.destinationCountry
-    ),
-  };
-}
-
-function validateRequest(request) {
-  if (!request.txType) return "txType est requis";
-
-  if (
-    !request.amount ||
-    !Number.isFinite(request.amount) ||
-    request.amount <= 0
-  ) {
-    return "amount doit être un nombre > 0";
-  }
-
-  if (!request.fromCurrency) return "fromCurrency est requis";
-  if (!request.toCurrency) return "toCurrency est requis";
-
-  return null;
-}
-
-function buildPricingAliases(quoteId) {
-  const id = cleanId(quoteId);
-
-  return compactObject({
-    quoteId: id,
-    pricingId: id,
-    pricingLockId: id,
-    lockId: id,
-    effectivePricingId: id,
-  });
-}
-
-function buildDebugPayload({ request, quote, requestId }) {
-  const fee = Number(quote?.result?.fee || 0);
-  const grossFrom = Number(quote?.result?.grossFrom || request?.amount || 0);
-  const netFrom = Number(quote?.result?.netFrom || 0);
-
-  const marketRate =
-    quote?.result?.marketRate != null ? Number(quote.result.marketRate) : null;
-
-  const appliedRate =
-    quote?.result?.appliedRate != null ? Number(quote.result.appliedRate) : null;
-
-  const netTo = Number(quote?.result?.netTo || 0);
-
-  const feeRevenueCAD = Number(quote?.result?.feeRevenue?.amountCAD || 0);
-  const fxRevenueTo = Number(quote?.result?.fxRevenue?.amount || 0);
-  const fxRevenueCAD = Number(quote?.result?.fxRevenue?.amountCAD || 0);
-
-  return {
-    requestId: requestId || null,
-
-    requestNormalized: {
-      txType: request?.txType || null,
-      method: request?.method || null,
-      amount: Number(request?.amount || 0),
-      fromCurrency: request?.fromCurrency || null,
-      toCurrency: request?.toCurrency || null,
-      country: request?.country || null,
-      fromCountry: request?.fromCountry || null,
-      toCountry: request?.toCountry || null,
-      provider: request?.provider || null,
-      operator: request?.operator || null,
-    },
-
-    feeSource: fee,
-
-    feeComputation: {
-      grossFrom,
-      fee,
-      netFrom,
-      formula:
-        Number.isFinite(grossFrom) && Number.isFinite(fee)
-          ? `${grossFrom} - ${fee} = ${netFrom}`
-          : null,
-    },
-
-    feeRuleApplied: quote?.ruleApplied || null,
-    fxRuleApplied: quote?.fxRuleApplied || null,
-
-    feeRevenueCAD,
-
-    fxComputation: {
-      marketRate,
-      appliedRate,
-      spreadPerUnit:
-        Number.isFinite(marketRate) && Number.isFinite(appliedRate)
-          ? Math.max(0, marketRate - appliedRate)
-          : null,
-      marginDelta:
-        Number.isFinite(marketRate) && Number.isFinite(appliedRate)
-          ? appliedRate - marketRate
-          : null,
-      netTo,
-      fxRevenueTo,
-      fxRevenueToCurrency: quote?.result?.fxRevenue?.toCurrency || null,
-      fxRevenueCAD,
-      fxConversionRateToCAD: Number(
-        quote?.result?.fxRevenue?.conversionRateToCAD || 0
-      ),
-      formula:
-        Number.isFinite(netFrom) && Number.isFinite(appliedRate)
-          ? `${netFrom} * ${appliedRate} = ${netTo}`
-          : null,
-      gainFormula:
-        Number.isFinite(netFrom) &&
-        Number.isFinite(marketRate) &&
-        Number.isFinite(appliedRate)
-          ? `${netFrom} * (${marketRate} - ${appliedRate}) = ${fxRevenueTo}`
-          : null,
-    },
-
-    feeBreakdown: quote?.result?.feeBreakdown || null,
-    feeRevenue: quote?.result?.feeRevenue || null,
-    fxRevenue: quote?.result?.fxRevenue || null,
-  };
-}
-
-async function computeFullQuote({ request, requestId }) {
-  // Lecture servie par le cache, invalidé à chaque publication tarifaire.
-  const rules = await getActiveRules();
-
-  const quote = await computeQuote({
-    req: request,
-    rules,
-    getMarketRate: async (from, to) =>
-      getMarketRateDirect(from, to, { requestId }),
-  });
-
-  quote.result = quote.result || {};
-
-  const feeRevenueAdmin = await convertToAdminCurrency({
-    amount: Number(quote?.result?.fee || 0),
-    fromCurrency: request.fromCurrency,
-    adminCurrency: "CAD",
-    requestId,
-  });
-
-  quote.result.feeRevenue = {
-    sourceCurrency: request.fromCurrency,
-    amount: Number(quote?.result?.fee || 0),
-    adminCurrency: feeRevenueAdmin.adminCurrency,
-    amountCAD: feeRevenueAdmin.amountAdmin,
-    conversionRateToCAD: feeRevenueAdmin.conversionRate,
-    calculatedAt: new Date().toISOString(),
-  };
-
-  const fxRevenueTo = Number(quote?.result?.fxRevenue?.amount || 0);
-  const fxRevenueToCurrency =
-    quote?.result?.fxRevenue?.toCurrency || request.toCurrency;
-
-  const fxRevenueAdmin = await convertToAdminCurrency({
-    amount: fxRevenueTo,
-    fromCurrency: fxRevenueToCurrency,
-    adminCurrency: "CAD",
-    requestId,
-  });
-
-  quote.result.fxRevenue = {
-    ...(quote.result.fxRevenue || {}),
-    adminCurrency: fxRevenueAdmin.adminCurrency,
-    amountCAD: fxRevenueAdmin.amountAdmin,
-    conversionRateToCAD: fxRevenueAdmin.conversionRate,
-    calculatedAt: new Date().toISOString(),
-  };
-
-  quote.debug = buildDebugPayload({
-    request,
-    quote,
-    requestId,
-  });
-
-  return quote;
-}
-
-function buildQuoteResponsePayload({ quote, mode = "QUOTE" }) {
-  return {
-    success: true,
-    ok: true,
-    mode,
-    request: quote.request,
-    result: quote.result,
-    feeSource: quote.debug?.feeSource ?? Number(quote?.result?.fee || 0),
-    ruleApplied: quote.ruleApplied || null,
-    fxRuleApplied: quote.fxRuleApplied || null,
-    debug: quote.debug || null,
-  };
-}
-
-function buildLockResponsePayload({ doc }) {
-  const aliases = buildPricingAliases(doc.quoteId);
-
-  const base = {
-    success: true,
-    ok: true,
-    mode: "LOCKED",
-
-    ...aliases,
-
-    expiresAt: doc.expiresAt,
-    request: doc.request,
-    result: doc.result,
-    feeSource: doc.debug?.feeSource ?? Number(doc?.result?.fee || 0),
-    ruleApplied: doc.ruleApplied || null,
-    fxRuleApplied: doc.fxRuleApplied || null,
-    debug: doc.debug || null,
-  };
-
-  return {
-    ...base,
-
-    /**
-     * Compat front :
-     * - axios normalizeResponse peut retourner {...data}
-     * - certains appels lisent lockRes.data
-     * - d'autres lisent lockRes.data.data
-     */
-    data: {
-      ...base,
-    },
-  };
-}
-
-function sendPricingError(res, status, message, details = null) {
+function erreur(res, status, message, code) {
   return res.status(status).json({
     success: false,
     ok: false,
+    code,
     error: message,
     message,
-    details,
   });
 }
 
-/* -------------------------------------------------------------------------- */
-/* Controllers                                                                 */
-/* -------------------------------------------------------------------------- */
+async function relayer(req, res, chemin, { userId = "" } = {}) {
+  const base = baseTxCore();
+  const jeton = jetonInterne();
 
-exports.quote = async (req, res, next) => {
-  try {
-    const body = pickBody(req);
-    const requestId = pickRequestId(req);
-
-    const request = buildRequest(body);
-    const validationError = validateRequest(request);
-
-    if (validationError) {
-      return sendPricingError(res, 400, validationError);
-    }
-
-    const quote = await computeFullQuote({ request, requestId });
-
-    return res.status(200).json(buildQuoteResponsePayload({ quote }));
-  } catch (e) {
-    if (e && e.status === 404 && e.details) {
-      // Consigné hors du chemin de réponse : un incident de journalisation ne
-      // doit jamais empêcher la réponse au client.
-      recordCoverageGap(e.details.normalizedRequest || {});
-
-      return sendPricingError(
-        res,
-        404,
-        e.message || "No pricing rule matched",
-        e.details
-      );
-    }
-
-    if (e && (e.status === 503 || e.message === "FX rate unavailable")) {
-      return sendPricingError(
-        res,
-        503,
-        "FX rate unavailable",
-        e.details || null
-      );
-    }
-
-    return next(e);
-  }
-};
-
-exports.lock = async (req, res, next) => {
-  try {
-    const userId = req.user?._id;
-
-    if (!userId) {
-      return sendPricingError(res, 401, "Unauthorized");
-    }
-
-    const body = pickBody(req);
-    const requestId = pickRequestId(req);
-
-    const request = buildRequest(body);
-    const validationError = validateRequest(request);
-
-    if (validationError) {
-      return sendPricingError(res, 400, validationError);
-    }
-
-    const computed = await computeFullQuote({ request, requestId });
-
-    const quoteId = uuidv4();
-    const expiresAt = new Date(Date.now() + LOCK_TTL_MIN * 60 * 1000);
-
-    const doc = await PricingQuote.create({
-      quoteId,
-      userId,
-      status: "ACTIVE",
-      request: {
-        txType: computed.request.txType,
-        method: computed.request.method || null,
-        amount: Number(computed.request.amount),
-        fromCurrency: upper(computed.request.fromCurrency),
-        toCurrency: upper(computed.request.toCurrency),
-        country: normalizeCountryForStore(computed.request.country),
-        fromCountry: normalizeCountryForStore(computed.request.fromCountry),
-        toCountry: normalizeCountryForStore(computed.request.toCountry),
-        operator: computed.request.operator
-          ? lower(computed.request.operator)
-          : null,
-        provider: computed.request.provider
-          ? lower(computed.request.provider)
-          : null,
-      },
-      result: computed.result,
-      ruleApplied: computed.ruleApplied || null,
-      fxRuleApplied: computed.fxRuleApplied || null,
-      debug: computed.debug || null,
-      expiresAt,
+  if (!base || !jeton) {
+    /**
+     * Règle B.2 : le chemin de l'argent échoue en FERMETURE. Sans cible ni
+     * jeton, on ne sert pas un prix approximatif — on refuse et on le dit.
+     */
+    logger.error("[pricing] Tx-Core non configuré", {
+      urlPresente: Boolean(base),
+      jetonPresent: Boolean(jeton),
     });
 
-    return res.status(200).json(buildLockResponsePayload({ doc }));
-  } catch (e) {
-    if (e && e.status === 404 && e.details) {
-      // Consigné hors du chemin de réponse : un incident de journalisation ne
-      // doit jamais empêcher la réponse au client.
-      recordCoverageGap(e.details.normalizedRequest || {});
-
-      return sendPricingError(
-        res,
-        404,
-        e.message || "No pricing rule matched",
-        e.details
-      );
-    }
-
-    if (e && (e.status === 503 || e.message === "FX rate unavailable")) {
-      return sendPricingError(
-        res,
-        503,
-        "FX rate unavailable",
-        e.details || null
-      );
-    }
-
-    return next(e);
+    return erreur(
+      res,
+      503,
+      "Service de tarification indisponible.",
+      "PRICING_UNCONFIGURED"
+    );
   }
+
+  const reqId = identifiantRequete(req);
+
+  try {
+    const reponse = await axios.post(`${base}${chemin}`, chargeUtile(req), {
+      timeout: TIMEOUT_MS,
+      validateStatus: () => true,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "x-internal-token": jeton,
+        "x-request-id": reqId,
+        ...(userId ? { "x-user-id": String(userId) } : {}),
+      },
+    });
+
+    /**
+     * ⚠️ Statut et corps relayés VERBATIM. Voir l'en-tête : un 404 corridor et
+     * un 503 change indisponible portent chacun une information que l'appelant
+     * doit pouvoir distinguer.
+     */
+    return res.status(reponse.status).json(reponse.data);
+  } catch (err) {
+    const timeout =
+      err.code === "ECONNABORTED" ||
+      String(err.message || "").toLowerCase().includes("timeout");
+
+    logger.error("[pricing] Tx-Core injoignable", {
+      chemin,
+      timeout,
+      message: err?.message,
+      reqId,
+    });
+
+    return erreur(
+      res,
+      timeout ? 504 : 502,
+      "Tarification momentanément indisponible.",
+      timeout ? "PRICING_TIMEOUT" : "PRICING_UNAVAILABLE"
+    );
+  }
+}
+
+/** `GET|POST /api/v1/pricing/quote` et son alias public. Lecture seule. */
+exports.quote = async (req, res) => relayer(req, res, "/api/v1/pricing/quote");
+
+/**
+ * `POST /api/v1/pricing/lock`. Un verrou engage PayNoval envers QUELQU'UN.
+ *
+ * L'identité est établie ICI — c'est le travail du bord — puis relayée à
+ * Tx-Core par `x-user-id` sur le canal interne. Tx-Core ne revérifie pas de
+ * session : il fait confiance au canal, ce qui n'est légitime que parce que le
+ * jeton interne l'authentifie.
+ */
+exports.lock = async (req, res) => {
+  const userId = req.user?._id || req.user?.id || "";
+
+  if (!userId) {
+    return erreur(res, 401, "Unauthorized", "UNAUTHORIZED");
+  }
+
+  return relayer(req, res, "/api/v1/pricing/lock", { userId });
 };

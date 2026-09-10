@@ -387,11 +387,42 @@ test("aucune adresse de serveur n'apparaît sur la page", async () => {
  * Le câblage doit donc repasser sur l'événement `connected`. Ce test lit la
  * source : il tombe si le repli disparaît.
  */
-test("db.js instrumente les deux pools et gère la connexion différée de `users`", () => {
-  const source = fs.readFileSync(path.join(__dirname, "../src/db.js"), "utf8");
+test("db.js instrumente le seul pool qui reste, et il n'y en a plus qu'un", () => {
+  const brut = fs.readFileSync(path.join(__dirname, "../src/db.js"), "utf8");
+
+  /**
+   * On teste le CODE, pas ce qu'on en dit : un commentaire qui évoque la
+   * connexion supprimée ferait échouer ce test sans qu'aucune connexion ne soit
+   * rouverte. La leçon vient de `redisMetrics.test.js`, tombé sur exactement ce
+   * piège.
+   */
+  const source = brut
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
 
   assert.match(source, /attachPoolMetrics\(mongoose\.connection, 'gateway'\)/);
-  assert.match(source, /attachPoolMetrics\(usersConnection, 'users'\)/);
+
+  /**
+   * ⚠️ CE TEST EXIGEAIT DEUX POOLS JUSQU'AU 2026-09-10.
+   *
+   * La passerelle ouvrait une seconde connexion vers la base des utilisateurs.
+   * Après la fusion de l'AML dans Tx-Core, plus aucun code du bord ne la
+   * lisait : un pool maintenu pour rien, et les identifiants de la base des
+   * utilisateurs présents dans l'environnement de la surface la plus exposée
+   * d'Internet.
+   *
+   * L'assertion s'est donc INVERSÉE. Elle exige maintenant que la seconde
+   * connexion ne revienne pas : sa réapparition serait le signe qu'un domaine
+   * est en train de reconquérir le bord.
+   */
+  assert.doesNotMatch(
+    source,
+    /createConnection/,
+    "la passerelle a rouvert une seconde connexion Mongo — le bord ne détient " +
+      "aucune base au-delà de la sienne"
+  );
+
+  assert.doesNotMatch(source, /usersConnection/);
 
   const fn = source.slice(
     source.indexOf("function attachPoolMetrics"),

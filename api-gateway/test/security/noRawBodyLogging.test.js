@@ -60,7 +60,48 @@ const RACINE = path.resolve(__dirname, "../../src");
  * `validateTransaction.js` — un test qui crie sur du code sain finit par être
  * désactivé, et emporte avec lui la protection qu'il apportait.
  */
-const CORPS = /\b(req\.body|request\.body|bodyWithSecurity|strictBody|rawBody)\b(?!\s*\.)/;
+/**
+ * ══ ÉLARGI LE 2026-09-09 — LA GARDE AVAIT DEUX CÉCITÉS ═══════════════════════
+ *
+ * La version précédente valait :
+ *
+ *     /\b(req\.body|request\.body|bodyWithSecurity|strictBody|rawBody)\b(?!\s*\.)/
+ *
+ * Elle énumérait des NOMS DE VARIABLES. Deux écritures parfaitement banales lui
+ * échappaient donc, et toutes deux existaient dans le code :
+ *
+ *   1. **Une variable simplement nommée `body`.** `transactionOrchestratorByFlow`
+ *      en journalisait quatre — dont `resolveRouteContextForAction` (le corps
+ *      d'un `confirm`, donc le CODE DE CONFIRMATION) et `dispatchToProvider`
+ *      (le `strictBody`, donc la RÉPONSE À LA QUESTION DE SÉCURITÉ). Le test
+ *      passait au vert sur exactement ce qu'il avait été écrit pour empêcher.
+ *
+ *   2. **Le chaînage optionnel.** `req\.body` porte un point LITTÉRAL :
+ *      `req?.body` ne lui correspondait pas. `routeActionByFlow` écrivait
+ *      `body: req?.body` en clair sur `/confirm` et `/cancel`.
+ *
+ * C'est le mode de défaillance que l'en-tête de ce fichier décrit déjà pour le
+ * module de masquage — « une protection qu'on croit en place parce qu'on se
+ * souvient de l'avoir écrite » — appliqué cette fois à la garde elle-même. La
+ * leçon tient en une phrase : **un test de forme doit être aussi soigné que le
+ * principe qu'il défend.**
+ *
+ * ── Ce que le nouveau motif dit, et ce qu'il continue d'autoriser ───────────
+ *
+ * Deux branches :
+ *   · un identifiant NU (`body`, `strictBody`, `bodyWithSecurity`, `rawBody`)
+ *     — le `(?<![.\w$])` empêche de confondre avec `out.body` ou `ctx.body`,
+ *     qui sont traités par la seconde branche ou légitimes ;
+ *   · `req.body` / `req?.body` / `request.body` / `request?.body`.
+ *
+ * Le `(?!\s*\.)` final est CONSERVÉ, et c'est toujours la règle B.4 elle-même :
+ * journaliser `req.body.provider` — un champ NOMMÉ — reste licite ; c'est le
+ * tout-venant qui ne l'est pas. Vérifié après élargissement : les
+ * journalisations légitimes de `validatePayment.js` et `validateTransaction.js`
+ * ne sont toujours pas signalées.
+ */
+const CORPS =
+  /(?:(?<![.\w$])(?:body|strictBody|bodyWithSecurity|rawBody)\b|\b(?:req|request)\??\.body\b)(?!\s*\.)/;
 
 /** Fonctions qui écrivent dans un journal. */
 const JOURNAL = /\b(console\.(log|info|warn|error|debug)|logger\.(info|warn|error|debug)|log\.(info|warn|error|debug))\s*\(/;

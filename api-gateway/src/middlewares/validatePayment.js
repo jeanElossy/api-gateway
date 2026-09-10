@@ -43,6 +43,11 @@ const mobileMoneyPaymentSchema = Joi.object({
   ...commonMetaFields,
   provider: Joi.string().valid('mobilemoney').required(),
   amount: Joi.number().min(1).required(),
+  // `currency` était ABSENTE de ce schéma. Avec `stripUnknown: true`, une devise
+  // envoyée par le client était silencieusement retirée, et Tx-Core recevait un
+  // encaissement sans devise. Le même défaut avait déjà été trouvé sur le rail
+  // carte le 2026-09-08 : deux schémas voisins, la même omission.
+  currency: Joi.string().min(3).max(4).uppercase().required(),
   phoneNumber: Joi.string().pattern(/^[0-9+]{8,16}$/).required(),
   operator: Joi.string().valid('orange', 'mtn', 'moov', 'wave').required(),
   recipientName: Joi.string().max(64).optional(),
@@ -50,25 +55,48 @@ const mobileMoneyPaymentSchema = Joi.object({
 });
 
 
+/**
+ * ============================================================================
+ * RAIL CARTE — UN JETON, PAS UN NUMÉRO
+ * ============================================================================
+ *
+ * Ce schéma EXIGEAIT `cardNumber`, `cvc`, `expMonth` et `expYear`. Autrement
+ * dit, la validation d'entrée de la passerelle REFUSAIT tout paiement par carte
+ * qui n'aurait PAS porté le numéro en clair. Le périmètre PCI-DSS n'était pas
+ * seulement ouvert : il était obligatoire.
+ *
+ * Il exige désormais l'inverse : un jeton opaque, émis par le prestataire
+ * depuis le navigateur du payeur. C'est le modèle Stripe Elements / Adyen
+ * Components / Checkout.com Frames — la carte ne touche jamais nos serveurs, et
+ * l'attestation applicable reste SAQ A.
+ *
+ * ⚠️ Aucun champ de carte n'est déclaré ici, même pour être refusé. Ce schéma
+ * s'exécute avec `stripUnknown: true` : un champ non déclaré est RETIRÉ du
+ * corps, en silence, sans erreur ni journal. Déclarer `cardNumber` pour le
+ * rejeter ici serait donc redondant, et l'y OUBLIER serait invisible.
+ *
+ * Le refus est porté en amont par `refuseRawCardData`, monté AVANT ce
+ * middleware dans `routes/payment.js` — c'est le seul étage qui voit encore le
+ * corps brut. L'ordre des deux est un invariant, verrouillé par
+ * `test/security/noRawCardData.test.js`.
+ */
 const visaDirectSchema = Joi.object({
   ...commonMetaFields,
   provider: Joi.string().valid('visa_direct').required(),
   amount: Joi.number().min(1).required(),
-  // `currency` manquait ici alors que le rail carte remplace `stripe`, qui
-  // l'exigeait. Avec `stripUnknown: true`, l'absence de la clé ne produisait
-  // aucune erreur : la devise était SILENCIEUSEMENT supprimée du corps avant
-  // routage. Une devise perdue sur un chemin d'argent n'est pas un détail.
   currency: Joi.string().length(3).uppercase().required(),
-  cardNumber: Joi.string().creditCard().required(),
-  expMonth: Joi.number().min(1).max(12).required(),
-  expYear: Joi.number().min(new Date().getFullYear()).max(new Date().getFullYear() + 20).required(),
-  cvc: Joi.string().pattern(/^\d{3,4}$/).required(),
-  cardHolder: Joi.string().max(64).required(),
+
+  /**
+   * Jeton opaque du prestataire. Sa forme lui appartient — on n'en valide que
+   * la présence et une longueur plafonnée. Y imposer un motif reviendrait à
+   * coder en dur le format d'un partenaire qui n'est pas encore choisi.
+   */
+  cardToken: Joi.string().min(8).max(512).required(),
+
+  cardHolder: Joi.string().max(64).optional(),
   toEmail: Joi.string().email().optional(),
   country: Joi.string().max(32).optional(),
 });
-
-
 
 /**
  * Les rails servis par `POST /api/v1/pay`. Périmètre arrêté le 2026-09-08.

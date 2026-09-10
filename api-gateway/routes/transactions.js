@@ -23,7 +23,6 @@
 const express = require("express");
 const crypto = require("crypto");
 
-const amlMiddleware = require("../src/middlewares/aml");
 const validateTransaction = require("../src/middlewares/validateTransaction");
 const requireTransactionEligibility = require("../src/middlewares/requireTransactionEligibility");
 
@@ -165,11 +164,31 @@ router.get("/:id", controller.getTransaction);
  * - AML middleware
  * - routing flow-aware côté gateway
  */
+/**
+ * ⚠️ `amlMiddleware` A ÉTÉ RETIRÉ DE CETTE CHAÎNE LE 2026-09-10.
+ *
+ * Il n'a pas été supprimé : il a été FUSIONNÉ. Il existait deux AML — 1 530
+ * lignes ici, 1 533 dans Tx-Core, issues de la même souche et divergées de
+ * 1 234 lignes. Chaque `POST /initiate` les traversait tous les deux et lisait
+ * DEUX FOIS le même document utilisateur, une fois par service.
+ *
+ * Deux implémentations d'une même règle de conformité ne restent pas d'accord.
+ * Elles ne l'étaient déjà plus : le criblage sanctions n'existait que du côté
+ * bord, les contrôles d'éligibilité que du côté moteur.
+ *
+ * L'AML unique vit désormais dans `api-paynoval/src/middleware/aml.js`, monté
+ * sur la route `initiate` de Tx-Core, avec le criblage descendu avec lui. Il
+ * est adjacent au grand livre : aucun chemin ne déplace d'argent sans l'avoir
+ * traversé (invariant A12) — ce qu'une garde au bord ne pouvait pas promettre,
+ * puisqu'elle ne protégeait que ce qui passait par le bord.
+ *
+ * Verrouillé par `test/security/amlLivesInTxCore.test.js`, qui échoue si un AML
+ * réapparaît ici.
+ */
 router.post(
   "/initiate",
   validateTransaction("initiate"),
   requireTransactionEligibility,
-  amlMiddleware,
   controller.initiateTransaction
 );
 

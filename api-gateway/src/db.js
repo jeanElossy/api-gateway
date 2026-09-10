@@ -2,7 +2,6 @@ const mongoose = require('mongoose');
 const config = require('./config');
 const logger = require('./logger');
 
-let usersConnection = null; // Connexion secondaire (users)
 
 /**
  * OPTIONS DE CONNEXION — POURQUOI ELLES NE PEUVENT PAS RESTER IMPLICITES
@@ -51,11 +50,15 @@ function buildMongooseOpts() {
  * Instrumente le pool de connexions d'une connexion Mongoose (§41).
  *
  * ⚠️ IL FAUT ATTENDRE LE `MongoClient`, PAS SEULEMENT L'APPEL À `connect`.
- * `conn.getClient()` rend `undefined` tant que le pilote ne l'a pas construit —
- * et `connectToUsersDB` n'attend justement rien (`createConnection` se connecte
- * en tâche de fond). S'abonner à rien produirait des jauges plates qu'on
- * prendrait pour un pool au repos, exactement le contresens que §41 doit
- * empêcher.
+ * `conn.getClient()` rend `undefined` tant que le pilote ne l'a pas construit.
+ * S'abonner à rien produirait des jauges plates qu'on prendrait pour un pool au
+ * repos, exactement le contresens que §41 doit empêcher.
+ *
+ * Cette précaution venait de la connexion secondaire vers la base des
+ * utilisateurs, qui se connectait en tâche de fond sans être attendue. Elle a
+ * été supprimée le 2026-09-10 ; le repli sur `connected` reste utile pour toute
+ * reconnexion, et le retirer rouvrirait le même contresens à la première
+ * coupure réseau.
  *
  * On tente donc tout de suite si le client existe déjà, et on repasse sur
  * `connected` sinon. `trackPool` dédoublonne par identité de client : être
@@ -121,49 +124,35 @@ async function connectToGatewayDB() {
   });
 }
 
-async function connectToUsersDB() {
-  const uri = config.dbUris.users;
-  if (!uri) {
-    logger.error('[DB] MONGO_URI_USERS manquant dans la config/env');
-    process.exit(1);
-  }
-  try {
-    /**
-     * Sur quelles données travaille-t-on ? (règle B.6, défaut A1)
-     *
-     * La passerelle ouvre DEUX connexions vers DEUX bases distinctes. Vérifier
-     * la première seulement ne prouve rien sur la seconde : le 2026-09-03, la
-     * base Gateway était annoncée et celle des utilisateurs ne l'était pas.
-     */
-    require("./utils/dbEnvironmentGuard").assertDatabaseEnvironment(uri, {
-      label: "base Users",
-      logger,
-    });
-
-    /**
-     * Pas de `await` ici : `createConnection` rend la connexion immédiatement et
-     * se connecte en tâche de fond. Les mêmes options s'appliquent — sans elles,
-     * cette seconde connexion gardait les trente secondes de défaut alors que la
-     * première venait d'en être débarrassée.
-     */
-    usersConnection = mongoose.createConnection(uri, buildMongooseOpts());
-    attachPoolMetrics(usersConnection, 'users');
-    logger.info('[DB] Connexion MongoDB Users établie');
-  } catch (err) {
-    logger.error('[DB] Erreur de connexion MongoDB Users :', err);
-    process.exit(1);
-  }
-  usersConnection.on('disconnected', () => {
-    logger.warn('[DB] Déconnecté de MongoDB Users');
-  });
-  usersConnection.on('reconnected', () => {
-    logger.info('[DB] Reconnecté à MongoDB Users');
-  });
-}
+/**
+ * ============================================================================
+ * ⚠️ `connectToUsersDB` A ÉTÉ SUPPRIMÉE — 2026-09-10
+ * ============================================================================
+ *
+ * La passerelle ouvrait une seconde connexion, vers la base des utilisateurs, à
+ * chaque démarrage. Après la fusion de l'AML dans Tx-Core, **plus aucun code du
+ * bord ne la lisait** : il restait un pool maintenu pour rien, les identifiants
+ * de la base des utilisateurs dans l'environnement de la surface la plus
+ * exposée d'Internet, et un `/health` qui en annonçait l'état comme s'il
+ * importait.
+ *
+ * Ce que le bord fait de l'identité désormais : il VÉRIFIE une signature de
+ * jeton et lit ses revendications (`middlewares/auth.js`). Il ne charge pas
+ * l'utilisateur. Le service qui a besoin du profil va le chercher lui-même —
+ * `requireTransactionEligibility` dans Tx-Core le rechargeait déjà, si bien que
+ * la lecture du bord était REFAITE quelques millisecondes plus tard, sur le
+ * même document, dans la même requête.
+ *
+ * ⚠️ `MONGO_URI_USERS` peut être retirée de l'environnement de ce service.
+ * C'est une action d'exploitation ; la laisser en place n'a d'autre effet que
+ * de conserver un secret inutile.
+ *
+ * Verrouillé par `test/security/gatewayIsStateless.test.js`. Ne pas rouvrir
+ * cette connexion : le besoin qui la justifierait est le signe qu'un domaine
+ * est en train de revenir au bord.
+ */
 
 module.exports = {
   connectToGatewayDB,
-  connectToUsersDB,
-  getUsersConnection: () => usersConnection,
   buildMongooseOpts,
 };

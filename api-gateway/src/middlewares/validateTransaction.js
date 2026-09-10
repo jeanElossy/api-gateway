@@ -4,8 +4,6 @@
 const Joi = require("joi");
 const logger = require("../logger");
 const allowedFlows = require("../tools/allowedFlows");
-const { getSingleTxLimit, getDailyLimit } = require("../tools/amlLimits");
-const { getUserTransactionsStats } = require("../services/aml");
 
 /**
  * --------------------------------------------------------------------------
@@ -461,48 +459,40 @@ function validateTransaction(action) {
     }
 
     /**
-     * Plafond par envoi — SANS REPLI.
+     * ⚠️ LE PLAFOND DE CONFORMITÉ N'EST PLUS APPLIQUÉ ICI — 2026-09-10.
      *
-     * Ce bloc valait `maxLimit = 10000000` par défaut, et le `catch {}` était
-     * vide : si la résolution du plafond échouait, pour quelque raison que ce
-     * soit, le schéma Joi acceptait jusqu'à dix millions sans que rien ne
-     * l'écrive nulle part. Un plafond de conformité ne se remplace pas par une
-     * constante généreuse quand on ne sait pas le calculer (règle B.2), et une
-     * erreur ne se tait pas (règle B.1).
+     * `getSingleTxLimit` était tissé dans le schéma Joi (`amount.max(maxLimit)`),
+     * ce qui faisait rendre au bord une erreur 400 de VALIDATION là où il
+     * s'agissait d'une décision de CONFORMITÉ. Les deux ne se traitent pas
+     * pareil : la première dit « votre requête est malformée », la seconde
+     * « votre opération dépasse un plafond réglementaire ». Le mobile ne
+     * pouvait pas les distinguer.
+     *
+     * Le plafond est appliqué par l'AML unique de Tx-Core
+     * (`api-paynoval/src/middleware/aml.js:994`), qui rend un 403
+     * `AML_SINGLE_LIMIT` portant le plafond applicable.
+     *
+     * ── Ce qui reste ici, et pourquoi ce n'est PAS un plafond ───────────────
+     *
+     * Une borne NUMÉRIQUE, pas réglementaire. Sans elle, un client pourrait
+     * envoyer `amount: 1e300` : le nombre traverserait la validation, la
+     * sérialisation JSON et le relais avant que quiconque le regarde, et les
+     * calculs intermédiaires perdraient toute précision bien avant d'atteindre
+     * le contrôle. Borner la magnitude est de la validation de forme — le
+     * travail du bord ; décider d'un montant maximal autorisé ne l'est pas.
      */
-    let maxLimit = null;
+    const BORNE_NUMERIQUE = 1e15;
     let currencyForMsg = "F CFA";
 
     if (action === "initiate") {
-      const cur = resolveCurrencyForLimits(body);
-      currencyForMsg = cur || currencyForMsg;
-
-      try {
-        maxLimit = getSingleTxLimit(providerSelected, cur || currencyForMsg);
-      } catch (e) {
-        logger.warn("[validateTransaction] Plafond par envoi indéterminable", {
-          providerSelected,
-          currency: cur || currencyForMsg,
-          code: e?.code || "UNKNOWN",
-        });
-
-        return res.status(403).json({
-          success: false,
-          error:
-            "Ce moyen de paiement n'est pas disponible pour cette devise.",
-          code: e?.code || "AML_LIMIT_UNAVAILABLE",
-          details: [],
-        });
-      }
+      currencyForMsg = resolveCurrencyForLimits(body) || currencyForMsg;
     }
 
     let schema;
 
     if (action === "initiate" && initiateSchemas[providerSelected]) {
-      // `maxLimit` est garanti non nul ici : le bloc ci-dessus a rendu la main
-      // en 403 si le plafond n'a pas pu être déterminé.
       schema = initiateSchemas[providerSelected].keys({
-        amount: Joi.number().min(1).max(maxLimit).required(),
+        amount: Joi.number().min(1).less(BORNE_NUMERIQUE).required(),
         action: Joi.string().valid("send", "deposit", "withdraw").optional(),
       });
     } else if (action === "confirm") {
@@ -660,105 +650,29 @@ function validateTransaction(action) {
 
       req.routedProvider = req.providerSelected;
 
-      (async () => {
-        try {
-          const userId = req.user && (req.user._id || req.user.id);
-
-          if (userId) {
-            const cur = resolveCurrencyForLimits(req.body);
-
-            /**
-             * La résolution du plafond est DÉTERMINISTE : elle ne dépend que du
-             * couple rail/devise, jamais de la base. Si elle échoue, c'est que
-             * le couple n'est pas couvert par la politique — on refuse, on ne
-             * laisse pas passer. Le `catch` général plus bas, lui, ne couvre
-             * que l'indisponibilité des statistiques.
-             */
-            let dailyLimit;
-
-            try {
-              dailyLimit = getDailyLimit(req.providerSelected, cur);
-            } catch (e) {
-              logger.warn("[validateTransaction] Plafond journalier indéterminable", {
-                providerSelected: req.providerSelected,
-                currency: cur,
-                code: e?.code || "UNKNOWN",
-              });
-
-              if (res.headersSent) return;
-
-              return res.status(403).json({
-                success: false,
-                error: "Ce moyen de paiement n'est pas disponible pour cette devise.",
-                code: e?.code || "AML_LIMIT_UNAVAILABLE",
-                details: [],
-              });
-            }
-
-            const stats = await getUserTransactionsStats(
-              userId,
-              req.providerSelected,
-              cur
-            );
-
-            const inc =
-              Number(req.body.amountSource ?? req.body.amount ?? 0) || 0;
-            const already = Number(stats?.dailyTotal || 0) || 0;
-            const dailyTotal = already + inc;
-
-            if (dailyTotal > dailyLimit) {
-              logger.warn("[validateTransaction] Plafond journalier dépassé", {
-                userId,
-                providerSelected: req.providerSelected,
-                currency: cur,
-                tryAmount: inc,
-                already,
-                max: dailyLimit,
-              });
-
-              return res.status(403).json({
-                success: false,
-                error: "Dépasse le plafond journalier autorisé",
-                details: [
-                  `Le plafond journalier autorisé est ${dailyLimit.toLocaleString(
-                    "fr-FR"
-                  )} ${cur}.`,
-                ],
-              });
-            }
-          }
-
-          if (res.headersSent) return;
-          next();
-        } catch (e) {
-          /**
-           * On n'arrive ici que si la LECTURE DES STATISTIQUES a échoué — la
-           * résolution du plafond, elle, a déjà refusé plus haut si le couple
-           * rail/devise n'était pas couvert.
-           *
-           * ⚠️ REPLI OUVERT ASSUMÉ, ET SIGNALÉ. Une panne de base laisse passer
-           * la transaction sans contrôle de cumul journalier. C'est un choix de
-           * DISPONIBILITÉ : refuser tout paiement dès le premier hoquet Mongo
-           * est l'autre extrême. Le compromis n'a jamais été tranché
-           * explicitement — il est ici nommé pour qu'il puisse l'être, plutôt
-           * que de rester une conséquence involontaire d'un `catch`.
-           */
-          logger.error(
-            "[validateTransaction] Cumul journalier NON VÉRIFIÉ — statistiques " +
-              "indisponibles, la transaction est laissée passer",
-            {
-              error: e?.message,
-              providerSelected: req.providerSelected,
-              userId: req.user && (req.user._id || req.user.id),
-            }
-          );
-
-          if (res.headersSent) return;
-          next();
-        }
-      })();
-
-      return;
+      /**
+       * ⚠️ LE CUMUL JOURNALIER N'EST PLUS VÉRIFIÉ ICI — 2026-09-10.
+       *
+       * Ce bloc était le TROISIÈME exemplaire des plafonds de conformité :
+       * `middlewares/aml.js` du bord les appliquait déjà, et
+       * `api-paynoval/src/middleware/aml.js` les applique toujours
+       * (`aml.js:994` pour l'unitaire, `:1030` pour le journalier). Trois
+       * implémentations d'une même règle ne restent pas d'accord.
+       *
+       * Il portait en outre deux défauts que le déplacement referme :
+       *
+       *   · il agrégeait la collection `Transaction`, qui appartient à Tx-Core,
+       *     depuis la passerelle — la même classe de faute que R-06 sur les
+       *     portefeuilles ;
+       *   · son `catch` LAISSAIT PASSER la transaction quand la lecture des
+       *     statistiques échouait. Le commentaire le nommait honnêtement comme
+       *     un repli ouvert assumé, mais c'en était un sur le chemin de
+       *     l'argent (règle B.2). Tx-Core, lui, échoue en fermeture.
+       *
+       * Le refus arrive maintenant de Tx-Core en 403 `AML_DAILY_LIMIT`, avec le
+       * plafond applicable — plus informatif que le 403 générique rendu ici.
+       */
+      return next();
     }
 
     if (action === "confirm") {
