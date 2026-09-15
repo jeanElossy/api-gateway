@@ -80,6 +80,9 @@ const schema = Joi.object({
   // Rate limiting optionnel
   PUBLIC_RL_WINDOW_MS: Joi.number().integer().min(1000).optional(),
   PUBLIC_RL_MAX: Joi.number().integer().min(1).optional(),
+  // Lecture publique d'une cagnotte par code (page invité, sans signature).
+  PUBLIC_CAGNOTTE_RL_WINDOW_MS: Joi.number().integer().min(1000).optional(),
+  PUBLIC_CAGNOTTE_RL_MAX: Joi.number().integer().min(1).optional(),
   ADMIN_RL_WINDOW_MS: Joi.number().integer().min(1000).optional(),
   ADMIN_RL_MAX: Joi.number().integer().min(1).optional(),
 
@@ -367,6 +370,11 @@ module.exports = {
     public: {
       windowMs: Number(env.PUBLIC_RL_WINDOW_MS || env.RATE_LIMIT_WINDOW_MS),
       max: Number(env.PUBLIC_RL_MAX || Math.max(Number(env.RATE_LIMIT_MAX), 120)),
+    },
+    /** Défauts appliqués par `publicCagnotteLimits` : 30 lectures / minute / adresse. */
+    publicCagnotte: {
+      windowMs: Number(env.PUBLIC_CAGNOTTE_RL_WINDOW_MS || 60000),
+      max: Number(env.PUBLIC_CAGNOTTE_RL_MAX || 30),
     },
     admin: {
       windowMs: Number(env.ADMIN_RL_WINDOW_MS || env.RATE_LIMIT_WINDOW_MS),

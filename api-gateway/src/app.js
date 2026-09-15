@@ -117,6 +117,10 @@ const phoneVerificationRoutes = require("../routes/phoneVerificationRoutes");
 const fxRulesRoutes = require("../routes/fxRules");
 const publicRoutes = require("../routes/publicRoutes");
 const requirePublicSignature = require("./middlewares/requirePublicSignature");
+const {
+  makePublicCagnotteRead,
+  publicCagnotteLimits,
+} = require("./middlewares/publicCagnotteRead");
 const pricingRulesRoutes = require("../routes/pricingRulesRoutes");
 const pricingChangeRequestsRoutes = require("../routes/pricingChangeRequestsRoutes");
 const requireNotRestricted = require("./middlewares/requireNotRestricted");
@@ -1236,6 +1240,34 @@ app.use((req, res, next) => {
 
   return authMiddleware(req, res, next);
 });
+
+/* -------------------------------------------------------------------------- */
+/* Public cagnotte reads — unsigned, exact paths (see publicCagnotteRead.js)  */
+/* -------------------------------------------------------------------------- */
+
+const publicCagnotteLimiter = rateLimit({
+  name: "gw-public-cagnotte",
+  ...publicCagnotteLimits(config.rateLimit?.publicCagnotte),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    setCorsHeaders(req, res);
+    res.status(429).json({
+      success: false,
+      code: "RATE_LIMITED",
+      message: "Trop de requêtes. Réessaie dans un instant.",
+    });
+  },
+});
+
+app.use(
+  "/api/v1/public",
+  makePublicCagnotteRead({
+    proxy: principalProxy,
+    limiter: publicCagnotteLimiter,
+    setCors: setCorsHeaders,
+  })
+);
 
 /* -------------------------------------------------------------------------- */
 /* Public signed routes                                                       */
