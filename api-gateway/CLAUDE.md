@@ -19,7 +19,9 @@ CommonJS, JavaScript uniquement, pas d'étape de build, aucun linter configuré.
 
 ```bash
 npm start                  # node src/server.js
-npm test                   # node --test "test/**/*.test.js" — 211 tests, verts (mesuré le 2026-09-02)
+npm test                   # node --test "test/**/*.test.js" — 235 tests, verts (mesuré le 2026-09-15)
+# Page invité : GET /api/v1/public/cagnottes/by-code/:code (+ /quote) est servie SANS signature HMAC,
+# chemin exact, limiteur `gw-public-cagnotte` (src/middlewares/publicCagnotteRead.js, 2026-09-15).
 node --test test/pricing/diff.test.js   # un seul fichier de test
 node generate-secrets.js   # régénère JWT_SECRET / INTERNAL_TOKEN et réécrit .env
 ```
