@@ -1448,6 +1448,8 @@ app.use(
       /^\/$/,
       /^\/[^/]+\/join$/,
       /^\/[^/]+\/participations\/paynoval$/,
+      // Le devis prépare un débit : même refus qu'à la confirmation (2026-09-10).
+      /^\/[^/]+\/participations\/quote$/,
     ],
   })
 );

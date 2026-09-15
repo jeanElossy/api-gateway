@@ -186,6 +186,136 @@ function cleIdempotence(req) {
   return "";
 }
 
+/**
+ * ============================================================================
+ * ÉLIGIBILITÉ DE LA CAGNOTTE — VÉRIFIÉE AVANT DE PRÉLEVER (2026-09-10)
+ * ============================================================================
+ *
+ * Ce chemin encaissait sans rien savoir de la cagnotte : close, en pause,
+ * expirée, privée ou déjà à son objectif, elle recevait quand même un
+ * prélèvement. Le rappel prestataire arrivait ensuite sur une cagnotte qui ne
+ * devait plus rien recevoir — et la seule issue honnête, créditer quand même,
+ * transformait un refus à 0 € en crédit tardif à rapprocher.
+ *
+ * On demande donc au backend principal, qui possède la cagnotte, AVANT de
+ * relayer à Tx-Core. Le bord ne décide pas : il relaie la décision du service
+ * propriétaire (les dépendances descendent). En cas d'indisponibilité, on
+ * refuse (règle B.2) — un encaissement vers une cagnotte non vérifiée est pire
+ * qu'un encaissement différé.
+ */
+const REFUS_ELIGIBILITE = Object.freeze({
+  CAGNOTTE_NOT_ACTIVE: "Cette cagnotte ne reçoit pas de participation pour le moment.",
+  CAGNOTTE_NOT_STARTED: "Cette cagnotte n'est pas encore ouverte aux participations.",
+  PRIVATE: "Cette cagnotte n'accepte pas de paiement par lien public.",
+  NO_GUEST_RAIL: "Aucun moyen de paiement n'est ouvert pour cette cagnotte.",
+  GOAL_EXCEEDED: "Ce montant dépasse ce qu'il reste à collecter.",
+  GOAL_REACHED: "L'objectif de cette cagnotte est déjà atteint.",
+  CAGNOTTE_MISMATCH: "Le code et l'identifiant de cagnotte ne correspondent pas.",
+  CURRENCY_NOT_SUPPORTED: "Devise de paiement non acceptée.",
+  VAULT_MISSING: "Cette cagnotte ne peut pas recevoir de paiement pour le moment.",
+});
+
+/** PURE — traduit la réponse du backend en décision de relais. */
+function interpreterEligibilite(reponse) {
+  if (!reponse || reponse.status === 404) {
+    return { ok: false, status: 404, code: "CAGNOTTE_NOT_FOUND", error: "Cagnotte introuvable." };
+  }
+
+  if (reponse.status !== 200 || reponse.data?.success !== true) {
+    return {
+      ok: false,
+      status: 503,
+      code: "GUEST_ELIGIBILITY_UNAVAILABLE",
+      error: "Vérification de la cagnotte indisponible : aucun prélèvement n'a été lancé.",
+    };
+  }
+
+  const d = reponse.data?.data || {};
+
+  if (d.eligible !== true) {
+    const raison = String(d.code || "CAGNOTTE_NOT_ACTIVE");
+    const code = ["GOAL_EXCEEDED", "GOAL_REACHED", "CAGNOTTE_NOT_ACTIVE", "CAGNOTTE_NOT_STARTED"].includes(raison)
+      ? raison
+      : "GUEST_PAYMENT_DISABLED";
+
+    return {
+      ok: false,
+      status: 409,
+      code,
+      error: REFUS_ELIGIBILITE[raison] || "Cette cagnotte n'accepte pas ce paiement.",
+      details: {
+        reason: raison,
+        ...(d.remaining != null ? { remaining: d.remaining } : {}),
+        ...(d.currency ? { currency: d.currency } : {}),
+      },
+    };
+  }
+
+  if (!d.cagnotteId) {
+    return {
+      ok: false,
+      status: 503,
+      code: "GUEST_ELIGIBILITY_UNAVAILABLE",
+      error: "Réponse de vérification incomplète : aucun prélèvement n'a été lancé.",
+    };
+  }
+
+  return { ok: true, cagnotteId: String(d.cagnotteId), cagnotteCurrency: d.cagnotteCurrency || null };
+}
+
+function basePrincipal() {
+  return String(process.env.PRINCIPAL_URL || process.env.PRINCIPAL_API_BASE_URL || "").replace(/\/+$/, "");
+}
+
+function jetonPrincipal() {
+  return String(process.env.PRINCIPAL_INTERNAL_TOKEN || process.env.INTERNAL_TOKEN || "").trim();
+}
+
+async function verifierEligibiliteInvite({ corps, reqId, http = axios }) {
+  const code = String(corps.cagnotteCode || "").trim();
+
+  if (!code) {
+    return {
+      ok: false,
+      status: 400,
+      code: "CAGNOTTE_CODE_REQUIRED",
+      error: "Code de cagnotte requis : un paiement public vise toujours une cagnotte identifiée.",
+    };
+  }
+
+  const base = basePrincipal();
+  const jeton = jetonPrincipal();
+
+  if (!base || !jeton) {
+    logger.error("[PAY] backend principal non configuré — éligibilité invérifiable", {
+      urlPresente: Boolean(base),
+      jetonPresent: Boolean(jeton),
+      reqId,
+    });
+    return interpreterEligibilite({ status: 503 });
+  }
+
+  try {
+    const reponse = await http.get(`${base}/api/v1/internal/cagnottes/guest-eligibility`, {
+      params: {
+        code,
+        ...(corps.cagnotteId ? { cagnotteId: String(corps.cagnotteId) } : {}),
+        ...(Number(corps.amount) > 0 ? { amount: Number(corps.amount) } : {}),
+        ...(corps.currency ? { currency: String(corps.currency).toUpperCase() } : {}),
+      },
+      timeout: 10_000,
+      validateStatus: () => true,
+      headers: { "x-internal-token": jeton, "x-request-id": reqId },
+    });
+    return interpreterEligibilite(reponse);
+  } catch (err) {
+    logger.error("[PAY] vérification d'éligibilité en échec", { reqId, message: err?.message });
+    return interpreterEligibilite({ status: 503 });
+  }
+}
+
+exports.interpreterEligibilite = interpreterEligibilite;
+
 exports.handlePayment = async (req, res) => {
   const corps = req.body || {};
   const reqId = identifiantRequete(req);
@@ -284,6 +414,20 @@ exports.handlePayment = async (req, res) => {
     });
   }
 
+  /* ── 4 bis. ÉLIGIBILITÉ DE LA CAGNOTTE, AVANT TOUT PRÉLÈVEMENT ─────────── */
+  const eligibilite = await verifierEligibiliteInvite({ corps, reqId });
+
+  if (!eligibilite.ok) {
+    logger.warn("[PAY] paiement invité refusé par le backend principal", { code: eligibilite.code, reqId });
+
+    return res.status(eligibilite.status).json({
+      success: false,
+      code: eligibilite.code,
+      error: eligibilite.error,
+      ...(eligibilite.details ? { details: eligibilite.details } : {}),
+    });
+  }
+
   /* ── 5. RELAIS ────────────────────────────────────────────────────────── */
   const charge = {
     rail: route.rail,
@@ -292,7 +436,8 @@ exports.handlePayment = async (req, res) => {
     amount: Number(corps.amount),
     currency: String(corps.currency || corps.senderCurrencySymbol || "").toUpperCase(),
     target: {
-      cagnotteId: String(corps.cagnotteId || ""),
+      // L'identifiant VÉRIFIÉ par le backend, pas celui annoncé par le client.
+      cagnotteId: eligibilite.cagnotteId,
       cagnotteCode: String(corps.cagnotteCode || ""),
     },
     payer: {
