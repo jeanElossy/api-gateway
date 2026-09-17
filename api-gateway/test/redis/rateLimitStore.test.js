@@ -82,28 +82,46 @@ test("avec un client, chaque limiteur reçoit son propre préfixe", () => {
   assert.equal(built[1].prefix, "rl:gw-auth-login:");
 });
 
-test("les neuf limiteurs de la passerelle ont des compartiments distincts", () => {
+test("chaque limiteur de la passerelle a un compartiment distinct", () => {
   /**
    * `globalIpLimiter` et `userLimiter` produisent tous deux une clé
    * `ip:<adresse>` pour un appelant anonyme. Sans préfixe distinct, ils
    * partageraient le même compteur dans Redis : atteindre la limite globale
    * fermerait aussi la limite par compte, et inversement.
+   *
+   * La liste était tenue À LA MAIN (« les neuf limiteurs ») : un dixième ajouté
+   * dans `app.js` n'y figurait pas, et le contrôle restait vert sans l'avoir
+   * vu. Elle se dérive désormais des déclarations réelles.
    */
+  const fs = require("node:fs");
+  const path = require("node:path");
+
+  const lister = (dir) =>
+    fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) return lister(p);
+      return e.name.endsWith(".js") ? [p] : [];
+    });
+
+  const sources = lister(path.join(__dirname, "..", "..", "src"))
+    .map((f) => fs.readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, ""))
+    .join("\n");
+
+  const declares = [...sources.matchAll(/name:\s*["'](gw-[a-z0-9-]+)["']/g)].map((m) => m[1]);
+
+  for (const attendu of ["gw-global-ip", "gw-auth-login", "gw-public", "gw-pricing-quote", "gw-exchange-rate"]) {
+    assert.ok(declares.includes(attendu), `limiteur « ${attendu} » introuvable dans src/`);
+  }
+
+  assert.equal(new Set(declares).size, declares.length, "deux limiteurs portent le même nom");
+
   const { FakeRedisStore, built } = fakeStoreClass();
   const factory = createStoreFactory({ client: fakeClient, RedisStore: FakeRedisStore });
 
-  const names = [
-    "gw-global-ip", "gw-auth-login", "gw-users-me", "gw-announcements",
-    "gw-admin-transactions", "gw-admin-adjustments", "gw-user-global",
-    "gw-public", "gw-pricing-quote",
-  ];
-
-  for (const name of names) factory.makeStore({ name });
+  for (const name of declares) factory.makeStore({ name });
 
   const prefixes = built.map((b) => b.prefix);
-
-  assert.equal(prefixes.length, 9);
-  assert.equal(new Set(prefixes).size, 9);
+  assert.equal(new Set(prefixes).size, declares.length);
 });
 
 test("l'enveloppeur garde la signature d'express-rate-limit", () => {

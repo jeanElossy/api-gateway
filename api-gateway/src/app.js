@@ -1416,6 +1416,31 @@ app.use("/api/v1/fees", feesRoutes);
  * transmettre.
  */
 app.use("/api/v1/phone-verification", phoneVerificationRoutes);
+/**
+ * `/api/v1/exchange-rates/rate` est PUBLIC (page des taux du site) et n'avait
+ * que le limiteur global par IP. Chaque paire inconnue déclenchait un appel au
+ * fournisseur de change côté Tx-Core : faire défiler les paires épuisait son
+ * quota, et le refroidissement qui s'ensuit fait échouer les DEVIS des vraies
+ * transactions. Tx-Core met désormais la table en cache (un appel par période) ;
+ * ce limiteur dédié borne en plus le volume au bord (2026-09-16).
+ */
+const exchangeRateLimiter = rateLimit({
+  name: "gw-exchange-rate",
+  windowMs: 60 * 1000,
+  max: Number(process.env.EXCHANGE_RATE_RATE_LIMIT || 120),
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  handler: (req, res) => {
+    setCorsHeaders(req, res);
+    res.status(429).json({
+      success: false,
+      message: "Trop de consultations de taux. Réessayez dans une minute.",
+    });
+  },
+});
+
+app.use("/api/v1/exchange-rates", exchangeRateLimiter);
 app.use("/api/v1/exchange-rates", exchangeRateRoutes);
 
 /**
