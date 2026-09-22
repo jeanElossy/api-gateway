@@ -843,6 +843,20 @@ const PRINCIPAL_PREFIXES = [
 
   "/api/v1/fx",
   "/api/v1/analytics",
+
+  /**
+   * Supervision. Deux surfaces sous ce préfixe, et elles n'ont pas le même
+   * régime :
+   *
+   *   · `/api/v1/monitoring/client-events` — INGESTION, ouverte (voir
+   *     `OPEN_EXACT` plus bas). Appelée par un téléphone ou un navigateur qui
+   *     n'a parfois aucun jeton à présenter, parce que la panne s'est produite
+   *     AVANT la connexion ;
+   *   · tout le reste — LECTURE, réservée au staff. Elle vit sous
+   *     `/api/v1/admin/monitoring`, donc sous le préfixe `admin`, et hérite de
+   *     ses gardes. Rien de lisible n'est exposé ici.
+   */
+  "/api/v1/monitoring",
 ];
 
 function makePrincipalProxy() {
@@ -1136,6 +1150,28 @@ const OPEN_EXACT = [
    * (`ANALYTICS_REQUIRE_KEY`) sont appliquées côté backend principal.
    */
   "/api/v1/analytics/collect",
+
+  /**
+   * Ingestion des événements de supervision du mobile et du back-office.
+   *
+   * ⚠️ OUVERTE DÉLIBÉRÉMENT, et la raison est la même que pour la collecte
+   * analytique : l'appelant n'a parfois aucun jeton à présenter. Mieux — les
+   * pannes les plus graves se produisent AVANT la connexion : un écran de
+   * connexion qui plante, une inscription qui échoue, une application qui ne
+   * démarre pas. Exiger un jeton reviendrait à ne jamais voir précisément
+   * ces pannes-là, celles qui empêchent d'obtenir un jeton.
+   *
+   * ⚠️ EN EXACT, PAS EN PRÉFIXE. C'est la leçon tirée juste au-dessus pour
+   * `/api/v1/analytics` : ouvrir le préfixe entier aurait rendu publiques les
+   * futures routes de LECTURE qu'on ajouterait sous `/monitoring`. Seule
+   * l'écriture est ouverte, et elle le reste même si le sous-arbre grandit.
+   *
+   * Elle n'est pas sans défense : limitation de débit partagée (Redis), liste
+   * blanche d'entrée stricte, corps borné à 50 événements et écriture non
+   * bloquante — tout cela côté backend principal
+   * (`routes/monitoringClientRoutes.js`).
+   */
+  "/api/v1/monitoring/client-events",
 
   /**
    * Formulaire de contact du site public. Envoyé par un visiteur anonyme, qui
@@ -1587,6 +1623,32 @@ app.use((req, res) =>
 /* -------------------------------------------------------------------------- */
 /* Error handler                                                              */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * ═══ SENTRY — APRÈS LES ROUTES, AVANT LE GESTIONNAIRE CI-DESSOUS ═════════
+ *
+ * ⚠️ MONTÉ ICI ET PAS DANS `server.js`, ET CE N'EST PAS UN CHOIX DE STYLE.
+ *
+ * `server.js` fait `require('./app')`, qui exécute ce fichier ENTIÈREMENT —
+ * gestionnaire d'erreurs compris. Un montage depuis `server.js` arriverait donc
+ * APRÈS lui, et ce gestionnaire rend une réponse puis clôt la requête : Sentry
+ * ne verrait jamais aucune erreur.
+ *
+ * L'initialisation, elle, reste dans `server.js`, AVANT ce `require` — c'est ce
+ * que la v8+ du SDK exige pour son instrumentation automatique. Les deux moitiés
+ * ne peuvent pas vivre au même endroit, et c'est la raison de cette séparation.
+ *
+ * `setupExpressErrorHandler` rend `true` seulement s'il a réellement été monté :
+ * on le journalise plutôt que de le supposer. C'est exactement ce qui manquait
+ * au code de Tx Core, qui ne montait rien et n'en disait rien (défaut D1).
+ */
+{
+  // eslint-disable-next-line global-require
+  const { setupExpressErrorHandler } = require("./services/errorTracking");
+  if (setupExpressErrorHandler(app)) {
+    console.log("[errorTracking] gestionnaire d'erreurs Express monté (gateway)");
+  }
+}
 
 app.use((err, req, res, _next) => {
   const status = err.status || 500;

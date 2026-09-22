@@ -1,6 +1,45 @@
 // src/server.js
 
 require('dotenv').config();
+
+/**
+ * ═══ ENVIRONNEMENT — ANNONCÉ AVANT LE CHARGEMENT DE L'APPLICATION ═════════
+ *
+ * Chargé AVANT `./app`, qui monte les middlewares et peut déjà journaliser :
+ * une ligne écrite avant que l'environnement ne soit résolu serait une ligne
+ * sans origine. `services/appEnv.js` n'a aucune dépendance, ce qui est ce qui
+ * lui permet d'être ici.
+ *
+ * ⚠️ Ce module est répliqué OCTET POUR OCTET dans les trois services ;
+ * `api-paynoval/test/appEnv.test.js` échoue à la divergence.
+ */
+const { startupReport: envStartupReport } = require('./services/appEnv');
+
+{
+  const rapport = envStartupReport();
+  console[rapport.level === 'warn' ? 'warn' : 'log'](rapport.message);
+}
+
+/**
+ * ═══ SUIVI D'ERREURS — AVANT `./app` ════════════════════════════════════
+ *
+ * ⚠️ `./app` monte Express et tous les middlewares. Depuis la v8 du SDK,
+ * l'instrumentation automatique enrobe les modules AU CHARGEMENT : initialiser
+ * après ce `require` revient à ne pas instrumenter. Déplacer ce bloc plus bas
+ * rouvre le défaut sans produire la moindre erreur — c'est ce qui l'avait rendu
+ * invisible dans Tx Core (défaut D1).
+ *
+ * ⚠️ `SENTRY_DSN` était DÉCLARÉE dans `config/index.js` depuis longtemps et
+ * AUCUN code ne la lisait : configuration morte, qui faisait croire à une
+ * capacité inexistante. Elle est enfin branchée.
+ */
+const {
+  initErrorTracking,
+  setupExpressErrorHandler: setupSentryExpressErrorHandler,
+} = require('./services/errorTracking');
+
+initErrorTracking();
+
 const app = require('./app');
 const config = require('./config');
 const logger = require('./logger');
