@@ -772,6 +772,19 @@ app.get("/status", async (_req, res) => {
 const PRINCIPAL_BASE =
   config.principalUrl || process.env.PRINCIPAL_API_BASE_URL || "";
 
+/**
+ * Chemins du backend principal qui attendent le jeton interne du gateway.
+ * Liste FERMÉE : voir l'explication au point d'injection (`onProxyReq`).
+ */
+const PRINCIPAL_INTERNAL_TOKEN_PREFIXES = ["/api/v1/fx"];
+
+function needsPrincipalInternalToken(req) {
+  const path = String(req?.originalUrl || req?.url || "").split("?")[0];
+  return PRINCIPAL_INTERNAL_TOKEN_PREFIXES.some(
+    (p) => path === p || path.startsWith(`${p}/`)
+  );
+}
+
 const PRINCIPAL_PREFIXES = [
   "/api/v1/auth",
   "/api/v1/users",
@@ -915,7 +928,26 @@ function makePrincipalProxy() {
         } catch {}
       }
 
-      if (config.principalInternalToken) {
+      /**
+       * ⚠️ LE JETON INTERNE N'EST PLUS AJOUTÉ À TOUT (2026-09-17).
+       *
+       * Il était posé sur CHAQUE requête publique relayée. Le backend principal
+       * traite `x-internal-token` comme une authentification de SERVICE : toute
+       * route du principal protégée par ce seul jeton et située sous un préfixe
+       * relayé devenait donc atteignable par n'importe quel appelant du
+       * gateway — le gateway prêtait son identité. C'est le « député confus »,
+       * et il ne demande aucune faute du principal pour se produire : il suffit
+       * qu'une route interne soit ajoutée sous un préfixe déjà relayé.
+       *
+       * Une seule famille de routes en dépend réellement aujourd'hui :
+       * `/api/v1/fx` (`routes/fxRoutes.js`, `internalProtect`). Le jeton n'est
+       * donc plus posé que là. Pour signer une route « service à service » de
+       * plus, l'ajouter ICI, explicitement — jamais élargir au tout-venant.
+       *
+       * `x-forwarded-service`, lui, reste sur toutes les requêtes : il DIT d'où
+       * vient l'appel, il n'autorise rien.
+       */
+      if (config.principalInternalToken && needsPrincipalInternalToken(req)) {
         try {
           proxyReq.setHeader(
             "x-internal-token",
@@ -1002,13 +1034,11 @@ function makePrincipalSocketProxy() {
         const requestId = req.headers["x-request-id"];
         if (requestId) proxyReq.setHeader("X-Request-Id", requestId);
 
-        if (config.principalInternalToken) {
-          proxyReq.setHeader(
-            "x-internal-token",
-            String(config.principalInternalToken)
-          );
-        }
-
+        /**
+         * Pas de jeton interne sur la poignée de main WebSocket : le socket du
+         * principal s'authentifie par JWT (`socket.js`) et ne lit jamais cet
+         * en-tête. Le poser ne servait à rien et étendait sa surface.
+         */
         proxyReq.setHeader("x-forwarded-service", "api-gateway");
       } catch {}
     },
@@ -1122,6 +1152,26 @@ const OPEN_EXACT = [
    * qui déclenche deux e-mails à chaque appel.
    */
   "/api/v1/contact",
+
+  /**
+   * Barème de parrainage, pour la page publique du site.
+   *
+   * Cette page affichait le barème EN DUR dans ses fichiers de langue. Deux
+   * copies d'un engagement financier finissent toujours par diverger : elle
+   * promettait la région du parrain quand le moteur applique celle du filleul,
+   * annonçait un parrainage « illimité » face à un plafond de 20 par an, et
+   * taisait le minimum par transaction comme la liste fermée de pays. Un
+   * visiteur lisait un contrat que le système n'applique pas.
+   *
+   * La route ne rend que le barème en vigueur — aucune donnée personnelle, rien
+   * qu'un engagement commercial déjà public par nature.
+   *
+   * ⚠️ EN EXACT, et c'est essentiel : `/api/v1/referrals` en préfixe ouvrirait
+   * `/me`, `/history`, `/rewards` et `/bonus`, qui servent les récompenses
+   * NOMINATIVES d'un utilisateur. Ne jamais transformer cette entrée en
+   * préfixe.
+   */
+  "/api/v1/referrals/program",
 ];
 
 const OPEN_PREFIX = [
@@ -1591,3 +1641,11 @@ app.use((err, req, res, _next) => {
 });
 
 module.exports = app;
+
+/**
+ * Exporté pour le test `test/security/principalInternalToken.test.js` : cette
+ * liste décide qui parle au principal AU NOM DU GATEWAY. Elle doit rester
+ * vérifiable sans démarrer le serveur.
+ */
+module.exports.needsPrincipalInternalToken = needsPrincipalInternalToken;
+module.exports.PRINCIPAL_INTERNAL_TOKEN_PREFIXES = PRINCIPAL_INTERNAL_TOKEN_PREFIXES;
