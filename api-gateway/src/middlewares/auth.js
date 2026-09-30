@@ -160,6 +160,7 @@ const authMiddleware = async (req, res, next) => {
       return res.status(401).json({
         success: false,
         error: "Authentification requise",
+        code: "AUTH_REQUIRED",
       });
     }
 
@@ -215,12 +216,14 @@ const authMiddleware = async (req, res, next) => {
         return res.status(401).json({
           success: false,
           error: "Session expirée, reconnectez-vous.",
+          code: "TOKEN_EXPIRED",
         });
       }
       if (err?.name === "JsonWebTokenError") {
         return res.status(401).json({
           success: false,
           error: "Token JWT invalide.",
+          code: "TOKEN_INVALID",
         });
       }
       throw err;
@@ -231,6 +234,7 @@ const authMiddleware = async (req, res, next) => {
       return res.status(401).json({
         success: false,
         error: "Token invalide (id/sub manquant)",
+        code: "TOKEN_INVALID",
       });
     }
 
@@ -313,6 +317,7 @@ const authMiddleware = async (req, res, next) => {
     return res.status(401).json({
       success: false,
       error: "Accès refusé",
+      code: "AUTH_FAILED",
     });
   }
 };

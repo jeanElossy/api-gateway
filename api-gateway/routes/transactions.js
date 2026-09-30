@@ -25,6 +25,7 @@ const crypto = require("crypto");
 
 const validateTransaction = require("../src/middlewares/validateTransaction");
 const requireTransactionEligibility = require("../src/middlewares/requireTransactionEligibility");
+const { refuseRawCardDataOnTransactions } = require("../src/middlewares/refuseRawCardData");
 
 const controller = require("../controllers/transactionsController");
 const { requireRole } = require("../src/middlewares/authz");
@@ -186,6 +187,8 @@ router.get("/:id", controller.getTransaction);
  */
 router.post(
   "/initiate",
+  // No PAN / CVV ever crosses the edge on a transaction (saved-card `cardId` only).
+  refuseRawCardDataOnTransactions,
   validateTransaction("initiate"),
   requireTransactionEligibility,
   controller.initiateTransaction

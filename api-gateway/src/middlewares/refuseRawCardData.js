@@ -109,6 +109,68 @@ function refuseRawCardData(req, res, next) {
   });
 }
 
+/**
+ * Narrower variant for `/transactions/*`.
+ *
+ * A transfer body legitimately carries `securityCode` (the question/answer the
+ * recipient must give), so the full list above would refuse every transfer.
+ * What must never cross the edge on a transaction is the CARD itself: the app
+ * sends a saved-card reference (`cardId`) and its last four digits, never a
+ * PAN or a verification code (PCI-DSS 3.3.1 / 4.2).
+ */
+const CHAMPS_CARTE_TRANSACTION = Object.freeze([
+  "cardnumber",
+  "card_number",
+  "pan",
+  "cvc",
+  "cvv",
+  "cvv2",
+  "track2",
+]);
+
+function trouverChampCarteParmi(valeur, champs, profondeur = 0) {
+  if (!valeur || typeof valeur !== "object" || profondeur > 6) return null;
+
+  if (Array.isArray(valeur)) {
+    for (const element of valeur) {
+      const trouve = trouverChampCarteParmi(element, champs, profondeur + 1);
+      if (trouve) return trouve;
+    }
+    return null;
+  }
+
+  for (const [cle, sousValeur] of Object.entries(valeur)) {
+    if (champs.includes(normaliserNomChamp(cle)) && sousValeur !== "" && sousValeur != null) {
+      return cle;
+    }
+    const trouve = trouverChampCarteParmi(sousValeur, champs, profondeur + 1);
+    if (trouve) return trouve;
+  }
+
+  return null;
+}
+
+function refuseRawCardDataOnTransactions(req, res, next) {
+  const champ = trouverChampCarteParmi(req.body, CHAMPS_CARTE_TRANSACTION);
+
+  if (!champ) return next();
+
+  logger.error("[transactions] donnée de carte en clair refusée", {
+    champ,
+    reqId: req.headers["x-request-id"] || null,
+  });
+
+  return res.status(400).json({
+    success: false,
+    code: "RAW_CARD_DATA_REFUSED",
+    error:
+      "PayNoval n'accepte pas de numéro de carte dans une transaction : " +
+      "utilisez une carte enregistrée (cardId).",
+  });
+}
+
 module.exports = refuseRawCardData;
+module.exports.refuseRawCardDataOnTransactions = refuseRawCardDataOnTransactions;
+module.exports.CHAMPS_CARTE_TRANSACTION = CHAMPS_CARTE_TRANSACTION;
 module.exports.CHAMPS_CARTE_INTERDITS = CHAMPS_CARTE_INTERDITS;
 module.exports.trouverChampCarte = trouverChampCarte;
