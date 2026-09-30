@@ -160,6 +160,21 @@ function pickIdempotencyHeader(req) {
  * variantes avec des valeurs différentes ne rende le comportement dépendant de
  * l'ordre d'itération des clés.
  */
+const SIGNATURE_PATTERN = /^[A-Za-z0-9+/=]{16,1024}$/;
+const TIMESTAMP_PATTERN = /^\d{10,16}$/;
+
+function pickSignatureHeaders(req) {
+  const signature = String(req.headers["x-paynoval-signature"] || "").trim();
+  const timestamp = String(req.headers["x-paynoval-signature-ts"] || "").trim();
+
+  if (!SIGNATURE_PATTERN.test(signature) || !TIMESTAMP_PATTERN.test(timestamp)) return {};
+
+  return {
+    "x-paynoval-signature": signature,
+    "x-paynoval-signature-ts": timestamp,
+  };
+}
+
 function auditForwardHeaders(req) {
   const incomingAuth =
     req.headers.authorization || req.headers.Authorization || null;
@@ -191,6 +206,12 @@ function auditForwardHeaders(req) {
       ? { "x-device-id": req.headers["x-device-id"] }
       : {}),
     ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
+    /**
+     * Device-bound payment signature (server-verified SCA, checked by Tx-Core).
+     * The headers are rebuilt here, not relayed: without these two lines the
+     * signature would be dropped at the edge and every bound device refused.
+     */
+    ...pickSignatureHeaders(req),
   };
 
   if (hasAuth) headers.Authorization = incomingAuth;
@@ -199,6 +220,7 @@ function auditForwardHeaders(req) {
 }
 
 module.exports = {
+  pickSignatureHeaders,
   getUserId,
   safeUUID,
   auditForwardHeaders,
