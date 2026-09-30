@@ -90,6 +90,7 @@ const openapiSpec = YAML.load(path.join(__dirname, "../docs/openapi.yaml"));
 const { authMiddleware } = require("./middlewares/auth");
 const {
   globalIpLimiter,
+  ipCeilingLimiter,
   authLoginLimiter,
   meLimiter,
   announcementsLimiter,
@@ -611,7 +612,11 @@ function logWarnInNonProd(message, meta = {}) {
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return next();
   if (isSocketIoRequest(req)) return next();
-  return globalIpLimiter(req, res, next);
+  // High per-IP ceiling first (NAT-tolerant), then the per-account bucket.
+  return ipCeilingLimiter(req, res, (err) => {
+    if (err) return next(err);
+    return globalIpLimiter(req, res, next);
+  });
 });
 
 /* -------------------------------------------------------------------------- */

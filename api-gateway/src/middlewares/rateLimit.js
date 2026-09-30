@@ -2,6 +2,7 @@
 
 const rateLimit = require("./rateLimiter");
 const logger = require("../logger");
+const { verifiedUserId } = require("../utils/accessToken");
 
 /**
  * 🔎 IP client robuste (Render + Cloudflare + proxies)
@@ -79,13 +80,40 @@ function isNoisyPath(req) {
 /* ------------------------------------------------------------------ */
 /* 1) Bouclier global par IP                                          */
 /* ------------------------------------------------------------------ */
+/**
+ * PER ACCOUNT, NOT PER IP — 2026-09-30.
+ *
+ * The global shield keyed every request on the client IP (1200/min). Mobile
+ * operators put thousands of subscribers behind the same carrier-grade NAT
+ * address: at scale, legitimate users of Orange / MTN / Moov would have been
+ * refused together because of their neighbours. Stripe and Wise limit per
+ * ACCOUNT; Cloudflare-style edges add a much higher per-IP ceiling.
+ *
+ *   - request with a VERIFIED access token → bucket `acct:<userId>`;
+ *   - anonymous request → bucket `ip:<ip>` (unchanged);
+ *   - every request also counts in `ipCeilingLimiter`, a high per-IP ceiling
+ *     that tolerates a whole NAT but stops a single machine's flood.
+ *
+ * The account id comes from a SIGNATURE-VERIFIED token
+ * (`utils/accessToken.verifiedUserId`): keying on an unverified `sub` would let
+ * a client spread its traffic over forged ids.
+ */
+const ACCOUNT_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_ACCOUNT_PER_MIN) || 1200;
+const ANON_IP_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_ANON_IP_PER_MIN) || 1200;
+const IP_CEILING_PER_MIN = Number(process.env.RATE_LIMIT_IP_CEILING_PER_MIN) || 30000;
+
+function rateLimitSubject(req) {
+  const userId = verifiedUserId(req);
+  return userId ? `acct:${userId}` : `ip:${getClientIp(req)}`;
+}
+
 const globalIpLimiter = rateLimit({
   name: "gw-global-ip",
   windowMs: 60 * 1000,
-  max: 1200,
+  limit: (req) => (verifiedUserId(req) ? ACCOUNT_LIMIT_PER_MIN : ANON_IP_LIMIT_PER_MIN),
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => `ip:${getClientIp(req)}`,
+  keyGenerator: rateLimitSubject,
   skip: (req) => {
     if (req.method === "OPTIONS") return true;
     if (isLoginPath(req)) return true;
@@ -93,7 +121,9 @@ const globalIpLimiter = rateLimit({
     return false;
   },
   handler: (req, res, _next, options) => {
-    logger.warn("[RateLimit][global-ip] Limit hit", {
+    logger.warn("[RateLimit][global] Limit hit", {
+      subject: verifiedUserId(req) ? "account" : "ip",
+      userId: verifiedUserId(req) || null,
       ip: getClientIp(req),
       path: req.originalUrl,
       method: req.method,
@@ -103,7 +133,34 @@ const globalIpLimiter = rateLimit({
 
     return res.status(options.statusCode || 429).json({
       success: false,
+      code: "RATE_LIMITED",
       error: "Trop de requêtes (protection globale). Réessaie dans un instant.",
+      retryAfter,
+    });
+  },
+});
+
+const ipCeilingLimiter = rateLimit({
+  name: "gw-ip-ceiling",
+  windowMs: 60 * 1000,
+  limit: IP_CEILING_PER_MIN,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `ipc:${getClientIp(req)}`,
+  skip: (req) => req.method === "OPTIONS",
+  handler: (req, res, _next, options) => {
+    logger.warn("[RateLimit][ip-ceiling] Limit hit", {
+      ip: getClientIp(req),
+      path: req.originalUrl,
+      method: req.method,
+    });
+
+    const retryAfter = setRetryAfter(res, options.windowMs);
+
+    return res.status(options.statusCode || 429).json({
+      success: false,
+      code: "RATE_LIMITED",
+      error: "Trop de requêtes depuis cette adresse. Réessaie dans un instant.",
       retryAfter,
     });
   },
@@ -394,6 +451,8 @@ const publicCollectionLimiter = rateLimit({
 
 module.exports = {
   globalIpLimiter,
+  ipCeilingLimiter,
+  rateLimitSubject,
   authLoginLimiter,
   meLimiter,
   announcementsLimiter,

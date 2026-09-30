@@ -1,7 +1,6 @@
 // File: src/middlewares/auth.js
 "use strict";
 
-const jwt = require("jsonwebtoken");
 const config = require("../config");
 const { secureCompare } = require("../utils/secureCompare");
 const logger = require("../logger");
@@ -16,21 +15,13 @@ const { estRevoque } = require("../services/tokenRevocation");
  * revenir en une ligne. Voir `services/tokenRevocation.js` pour le raisonnement
  * complet, et `test/security/gatewayIsStateless.test.js` pour la garde.
  */
-const { getVerificationKey, readKid } = require("../utils/jwtKeyring");
+const { verifyAccessTokenOrThrow } = require("../utils/accessToken");
 
 /**
- * Émetteur et audiences attendus — mêmes variables que celles employées à la
- * SIGNATURE par le backend principal (`controllers/authController.js:307-315`).
- * La passerelle vérifie ce que le backend écrit ; toute divergence ici rejette
- * des jetons valides.
+ * Émetteur, audiences et trousseau : `utils/accessToken.js` — mêmes variables
+ * que celles employées à la SIGNATURE par le backend principal. Une seule
+ * vérification pour `protect` et le limiteur de débit.
  */
-const JWT_ISSUER = String(process.env.JWT_ISSUER || "").trim();
-const JWT_AUDIENCES = String(
-  process.env.JWT_AUDIENCES || process.env.JWT_AUDIENCE || ""
-)
-  .split(",")
-  .map((v) => v.trim())
-  .filter(Boolean);
 
 /**
  * ⚠️ LE BOUCHON DE LISTE NOIRE A ÉTÉ RETIRÉ LE 2026-09-03.
@@ -194,23 +185,9 @@ const authMiddleware = async (req, res, next) => {
        * symétrique à celle de la signature : sans configuration, on ne vérifie
        * pas, sinon on rejetterait des jetons valides.
        */
-      const verifyOpts = { algorithms: ["HS256"] };
-      if (JWT_ISSUER) verifyOpts.issuer = JWT_ISSUER;
-      if (JWT_AUDIENCES.length) verifyOpts.audience = JWT_AUDIENCES;
-
-      /**
-       * ⚠️ CLÉ CHOISIE PAR `kid` — POSÉ LE 2026-09-03.
-       *
-       * La passerelle vérifie ce que le backend signe. Depuis que celui-ci
-       * signe avec un trousseau, elle doit savoir choisir la même clé : sans
-       * cela, la première rotation refuserait tous les jetons ici.
-       *
-       * Un jeton sans `kid` retombe sur le secret hérité — la branche qui rend
-       * le déploiement insensible.
-       */
-      const cle = getVerificationKey(readKid(token)) || secret;
-
-      payload = jwt.verify(token, cle, verifyOpts);
+      // Same verification as the rate limiter (`utils/accessToken.js`):
+      // HS256 only, issuer/audience when configured, key chosen by `kid`.
+      payload = verifyAccessTokenOrThrow(token);
     } catch (err) {
       if (err?.name === "TokenExpiredError") {
         return res.status(401).json({
