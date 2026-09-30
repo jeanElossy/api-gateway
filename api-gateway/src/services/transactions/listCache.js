@@ -55,7 +55,30 @@ function buildListTxCacheKey({ userId, provider, query }) {
   return `u:${String(userId)}|p:${String(provider)}|q:${qs}`;
 }
 
+/**
+ * Read-your-own-writes: after a transfer, a confirmation or a cancellation, the
+ * user's cached list pages are dropped so the next read shows the movement
+ * instead of an up-to-8-seconds-old page. Per process: another gateway instance
+ * may still serve its own copy until its TTL (bounded, documented).
+ */
+function invalidateUserListCache(userId) {
+  const prefix = `u:${String(userId || "")}|`;
+  if (prefix === "u:|") return 0;
+
+  let removed = 0;
+  for (const cache of [listTxCache, listTxInflight]) {
+    for (const key of [...cache.keys()]) {
+      if (String(key).startsWith(prefix)) {
+        cache.delete(key);
+        removed += 1;
+      }
+    }
+  }
+  return removed;
+}
+
 module.exports = {
+  invalidateUserListCache,
   LIST_TX_CACHE_TTL_MS,
   LIST_TX_CACHE_MAX,
   listTxCache,

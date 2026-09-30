@@ -355,6 +355,23 @@ async function initiateTransactionOrThrow(req) {
   return { status, body: traduireReponse(body, userId) };
 }
 
+/**
+ * GET /transactions/insights — the user's aggregates, computed by Tx-Core on
+ * the whole history. The query is limited to `range`: nothing else is relayed.
+ */
+async function getInsightsOrThrow(req) {
+  const range = String(req.query?.range || "30d");
+
+  const { status, body } = await appelerTxCore({
+    req,
+    method: "get",
+    chemin: `/transactions/insights?range=${encodeURIComponent(range)}`,
+    timeout: 15000,
+  });
+
+  return { status, body };
+}
+
 async function forwardSimpleActionOrThrow(req, action) {
   const userId = getUserId(req);
 
@@ -428,6 +445,7 @@ function traduireReponse(payload, userId) {
 }
 
 module.exports = {
+  getInsightsOrThrow,
   getTransactionOrThrow,
   listTransactionsOrFallback,
   initiateTransactionOrThrow,

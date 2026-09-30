@@ -154,6 +154,9 @@ router.get("/", controller.listTransactions);
  * GET une transaction canonique.
  * On ne bloque pas la lecture détail si le profil n’est pas complet.
  */
+/** Aggregates for the charts — declared before `/:id`. */
+router.get("/insights", controller.getInsights);
+
 router.get("/:id", controller.getTransaction);
 
 /**

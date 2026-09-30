@@ -17,7 +17,17 @@ const {
   initiateTransactionOrThrow,
   forwardSimpleActionOrThrow,
   forwardAdminActionOrThrow,
+  getInsightsOrThrow,
 } = require("../src/services/transactions/orchestrator");
+const { invalidateUserListCache } = require("../src/services/transactions/listCache");
+
+const actorId = (req) => req?.user?._id || req?.user?.id || null;
+
+/** A 2xx write changed the user's history: drop their cached list pages. */
+function afterWrite(req, out) {
+  const status = Number(out?.status || 200);
+  if (status >= 200 && status < 300) invalidateUserListCache(actorId(req));
+}
 
 /**
  * ⚠️ CORRECTIF DE SÉCURITÉ (audit transactionnel).
@@ -127,6 +137,16 @@ exports.getTransaction = async (req, res) => {
   }
 };
 
+exports.getInsights = async (req, res) => {
+  try {
+    const out = await getInsightsOrThrow(req);
+    return res.status(out.status || 200).json(out.body);
+  } catch (err) {
+    console.error("[Gateway][Controller][getInsights] error", buildErrorDetails(err));
+    return sendProxyError(res, err, "Erreur lors du proxy GET insights");
+  }
+};
+
 exports.listTransactions = async (req, res) => {
   try {
     console.log("[Gateway][Controller][listTransactions] request", {
@@ -183,11 +203,14 @@ exports.initiateTransaction = async (req, res) => {
 
     const out = await initiateTransactionOrThrow(req);
 
+    // Never the body: it carries the recipient's details (rule B.4).
     console.log("[Gateway][Controller][initiateTransaction] success", {
       status: out?.status || 200,
       hasBody: !!out?.body,
-      body: out?.body,
+      transactionId: out?.body?.transactionId || out?.body?.data?.id || null,
     });
+
+    afterWrite(req, out);
 
     return res.status(out.status || 200).json(out.body);
   } catch (err) {
@@ -215,6 +238,8 @@ exports.confirmTransaction = async (req, res) => {
       hasBody: !!out?.body,
     });
 
+    afterWrite(req, out);
+
     return res.status(out.status || 200).json(out.body);
   } catch (err) {
     console.error(
@@ -239,6 +264,8 @@ exports.cancelTransaction = async (req, res) => {
       status: out?.status || 200,
       hasBody: !!out?.body,
     });
+
+    afterWrite(req, out);
 
     return res.status(out.status || 200).json(out.body);
   } catch (err) {
