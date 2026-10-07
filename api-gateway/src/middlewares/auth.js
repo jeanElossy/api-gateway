@@ -277,6 +277,9 @@ const authMiddleware = async (req, res, next) => {
       userType: payload.userType || "",
       country: payload.country || "",
       currency: payload.currency || "",
+      // Mode du compte (`live` | `sandbox`) — contrôle de cohérence seulement :
+      // le backend et Tx-Core relisent la base, qui fait foi.
+      mode: payload.mode === "sandbox" || payload.isSandbox === true ? "sandbox" : "live",
       isSandbox: payload.isSandbox === true,
       isReviewerAccount: payload.isReviewerAccount === true,
       deviceId: payload.did || null,

@@ -1246,6 +1246,14 @@ const OPEN_PREFIX = [
   "/api/v1/provider-webhooks",
 
   /**
+   * Page 3-D Secure de TEST du mode simulation : ouverte dans le navigateur
+   * intégré, qui n'a pas de JWT. Le jeton à usage unique de l'URL (haché et
+   * vérifié par Tx-Core, 15 min) est l'autorisation. Seul ce sous-arbre est
+   * ouvert : le reste de `/api/v1/sandbox` exige le JWT.
+   */
+  "/api/v1/sandbox/3ds",
+
+  /**
    * ⚠️ `/api/v1/analytics` figurait ici, en PRÉFIXE.
    *
    * Tout le sous-arbre était donc réputé public — y compris les lectures
@@ -1444,6 +1452,12 @@ app.use("/api/v1/pay", paymentRoutes);
 app.use("/internal/transactions", internalTransactionsRouter);
 app.use("/api/v1/internal", internalRoutes);
 app.use("/api/v1/transactions", userTransactionRoutes);
+
+/**
+ * Mode simulation (2026-10-06) — outils du compte sandbox (JWT) et page 3DS
+ * de test (publique, jeton à usage unique). Relayés à Tx-Core, qui décide.
+ */
+app.use("/api/v1/sandbox", require("../routes/sandbox"));
 
 /**
  * IMPORTANT :
