@@ -2,6 +2,9 @@
 
 require('dotenv').config();
 
+/* Règle B.4 : les `console.*` contournent le logger — on les masque aussi. */
+require('./utils/logRedaction').installConsoleRedaction();
+
 /**
  * ═══ ENVIRONNEMENT — ANNONCÉ AVANT LE CHARGEMENT DE L'APPLICATION ═════════
  *

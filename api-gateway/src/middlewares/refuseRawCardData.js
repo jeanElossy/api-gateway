@@ -1,4 +1,5 @@
 "use strict";
+const { getClientIp } = require("../utils/clientIp");
 
 /**
  * ============================================================================
@@ -96,7 +97,7 @@ function refuseRawCardData(req, res, next) {
    */
   logger.error("[pay] donnée de carte en clair refusée", {
     champ,
-    ip: req.headers["x-forwarded-for"] || req.socket?.remoteAddress,
+    ip: getClientIp(req),
     reqId: req.headers["x-request-id"] || null,
   });
 

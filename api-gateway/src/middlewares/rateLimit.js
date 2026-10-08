@@ -1,34 +1,16 @@
 "use strict";
 
+const crypto = require("crypto");
 const rateLimit = require("./rateLimiter");
+const config = require("../config");
 const logger = require("../logger");
 const { verifiedUserId } = require("../utils/accessToken");
 
 /**
- * 🔎 IP client robuste (Render + Cloudflare + proxies)
- * - Priorité: CF-Connecting-IP
- * - Sinon: X-Forwarded-For (première IP)
- * - Sinon: X-Real-IP
- * - Sinon: req.ip (app.set("trust proxy", 1) requis)
+ * IP client : `utils/clientIp.js` — `req.ip` selon `trust proxy`, JAMAIS un
+ * en-tête écrit par le client. Les CLÉS de limitation regroupent l'IPv6 en /64.
  */
-function getClientIp(req) {
-  const cf =
-    req.headers["cf-connecting-ip"] ||
-    req.headers["CF-Connecting-IP"] ||
-    req.headers["cf-connecting-ip".toUpperCase()];
-  if (cf) return String(cf).trim();
-
-  const xff = req.headers["x-forwarded-for"] || req.headers["X-Forwarded-For"];
-  if (xff) {
-    const first = String(xff).split(",")[0]?.trim();
-    if (first) return first;
-  }
-
-  const xri = req.headers["x-real-ip"] || req.headers["X-Real-IP"];
-  if (xri) return String(xri).trim();
-
-  return String(req.ip || "").trim();
-}
+const { getClientIp, rateLimitIpKey } = require("../utils/clientIp");
 
 function setRetryAfter(res, windowMs) {
   const retryAfterSec = Math.max(1, Math.ceil((windowMs || 60000) / 1000));
@@ -53,6 +35,23 @@ const readLoginIdentifier = (req) => {
     "";
   return String(raw || "").trim().toLowerCase();
 };
+
+/**
+ * Empreinte de l'identifiant de connexion : ni l'e-mail ni le téléphone ne
+ * doivent finir en clair dans une clé Redis ou un journal (règle B.4). HMAC
+ * (clé dérivée du secret JWT) plutôt qu'un simple SHA-256, qu'un dictionnaire
+ * d'adresses suffirait à inverser.
+ */
+const LOGIN_ID_KEY = crypto
+  .createHmac("sha256", String(config.jwtSecret || ""))
+  .update("paynoval/login-identifier/v1")
+  .digest();
+
+function loginIdentifierDigest(req) {
+  const id = readLoginIdentifier(req);
+  if (!id) return null;
+  return crypto.createHmac("sha256", LOGIN_ID_KEY).update(id).digest("hex").slice(0, 32);
+}
 
 /**
  * ✅ Endpoints “noisy” (polling / refresh UI)
@@ -104,7 +103,7 @@ const IP_CEILING_PER_MIN = Number(process.env.RATE_LIMIT_IP_CEILING_PER_MIN) || 
 
 function rateLimitSubject(req) {
   const userId = verifiedUserId(req);
-  return userId ? `acct:${userId}` : `ip:${getClientIp(req)}`;
+  return userId ? `acct:${userId}` : `ip:${rateLimitIpKey(req)}`;
 }
 
 const globalIpLimiter = rateLimit({
@@ -146,7 +145,7 @@ const ipCeilingLimiter = rateLimit({
   limit: IP_CEILING_PER_MIN,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => `ipc:${getClientIp(req)}`,
+  keyGenerator: (req) => `ipc:${rateLimitIpKey(req)}`,
   skip: (req) => req.method === "OPTIONS",
   handler: (req, res, _next, options) => {
     logger.warn("[RateLimit][ip-ceiling] Limit hit", {
@@ -179,8 +178,8 @@ const authLoginLimiter = rateLimit({
   skipSuccessfulRequests: true,
   requestWasSuccessful: (_req, res) => res.statusCode < 400,
   keyGenerator: (req) => {
-    const ip = getClientIp(req);
-    const id = readLoginIdentifier(req) || "unknown";
+    const ip = rateLimitIpKey(req);
+    const id = loginIdentifierDigest(req) || "unknown";
     const p = req.path || "login";
     return `login:${ip}:${id}:${p}`;
   },
@@ -188,11 +187,48 @@ const authLoginLimiter = rateLimit({
     logger.warn("[RateLimit][login] Limit hit", {
       ip: getClientIp(req),
       path: req.originalUrl,
-      identifier: readLoginIdentifier(req) || null,
+      identifierDigest: loginIdentifierDigest(req),
       method: req.method,
     });
 
     const retryAfter = setRetryAfter(res, 10 * 60 * 1000);
+
+    return res.status(429).json({
+      success: false,
+      error: "Trop de tentatives de connexion. Réessayez dans 10 minutes.",
+      retryAfter,
+    });
+  },
+});
+
+/**
+ * 2 bis) Anti « credential stuffing » PAR COMPTE — toutes IP confondues.
+ *
+ * Le limiteur précédent compte par (IP, compte) : une attaque répartie sur
+ * mille adresses contre UN compte n'était jamais freinée. Pratique de
+ * référence (« smart lockout » Okta / Microsoft, freinage par compte chez
+ * Stripe) : un second compteur par compte, TEMPORAIRE (jamais un blocage
+ * définitif qu'un attaquant pourrait déclencher à volonté), seuls les ÉCHECS
+ * comptent, et le message est le même que celui du limiteur par IP — rien ne
+ * révèle qu'un compte existe.
+ */
+const authAccountLimiter = rateLimit({
+  name: "gw-auth-login-account",
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS" || !loginIdentifierDigest(req),
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: (_req, res) => res.statusCode < 400,
+  keyGenerator: (req) => `login-acct:${loginIdentifierDigest(req)}`,
+  handler: (req, res) => {
+    logger.warn("[RateLimit][login-account] Limit hit", {
+      ip: getClientIp(req),
+      identifierDigest: loginIdentifierDigest(req),
+    });
+
+    const retryAfter = setRetryAfter(res, 15 * 60 * 1000);
 
     return res.status(429).json({
       success: false,
@@ -214,7 +250,7 @@ const meLimiter = rateLimit({
   skip: (req) => req.method === "OPTIONS",
   keyGenerator: (req) => {
     const uid = req.user?.id || req.user?._id;
-    return uid ? `me:${uid}` : `meip:${getClientIp(req)}`;
+    return uid ? `me:${uid}` : `meip:${rateLimitIpKey(req)}`;
   },
   handler: (req, res, _next, options) => {
     logger.warn("[RateLimit][users/me] Limit hit", {
@@ -245,7 +281,7 @@ const announcementsLimiter = rateLimit({
   legacyHeaders: false,
   skip: (req) => req.method === "OPTIONS",
   keyGenerator: (req) => {
-    const ip = getClientIp(req);
+    const ip = rateLimitIpKey(req);
     const q = req.query || {};
     const platform = String(q.platform || "").toLowerCase();
     const locale = String(q.locale || "").toLowerCase();
@@ -282,7 +318,7 @@ const adminTransactionsLimiter = rateLimit({
   skip: (req) => req.method === "OPTIONS",
   keyGenerator: (req) => {
     const uid = req.user?.id || req.user?._id;
-    return uid ? `admin-tx:${uid}` : `admin-tx-ip:${getClientIp(req)}`;
+    return uid ? `admin-tx:${uid}` : `admin-tx-ip:${rateLimitIpKey(req)}`;
   },
   handler: (req, res, _next, options) => {
     logger.warn("[RateLimit][admin-transactions] Limit hit", {
@@ -331,7 +367,7 @@ const adminAdjustmentsLimiter = rateLimit({
   skip: (req) => req.method === "OPTIONS",
   keyGenerator: (req) => {
     const uid = req.user?.id || req.user?._id;
-    return uid ? `admin-adj:${uid}` : `admin-adj-ip:${getClientIp(req)}`;
+    return uid ? `admin-adj:${uid}` : `admin-adj-ip:${rateLimitIpKey(req)}`;
   },
   handler: (req, res, _next, options) => {
     // Journalisé en `warn` : sur cette route, atteindre la limite est un
@@ -381,7 +417,7 @@ const userLimiter = rateLimit({
   },
   keyGenerator: (req) => {
     const uid = req.user?.id || req.user?._id;
-    return uid ? `user:${uid}` : `ip:${getClientIp(req)}`;
+    return uid ? `user:${uid}` : `ip:${rateLimitIpKey(req)}`;
   },
   handler: (req, res, _next, options) => {
     logger.warn("[RateLimit][user] Limit hit", {
@@ -430,7 +466,7 @@ const publicCollectionLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.method === "OPTIONS",
-  keyGenerator: (req) => `paycollect:${getClientIp(req)}`,
+  keyGenerator: (req) => `paycollect:${rateLimitIpKey(req)}`,
   handler: (req, res, _next, options) => {
     logger.warn("[RateLimit][public-collection] Limit hit", {
       ip: getClientIp(req),
@@ -454,6 +490,8 @@ module.exports = {
   ipCeilingLimiter,
   rateLimitSubject,
   authLoginLimiter,
+  authAccountLimiter,
+  loginIdentifierDigest,
   meLimiter,
   announcementsLimiter,
   adminTransactionsLimiter,

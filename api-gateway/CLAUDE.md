@@ -118,7 +118,7 @@ En sortie vers le principal, le proxy injecte `x-internal-token: PRINCIPAL_INTER
 
 ## Éligibilité & conformité
 
-- `requireTransactionEligibility` ([src/middlewares/requireTransactionEligibility.js](src/middlewares/requireTransactionEligibility.js)) rappelle `/api/v1/users/me` sur le principal à chaque `initiate`/`confirm` — choix délibéré de faire confiance à un **profil frais plutôt qu'aux claims du JWT** — et bloque sur email/téléphone non vérifiés, KYC (particulier) ou KYB (entreprise) manquant, ou compte bloqué/gelé/en attente, en renvoyant un `code` avec 428/403/401. `cancel` s'en affranchit volontairement pour qu'un utilisateur puisse toujours libérer des fonds en attente.
+- `requireTransactionEligibility` ([src/middlewares/requireTransactionEligibility.js](src/middlewares/requireTransactionEligibility.js)) rappelle `/api/v1/users/me` sur le principal à chaque `initiate`/`confirm` — choix délibéré de faire confiance à un **profil frais plutôt qu'aux claims du JWT** — et bloque sur email/téléphone non vérifiés, KYC manquant (exigé de TOUT compte depuis le 2026-10-07 — plus de KYB ni de compte entreprise), ou compte bloqué/gelé/en attente, en renvoyant un `code` avec 428/403/401. `cancel` s'en affranchit volontairement pour qu'un utilisateur puisse toujours libérer des fonds en attente.
 - AML : `src/middlewares/aml.js` + `src/services/aml.js` + `sanctionsScreeningService.js` (SumSub / ComplyAdvantage / ComplyAdvantage Mesh, sélectionné par les variables `SANCTIONS_SCREENING_*`, avec un interrupteur fail-open/fail-closed), persisté dans `AMLLog`. Lecture admin : `GET /api/v1/admin/compliance/transactions`.
 
 ## Pricing / FX
@@ -126,6 +126,13 @@ En sortie vers le principal, le proxy injecte `x-internal-token: PRINCIPAL_INTER
 `pricingEngine.js` avec les modèles `PricingRule` / `PricingQuote` ; `/api/v1/pricing/quote|preview` sont ouverts, `/lock` exige un JWT. Frais (`Fee`), taux de change (`ExchangeRate`), règles FX (`FxRule`) ont chacun un CRUD admin protégé par `requireAdmin` (les frais acceptent aussi le token interne).
 
 **Règle devises** — seuls les codes ISO (`EUR`, `XOF`, `XAF`, `CAD`, `USD`) sont stockés et transportés ; jamais de symboles type `€` ou `F CFA`. Une transaction porte un côté source (`amountSource`/`currencySource`/`feeSource`) et un côté target. Voir [src/help/multi-currency.md](src/help/multi-currency.md).
+
+### IP cliente, connexion, journaux (2026-10-08) — voir `../../docs/architecture/security.md` §6.d et §8.f
+
+- `src/utils/clientIp.js` est la SEULE lecture de l'adresse : `req.ip` (`trust proxy` 1). Jamais `x-forwarded-for` / `x-real-ip` / `cf-connecting-ip` (aucun Cloudflare devant : le client les écrit). Clés en IPv6 /64.
+- Le proxy principal SIGNE l'adresse pour le backend (`src/utils/clientIpAttestation.js`, `applyClientIpAttestation`) et retire d'abord tout en-tête d'attestation reçu du client.
+- Connexion : `authLoginLimiter` (IP, compte) + `authAccountLimiter` (compte, toutes IP, 20 échecs / 15 min). L'identifiant n'existe qu'en empreinte HMAC (`loginIdentifierDigest`), jamais en clair dans Redis ni les journaux.
+- `src/utils/logRedaction.js` masque aussi `console.*` (installé dans `src/server.js`). Gardes : `test/security/edgeClientIpAndLogin.test.js`, `test/security/clientIpAttestation.test.js`.
 
 ### Redis — limitation de débit (2026-08-25)
 

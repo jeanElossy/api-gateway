@@ -7,8 +7,8 @@
  * Règles :
  * - email vérifié obligatoire
  * - téléphone vérifié obligatoire
- * - compte personnel : KYC obligatoire
- * - compte business : KYB obligatoire
+ * - KYC obligatoire pour TOUT compte (V1 : un seul type de compte ; le KYB
+ *   et l'exemption « entreprise » reviendront en V2)
  * - compte bloqué / gelé / suspendu / masqué des transferts : interdit
  *
  * Important :
@@ -191,23 +191,6 @@ function isPendingAccountStatus(value) {
   return status === "pending";
 }
 
-function isBusinessUser(user = {}) {
-  const type = normalizeStatus(
-    user.userType || user.type || user.accountType || user.profile?.userType
-  );
-
-  const role = normalizeStatus(user.role);
-
-  return (
-    user.isBusiness === true ||
-    type === "entreprise" ||
-    type === "business" ||
-    type === "company" ||
-    type === "merchant" ||
-    role === "business"
-  );
-}
-
 function isEmailVerified(user = {}) {
   return (
     isPositiveFlag(user.emailVerified) ||
@@ -249,28 +232,6 @@ function isKycVerified(user = {}) {
     isApprovedStatus(user.verifications?.kyc?.status) ||
     isPositiveFlag(user.kycVerified) ||
     isPositiveFlag(user.isKycVerified)
-  );
-}
-
-function isKybVerified(user = {}) {
-  const businessLevel = Number(
-    user.businessKYBLevel ||
-      user.business?.businessKYBLevel ||
-      user.kybLevel ||
-      0
-  );
-
-  return (
-    businessLevel >= 2 ||
-    isApprovedStatus(user.kybStatus) ||
-    isApprovedStatus(user.businessStatus) ||
-    isApprovedStatus(user.kyb?.status) ||
-    isApprovedStatus(user.kyb?.verificationStatus) ||
-    isApprovedStatus(user.business?.kybStatus) ||
-    isApprovedStatus(user.business?.businessStatus) ||
-    isApprovedStatus(user.verifications?.kyb?.status) ||
-    isPositiveFlag(user.kybVerified) ||
-    isPositiveFlag(user.isKybVerified)
   );
 }
 
@@ -378,15 +339,7 @@ function buildEligibilityFailure(user = {}) {
     });
   }
 
-  if (isBusinessUser(user)) {
-    if (!isKybVerified(user)) {
-      missing.push({
-        code: "KYB_REQUIRED",
-        message:
-          "Votre vérification d’entreprise KYB doit être validée avant d’effectuer une transaction.",
-      });
-    }
-  } else if (!isKycVerified(user)) {
+  if (!isKycVerified(user)) {
     missing.push({
       code: "KYC_REQUIRED",
       message:
@@ -457,9 +410,7 @@ function getFailureHttpStatus(code) {
 function normalizeUserForTransactions(user = {}) {
   const emailVerified = isEmailVerified(user);
   const phoneVerified = isPhoneVerified(user);
-  const businessUser = isBusinessUser(user);
   const kycVerified = isKycVerified(user);
-  const kybVerified = isKybVerified(user);
 
   const userId = safeString(user._id || user.id || user.userId);
 
@@ -478,11 +429,6 @@ function normalizeUserForTransactions(user = {}) {
 
     kycVerified,
     isKycVerified: kycVerified,
-
-    kybVerified,
-    isKybVerified: kybVerified,
-
-    isBusiness: businessUser,
 
     accountStatus: user.accountStatus || user.status || "active",
   };
@@ -522,13 +468,7 @@ module.exports = async function requireTransactionEligibility(req, res, next) {
       emailVerified: normalizedUser.emailVerified,
       phoneVerified: normalizedUser.phoneVerified,
       kycVerified: normalizedUser.kycVerified,
-      kybVerified: normalizedUser.kybVerified,
-      userType:
-        normalizedUser.userType ||
-        normalizedUser.type ||
-        normalizedUser.accountType ||
-        null,
-      isBusiness: normalizedUser.isBusiness,
+      userType: normalizedUser.userType || null,
       accountStatus: normalizedUser.accountStatus || null,
     };
 
@@ -555,12 +495,9 @@ module.exports = async function requireTransactionEligibility(req, res, next) {
     try {
       logger.info?.("[Gateway][TX eligibility] profile OK", {
         userId: normalizedUser._id || normalizedUser.id || null,
-        email: normalizedUser.email || null,
         emailVerified: normalizedUser.emailVerified,
         phoneVerified: normalizedUser.phoneVerified,
         kycVerified: normalizedUser.kycVerified,
-        kybVerified: normalizedUser.kybVerified,
-        isBusiness: normalizedUser.isBusiness,
         accountStatus: normalizedUser.accountStatus || null,
       });
     } catch {}
@@ -594,3 +531,6 @@ module.exports = async function requireTransactionEligibility(req, res, next) {
     });
   }
 };
+/** Pure decision functions, exposed for tests (no I/O). */
+module.exports.buildEligibilityFailure = buildEligibilityFailure;
+module.exports.normalizeUserForTransactions = normalizeUserForTransactions;

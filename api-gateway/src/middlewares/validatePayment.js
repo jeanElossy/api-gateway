@@ -1,3 +1,4 @@
+const { getClientIp } = require("../utils/clientIp");
 // middlewares/validatePayment.js
 
 const Joi = require('joi');
@@ -130,7 +131,7 @@ function validatePayment(req, res, next) {
     logger.warn('[validatePayment] Provider non supporté', {
       provider: req.body.provider,
       destination: req.body.destination,
-      ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+      ip: getClientIp(req),
     });
     return res.status(400).json({
       success: false,
@@ -147,7 +148,7 @@ function validatePayment(req, res, next) {
   if (error) {
     logger.warn(`[validatePayment][${providerKey}] Validation failed`, {
       details: error.details.map(d => d.message),
-      ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+      ip: getClientIp(req),
       email: req.body.toEmail || null,
     });
     return res.status(400).json({

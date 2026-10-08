@@ -1,5 +1,6 @@
 // File: api-gateway/src/middlewares/validateInternalToken.js
 'use strict';
+const { getClientIp } = require("../utils/clientIp");
 
 const config = require('../config');
 const logger = require('../logger');
@@ -14,8 +15,7 @@ const INTERNAL_TOKEN =
   process.env.GATEWAY_INTERNAL_TOKEN;
 
 module.exports = function validateInternalToken(req, res, next) {
-  const ip =
-    req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+  const ip = getClientIp(req);
 
   if (!INTERNAL_TOKEN) {
     logger.warn(

@@ -1,4 +1,5 @@
 "use strict";
+const { getClientIp } = require("../src/utils/clientIp");
 
 /**
  * ============================================================================
@@ -340,7 +341,7 @@ exports.handlePayment = async (req, res) => {
     logger.error("[PAY] donnée de carte en clair refusée", {
       champ: champCarte,
       reqId,
-      ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
+      ip: getClientIp(req),
     });
 
     return res.status(400).json({

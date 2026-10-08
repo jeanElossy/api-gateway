@@ -1,3 +1,4 @@
+const { getClientIp } = require("../utils/clientIp");
 // src/middlewares/logger.js
 
 const logger = require('../logger');
@@ -71,7 +72,7 @@ module.exports.loggerMiddleware = (req, res, next) => {
       status: res.statusCode,
       duration: `${duration}ms`,
       user: req.user?.email || null,
-      ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+      ip: getClientIp(req),
       userAgent: req.headers['user-agent'] || null,
       query,
       body: method === 'GET' ? undefined : safeBody,

@@ -4,6 +4,7 @@
 
 // File: src/app.js
 "use strict";
+const { getClientIp } = require("./utils/clientIp");
 
 const crypto = require("crypto");
 
@@ -92,6 +93,7 @@ const {
   globalIpLimiter,
   ipCeilingLimiter,
   authLoginLimiter,
+  authAccountLimiter,
   meLimiter,
   announcementsLimiter,
   adminTransactionsLimiter,
@@ -562,7 +564,7 @@ if (shouldLogVerbose) {
 /* Rate limits spécifiques                                                    */
 /* -------------------------------------------------------------------------- */
 
-app.use("/api/v1/auth/login", authLoginLimiter);
+app.use("/api/v1/auth/login", authLoginLimiter, authAccountLimiter);
 app.use("/api/v1/auth/login-2fa", authLoginLimiter);
 app.use("/api/v1/announcements", announcementsLimiter);
 
@@ -586,7 +588,7 @@ function isSocketIoRequest(req) {
 
 function isPrivilegedRole(req) {
   const role = String(req?.user?.role || "").toLowerCase();
-  return ["admin", "superadmin", "support"].includes(role);
+  return ["admin", "superadmin", "support", "compliance"].includes(role);
 }
 
 function logErrorInNonProd(message, meta = {}) {
@@ -778,6 +780,59 @@ const PRINCIPAL_BASE =
   config.principalUrl || process.env.PRINCIPAL_API_BASE_URL || "";
 
 /**
+ * IP CLIENTE ATTESTÉE — voir `src/utils/clientIpAttestation.js`.
+ *
+ * Derrière la passerelle, le principal voit l'adresse de la PASSERELLE, et
+ * l'entrée la plus à gauche de `X-Forwarded-For` est écrite par le client :
+ * aucune des deux ne peut servir de clé de limitation ni de preuve. La
+ * passerelle — seul saut qui connaît l'adresse réelle — la transmet signée.
+ */
+const clientIpAttestation = require("./utils/clientIpAttestation");
+/* Le secret DÉJÀ partagé avec le principal (celui de `internalProtect`). */
+const CLIENT_IP_ATTESTATION_KEY = clientIpAttestation.deriveAttestationKey(
+  config.principalInternalToken
+);
+
+if (!CLIENT_IP_ATTESTATION_KEY) {
+  logger.warn(
+    "[PROXY] IP cliente NON attestée (PRINCIPAL_INTERNAL_TOKEN absent) — conséquence : " +
+      "le principal ne connaît que l'adresse de la passerelle ; ses limiteurs par IP " +
+      "regroupent tous les clients."
+  );
+}
+
+/**
+ * Retire TOUJOURS les en-têtes d'attestation reçus du client (un client ne
+ * s'atteste pas lui-même), puis pose la nôtre, liée à la requête relayée.
+ */
+function applyClientIpAttestation(proxyReq, req) {
+  for (const name of clientIpAttestation.ATTESTATION_HEADERS) {
+    try {
+      proxyReq.removeHeader(name);
+    } catch {}
+  }
+
+  try {
+    const headers = clientIpAttestation.buildAttestationHeaders({
+      key: CLIENT_IP_ATTESTATION_KEY,
+      ip: req.ip,
+      method: proxyReq.method || req.method,
+      path: proxyReq.path,
+    });
+
+    if (!headers) return;
+
+    for (const [name, value] of Object.entries(headers)) {
+      proxyReq.setHeader(name, value);
+    }
+  } catch (err) {
+    // Not fatal for the request, but never silent: the principal will fall
+    // back to the gateway address for this call.
+    logger.warn("[PROXY] attestation d'IP non posée", { message: err?.message });
+  }
+}
+
+/**
  * Chemins du backend principal qui attendent le jeton interne du gateway.
  * Liste FERMÉE : voir l'explication au point d'injection (`onProxyReq`).
  */
@@ -805,7 +860,7 @@ const PRINCIPAL_PREFIXES = [
   "/api/v1/devices",
   "/api/v1/verification",
   "/api/v1/kyc",
-  "/api/v1/kyb",
+  "/api/v1/legal",
   "/api/v1/badges",
   "/api/v1/upload",
   "/api/v1/rates",
@@ -899,6 +954,8 @@ function makePrincipalProxy() {
       try {
         fixRequestBody(proxyReq, req);
       } catch {}
+
+      applyClientIpAttestation(proxyReq, req);
 
       const requestId = req.headers["x-request-id"];
 
@@ -1049,6 +1106,8 @@ function makePrincipalSocketProxy() {
     timeout: 30000,
 
     onProxyReqWs: (proxyReq, req) => {
+      applyClientIpAttestation(proxyReq, req);
+
       try {
         const requestId = req.headers["x-request-id"];
         if (requestId) proxyReq.setHeader("X-Request-Id", requestId);
@@ -1213,6 +1272,15 @@ const OPEN_EXACT = [
    * préfixe.
    */
   "/api/v1/referrals/program",
+
+  /**
+   * Conditions d'utilisation en vigueur — lues AVANT l'inscription (écran
+   * public de l'app). Texte public par nature, aucune donnée personnelle.
+   *
+   * ⚠️ EN EXACT : `/api/v1/legal/terms/accept` enregistre une preuve
+   * NOMINATIVE et exige un jeton. Ne jamais ouvrir `/api/v1/legal` en préfixe.
+   */
+  "/api/v1/legal/terms/current",
 ];
 
 const OPEN_PREFIX = [
@@ -1688,7 +1756,7 @@ app.use((err, req, res, _next) => {
     status,
     path: req.originalUrl,
     method: req.method,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
+    ip: getClientIp(req),
     userAgent: req.headers["user-agent"],
     user: req.user?.email,
     // Le corps n'est journalisé qu'hors production : il peut contenir des

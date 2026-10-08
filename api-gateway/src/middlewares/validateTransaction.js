@@ -1,5 +1,6 @@
 // File: middlewares/validateTransaction.js
 "use strict";
+const { getClientIp } = require("../utils/clientIp");
 
 const Joi = require("joi");
 const logger = require("../logger");
@@ -514,7 +515,7 @@ function validateTransaction(action) {
         destination,
         funds,
         action,
-        ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
+        ip: getClientIp(req),
       });
 
       return res.status(400).json({
@@ -552,7 +553,7 @@ function validateTransaction(action) {
         `[validateTransaction][${providerSelected}] Validation failed (${action})`,
         {
           details,
-          ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
+          ip: getClientIp(req),
           email: value?.toEmail || null,
         }
       );
@@ -641,7 +642,7 @@ function validateTransaction(action) {
           funds: req.body.funds,
           destination: req.body.destination,
           action: req.body.action,
-          ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
+          ip: getClientIp(req),
         });
 
         return res.status(400).json({
