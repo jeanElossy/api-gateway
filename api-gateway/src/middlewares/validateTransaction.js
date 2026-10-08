@@ -279,6 +279,24 @@ const baseInitiateSchema = {
 /* -------------------------------------------------------------------------- */
 
 /**
+ * La question de sécurité d'un ENVOI SORTANT — 2026-10-08.
+ *
+ * Tx-Core l'exige pour un transfert vers le mobile money ou la carte d'un TIERS
+ * (`initiateOutboundExternal`). Ces schémas ne la déclaraient pas, et
+ * `stripUnknown` la retirait : le moteur répondait « securityQuestion +
+ * securityAnswer requis » à un corps pourtant complet au départ du téléphone.
+ * Facultative ici : un retrait vers SON propre numéro n'en porte pas, et c'est
+ * Tx-Core, qui connaît le type d'opération, qui décide.
+ */
+const outboundChallengeSchema = {
+  question: Joi.string().max(128).optional(),
+  securityQuestion: Joi.string().max(128).optional(),
+  securityCode: Joi.string().trim().min(1).max(64).optional(),
+  securityAnswer: Joi.string().trim().min(1).max(128).optional(),
+  validationCode: Joi.string().trim().min(1).max(64).optional(),
+};
+
+/**
  * ⚠️ UN SCHÉMA PAR RAIL DU PÉRIMÈTRE, ET RIEN D'AUTRE.
  *
  * Quatre schémas ont été retirés le 2026-09-10 — `bank`, `stripe`,
@@ -313,26 +331,33 @@ const initiateSchemas = {
 
   mobilemoney: Joi.object({
     ...baseInitiateSchema,
+    ...outboundChallengeSchema,
     phoneNumber: Joi.string().pattern(/^[0-9+]{8,16}$/).required(),
     operator: Joi.string().valid(...MOBILEMONEY_OPERATORS).required(),
     recipientName: Joi.string().max(64).optional(),
     country: Joi.string().max(64).required(),
+    description: Joi.string().max(500).optional(),
   }),
 
 
+  /**
+   * ⚠️ UNE CARTE VOYAGE PAR SA RÉFÉRENCE — 2026-10-08.
+   *
+   * Ce schéma exigeait `cardNumber`, `cvc` et la date d'expiration, alors que
+   * `refuseRawCardDataOnTransactions`, monté AVANT lui sur la même route, refuse
+   * tout corps qui les porte. Aucune opération par carte ne pouvait donc passer
+   * le bord. Le téléphone n'envoie que la carte ENREGISTRÉE (`cardId`) et ses
+   * quatre derniers chiffres ; le numéro ne quitte jamais le partenaire.
+   */
   visa_direct: Joi.object({
     ...baseInitiateSchema,
-    cardNumber: Joi.string().creditCard().required(),
-    cardHolder: Joi.string().max(64).required(),
-    expMonth: Joi.number().min(1).max(12).required(),
-    expYear: Joi.number()
-      .min(new Date().getFullYear())
-      .max(new Date().getFullYear() + 20)
-      .required(),
-    cvc: Joi.string().pattern(/^\d{3,4}$/).required(),
-    toName: Joi.string().max(128).required(),
-    toBank: Joi.string().max(128).optional(),
+    ...outboundChallengeSchema,
+    cardId: Joi.string().trim().min(1).max(128).required(),
+    cardLast4: Joi.string().pattern(/^\d{4}$/).optional(),
+    cardHolder: Joi.string().max(64).optional(),
+    toName: Joi.string().max(128).optional(),
     country: Joi.string().max(64).optional(),
+    description: Joi.string().max(500).optional(),
   }),
 
 
