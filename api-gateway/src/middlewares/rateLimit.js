@@ -307,6 +307,35 @@ const announcementsLimiter = rateLimit({
 });
 
 /* ------------------------------------------------------------------ */
+/* 4 bis) État du service (`/app/status`, `/status/public`)           */
+/* ------------------------------------------------------------------ */
+/**
+ * Public and unauthenticated: read at app start, on foreground, every 60 s
+ * during an incident, and by the public status page. Generous for a real
+ * client, closed to a scraper. Contract: docs/architecture/service-control.md.
+ */
+const serviceStatusLimiter = rateLimit({
+  name: "gw-service-status",
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => `svc-status:${rateLimitIpKey(req)}`,
+  handler: (req, res, _next, options) => {
+    const retryAfter = setRetryAfter(res, options.windowMs);
+
+    return res.status(429).json({
+      success: false,
+      code: "RATE_LIMITED",
+      error: "Trop de requêtes. Réessaie dans un instant.",
+      message: "Trop de requêtes. Réessaie dans un instant.",
+      retryAfter,
+    });
+  },
+});
+
+/* ------------------------------------------------------------------ */
 /* 5) Limiteur dédié admin transactions                               */
 /* ------------------------------------------------------------------ */
 const adminTransactionsLimiter = rateLimit({
@@ -494,6 +523,7 @@ module.exports = {
   loginIdentifierDigest,
   meLimiter,
   announcementsLimiter,
+  serviceStatusLimiter,
   adminTransactionsLimiter,
   adminAdjustmentsLimiter,
   userLimiter,

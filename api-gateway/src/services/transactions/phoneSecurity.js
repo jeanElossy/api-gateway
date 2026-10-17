@@ -31,6 +31,7 @@
  */
 
 const crypto = require("crypto");
+const { pickAppIdentityHeaders } = require("../serviceControlRelay");
 
 function reqAny(paths) {
   for (const p of paths) {
@@ -212,6 +213,12 @@ function auditForwardHeaders(req) {
      * signature would be dropped at the edge and every bound device refused.
      */
     ...pickSignatureHeaders(req),
+    /**
+     * App identity (`X-App-Version`, platform, OTA update id…): Tx-Core refuses
+     * a blocked app version with 426 UPDATE_REQUIRED. Rebuilt, validated —
+     * never relayed blindly (src/services/serviceControlRelay.js).
+     */
+    ...pickAppIdentityHeaders(req),
   };
 
   if (hasAuth) headers.Authorization = incomingAuth;
