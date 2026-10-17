@@ -370,6 +370,19 @@ const ALLOWED_HEADERS = [
   "idempotency-key",
   "x-idempotency-key",
 
+  // Service-control console: 2FA re-authentication of a critical action
+  // (docs/architecture/service-control.md §11). Without it the browser's
+  // preflight refused EVERY critical action of the console.
+  "X-Step-Up-Token",
+  "x-step-up-token",
+
+  // App identity (contract §9) — sent by the web public pages too.
+  "X-App-Version",
+  "X-App-Platform",
+  "X-App-Build",
+  "X-App-Update-Id",
+  "X-App-Runtime-Version",
+
   "x-internal-token",
   "x-paynoval-internal-token",
 

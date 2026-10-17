@@ -271,3 +271,12 @@ test("profile check: a real outage still says 'profile unavailable'", async () =
   assert.equal(res.body.code !== "MAINTENANCE_ACTIVE", true);
   assert.equal(res.statusCode, 503);
 });
+
+/* --------------------------------------------------------------- 6. CORS */
+
+test("CORS lets the console send its 2FA re-authentication header", () => {
+  const src = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+  const list = src.slice(src.indexOf("const ALLOWED_HEADERS = ["), src.indexOf("];", src.indexOf("const ALLOWED_HEADERS = [")));
+  assert.ok(list.includes('"X-Step-Up-Token"'), "without it, every critical console action fails the browser preflight");
+  assert.ok(list.includes('"X-App-Platform"'));
+});
