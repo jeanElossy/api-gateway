@@ -143,6 +143,10 @@ Architecture complète : [`../../.claude/context/redis.md`](../../.claude/contex
 - `src/services/rateLimitStore.js` est une **copie** de celui du backend (dépôts séparés, pas de paquet commun) : toute correction dans l'un doit être reportée dans l'autre.
 - `REDIS_URL` absente ⇒ comptage en mémoire, journalisé au démarrage.
 
+### Contrôle de service (2026-10-17)
+
+Contrat : [`../../docs/architecture/service-control.md`](../../docs/architecture/service-control.md). La passerelle ne décide rien : `src/services/serviceControlRelay.js` (1) transmet à Tx-Core les en-têtes `X-App-*` validés, (2) fait ignorer au disjoncteur les refus délibérés (`X-PayNoval-Service-Control`) — sans cela, cinq 503 de maintenance coupaient tout Tx-Core, relais des webhooks compris —, (3) relaie les erreurs de Tx-Core **avec leur `code`** (`sendProxyError` le perdait, `LIMIT_*` compris) et les refus du backend pendant le contrôle d'éligibilité. `/api/v1/app/status` et `/api/v1/status/public` sont en `OPEN_EXACT`, limiteur `gw-service-status`. Garde : `test/serviceControl/edgeRelay.test.js`.
+
 ## Conventions
 
 - Architecture en couches : routes → controllers → services → models. Les routes ne contiennent aucune logique métier, les controllers restent minces.
