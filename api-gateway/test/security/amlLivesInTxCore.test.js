@@ -143,9 +143,13 @@ test("Tx-Core porte bien l'AML unique, criblage compris", { skip: !moteurPresent
   assert.match(aml, /SANCTIONS_SCREENING_BLOCKED/);
   assert.match(aml, /COMPLIANCE_REVIEW_REQUIRED/);
 
-  /** Les plafonds, qui étaient appliqués en triple. */
-  assert.match(aml, /getSingleTxLimit\(/);
-  assert.match(aml, /getDailyLimit\(/);
+  /**
+   * Les plafonds, qui étaient appliqués en triple — un seul point d'entrée
+   * depuis le 2026-10-17 (`services/limits/limitService`, par opération,
+   * 24 h et 30 jours).
+   */
+  assert.match(aml, /getLimitService\(\)\.checkLimit\(/);
+  assert.match(aml, /if \(!limitCheck\.allowed\)/);
 
   /** Les listes et la porte PEP, qui existaient des deux côtés. */
   assert.match(aml, /findBlacklistHit\(/);

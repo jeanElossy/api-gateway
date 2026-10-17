@@ -126,6 +126,8 @@ const {
 } = require("./middlewares/publicCagnotteRead");
 const pricingRulesRoutes = require("../routes/pricingRulesRoutes");
 const pricingChangeRequestsRoutes = require("../routes/pricingChangeRequestsRoutes");
+const limitsRoutes = require("../routes/limitsRoutes");
+const limitPoliciesRoutes = require("../routes/limitPoliciesRoutes");
 const requireNotRestricted = require("./middlewares/requireNotRestricted");
 const validateInternalToken = require("./middlewares/validateInternalToken");
 const providerWebhooksRoutes = require("../routes/providerWebhookRoutes");
@@ -1645,6 +1647,13 @@ app.use("/api/v1/pricing", pricingRoutes);
 app.use("/api/v1/fx-rules", fxRulesRoutes);
 app.use("/api/v1/pricing-rules", pricingRulesRoutes);
 app.use("/api/v1/pricing-change-requests", pricingChangeRequestsRoutes);
+
+/**
+ * Plafonds (2026-10-17) — relais purs vers Tx-Core : le client lit ses
+ * plafonds, le back-office gouverne la politique (quatre yeux côté Tx-Core).
+ */
+app.use("/api/v1/limits", limitsRoutes);
+app.use("/api/v1/limit-policies", limitPoliciesRoutes);
 
 /**
  * Surfaces PROXIFIÉES sensibles : le gateway les transmet au backend principal
