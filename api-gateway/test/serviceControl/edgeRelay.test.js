@@ -238,3 +238,36 @@ test("the two public status routes are open in EXACT, proxied, and rate limited"
   assert.ok(principal.includes('"/api/v1/app"') && principal.includes('"/api/v1/status"'));
   assert.ok(src.includes('"X-PayNoval-Service-Control"'), "the header must be exposed to the browser (CORS)");
 });
+
+/* ------------------------------------- 5. eligibility check relays a refusal */
+
+test("profile check: a backend maintenance reaches the app as MAINTENANCE_ACTIVE, not 'profile unavailable'", async () => {
+  process.env.PRINCIPAL_API_BASE_URL = process.env.PRINCIPAL_API_BASE_URL || "http://principal.test";
+  fakeAxios.get = () => fakeAxios();
+  nextResponse = {
+    status: 503,
+    headers: { "x-paynoval-service-control": "MAINTENANCE_ACTIVE", "retry-after": "900" },
+    data: { success: false, code: "MAINTENANCE_ACTIVE", message: "PayNoval est en maintenance." },
+  };
+
+  const eligibility = require("../../src/middlewares/requireTransactionEligibility");
+  const res = fakeRes();
+  let nextCalled = false;
+  await eligibility({ headers: { authorization: "Bearer t" }, user: { _id: "u1" }, body: {} }, res, () => { nextCalled = true; });
+
+  assert.equal(nextCalled, false);
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.code, "MAINTENANCE_ACTIVE");
+  assert.equal(res.headers["Retry-After"], "900");
+});
+
+test("profile check: a real outage still says 'profile unavailable'", async () => {
+  fakeAxios.get = () => fakeAxios();
+  nextResponse = { status: 503, headers: {}, data: { success: false } };
+
+  const eligibility = require("../../src/middlewares/requireTransactionEligibility");
+  const res = fakeRes();
+  await eligibility({ headers: { authorization: "Bearer t" }, user: { _id: "u1" }, body: {} }, res, () => {});
+  assert.equal(res.body.code !== "MAINTENANCE_ACTIVE", true);
+  assert.equal(res.statusCode, 503);
+});
