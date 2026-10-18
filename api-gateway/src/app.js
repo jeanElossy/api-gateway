@@ -408,6 +408,8 @@ const ALLOWED_HEADERS = [
 const EXPOSED_HEADERS = [
   "Retry-After",
   "X-PayNoval-Service-Control",
+  // Staff 2FA grace period signal, read by the console (2026-10-18).
+  "X-Staff-2FA-Required",
   "X-RateLimit-Limit",
   "X-RateLimit-Remaining",
   "X-Request-Id",
