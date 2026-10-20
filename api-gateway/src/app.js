@@ -126,6 +126,7 @@ const {
   makePublicCagnotteRead,
   publicCagnotteLimits,
 } = require("./middlewares/publicCagnotteRead");
+const { makePublicEmailUnsubscribe } = require("./middlewares/publicEmailUnsubscribe");
 const pricingRulesRoutes = require("../routes/pricingRulesRoutes");
 const pricingChangeRequestsRoutes = require("../routes/pricingChangeRequestsRoutes");
 const limitsRoutes = require("../routes/limitsRoutes");
@@ -1478,6 +1479,37 @@ app.use(
   makePublicCagnotteRead({
     proxy: principalProxy,
     limiter: publicCagnotteLimiter,
+    setCors: setCorsHeaders,
+  })
+);
+
+/**
+ * Désinscription des e-mails marketing (2026-10-20) : le lien de chaque e-mail
+ * et le POST « un clic » de Gmail / Yahoo ne peuvent pas signer. Chemin exact,
+ * limite dédiée, AVANT la vérification de signature
+ * (src/middlewares/publicEmailUnsubscribe.js).
+ */
+const publicEmailUnsubscribeLimiter = rateLimit({
+  name: "gw-public-email-unsubscribe",
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    setCorsHeaders(req, res);
+    res.status(429).json({
+      success: false,
+      code: "RATE_LIMITED",
+      message: "Trop de requêtes. Réessaie dans un instant.",
+    });
+  },
+});
+
+app.use(
+  "/api/v1/public",
+  makePublicEmailUnsubscribe({
+    proxy: principalProxy,
+    limiter: publicEmailUnsubscribeLimiter,
     setCors: setCorsHeaders,
   })
 );

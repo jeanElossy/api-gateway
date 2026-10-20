@@ -22,6 +22,8 @@ npm start                  # node src/server.js
 npm test                   # node --test "test/**/*.test.js" — 235 tests, verts (mesuré le 2026-09-15)
 # Page invité : GET /api/v1/public/cagnottes/by-code/:code (+ /quote) est servie SANS signature HMAC,
 # chemin exact, limiteur `gw-public-cagnotte` (src/middlewares/publicCagnotteRead.js, 2026-09-15).
+# Désinscription marketing : GET/HEAD/POST /api/v1/public/email/unsubscribe, SANS signature (lien d'e-mail,
+# « un clic » RFC 8058), chemin exact, limiteur `gw-public-email-unsubscribe` (src/middlewares/publicEmailUnsubscribe.js, 2026-10-20).
 node --test test/pricing/diff.test.js   # un seul fichier de test
 node generate-secrets.js   # régénère JWT_SECRET / INTERNAL_TOKEN et réécrit .env
 ```
@@ -97,7 +99,7 @@ Conséquence pour tester : un appel sans jeton sur ces deux routes est désormai
 |---|---|---|
 | **JWT** user/admin | `Authorization: Bearer` | Vérifié avec `JWT_SECRET`/`PRINCIPAL_JWT_SECRET`, puis l'utilisateur est **chargé depuis la base users**. Les rôles `admin`/`superadmin`/`support` contournent les limiters utilisateur ; `requireRole` est dans [src/middlewares/authz.js](src/middlewares/authz.js). |
 | **Token interne** | `x-internal-token` | `GATEWAY_INTERNAL_TOKEN` (fallback `INTERNAL_TOKEN`), comparé en temps constant. Accepté **uniquement** sur `INTERNAL_ALLOWED_PREFIXES` dans [src/middlewares/auth.js](src/middlewares/auth.js), pour qu'un token fuité ne pilote pas tout le gateway. Positionne `req.user = { system: true, role: "internal-service" }` — attention : `requireRole` laisse passer `internal-service` sur *n'importe quel* contrôle de rôle. |
-| **HMAC public** | `x-signature` + `x-ts` | Pour `/api/v1/public/*`. Payload canonique `ts\nMETHOD\npath\nqueryTriée` en HMAC-SHA256 avec `PUBLIC_READONLY_HMAC_SECRET`, fenêtre anti-rejeu `PUBLIC_SIGNATURE_TTL_SEC`. Implémenté dans `config.verifyPublicSignature`. `/public/fx/latest` et `/public/fx/history` sont exemptés. |
+| **HMAC public** | `x-signature` + `x-ts` | Pour `/api/v1/public/*`. Payload canonique `ts\nMETHOD\npath\nqueryTriée` en HMAC-SHA256 avec `PUBLIC_READONLY_HMAC_SECRET`, fenêtre anti-rejeu `PUBLIC_SIGNATURE_TTL_SEC`. Implémenté dans `config.verifyPublicSignature`. `/public/fx/latest` et `/public/fx/history` sont exemptés, ainsi que la lecture de cagnotte par code et la désinscription marketing (`/public/email/unsubscribe`, 2026-10-20 — elle répondait 401 avant). |
 
 En sortie vers le principal, le proxy injecte `x-internal-token: PRINCIPAL_INTERNAL_TOKEN` et `x-forwarded-service: api-gateway`, et retransmet `Authorization`, le request-id, l'idempotency et les en-têtes analytics.
 
