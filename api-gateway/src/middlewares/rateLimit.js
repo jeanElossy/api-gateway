@@ -335,6 +335,32 @@ const serviceStatusLimiter = rateLimit({
   },
 });
 
+/**
+ * Status-page e-mail subscriptions (2026-10-20): a public form that sends an
+ * e-mail is a spam relay waiting to happen. Narrow per IP; the backend adds
+ * its own, narrower, limit on `/subscribe`.
+ */
+const statusSubscriptionLimiter = rateLimit({
+  name: "gw-status-subscription",
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => `svc-status-sub:${rateLimitIpKey(req)}`,
+  handler: (req, res, _next, options) => {
+    const retryAfter = setRetryAfter(res, options.windowMs);
+
+    return res.status(429).json({
+      success: false,
+      code: "RATE_LIMITED",
+      error: "Trop de demandes. Réessaie plus tard.",
+      message: "Trop de demandes. Réessaie plus tard.",
+      retryAfter,
+    });
+  },
+});
+
 /* ------------------------------------------------------------------ */
 /* 5) Limiteur dédié admin transactions                               */
 /* ------------------------------------------------------------------ */
@@ -524,6 +550,7 @@ module.exports = {
   meLimiter,
   announcementsLimiter,
   serviceStatusLimiter,
+  statusSubscriptionLimiter,
   adminTransactionsLimiter,
   adminAdjustmentsLimiter,
   userLimiter,

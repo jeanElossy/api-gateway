@@ -97,6 +97,7 @@ const {
   meLimiter,
   announcementsLimiter,
   serviceStatusLimiter,
+  statusSubscriptionLimiter,
   adminTransactionsLimiter,
   adminAdjustmentsLimiter,
   userLimiter,
@@ -588,6 +589,8 @@ app.use("/api/v1/auth/login-2fa", authLoginLimiter);
 app.use("/api/v1/announcements", announcementsLimiter);
 app.use("/api/v1/app/status", serviceStatusLimiter);
 app.use("/api/v1/status/public", serviceStatusLimiter);
+app.use("/api/v1/status/subscribe", statusSubscriptionLimiter);
+app.use("/api/v1/status/unsubscribe", statusSubscriptionLimiter);
 
 app.use("/api/v1", (req, res, next) => {
   res.setHeader(
@@ -1233,6 +1236,16 @@ const OPEN_EXACT = [
    */
   "/api/v1/app/status",
   "/api/v1/status/public",
+
+  /**
+   * Abonnement e-mail à la page de statut (2026-10-20) — un visiteur sans
+   * compte. Double confirmation et désinscription par lien signé côté backend
+   * (services/statusSubscriptions/policy.js). En EXACT, comme le reste de
+   * `/api/v1/status`.
+   */
+  "/api/v1/status/subscribe",
+  "/api/v1/status/subscribe/confirm",
+  "/api/v1/status/unsubscribe",
 
   /**
    * Collecte analytique du site public. Appelée par le navigateur d'un visiteur

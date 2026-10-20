@@ -239,6 +239,17 @@ test("the two public status routes are open in EXACT, proxied, and rate limited"
   assert.ok(src.includes('"X-PayNoval-Service-Control"'), "the header must be exposed to the browser (CORS)");
 });
 
+test("status-page e-mail subscription routes are open in EXACT and rate limited", () => {
+  const src = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+  const openExact = src.slice(src.indexOf("const OPEN_EXACT = ["), src.indexOf("const OPEN_PREFIX = ["));
+
+  for (const p of ["/api/v1/status/subscribe", "/api/v1/status/subscribe/confirm", "/api/v1/status/unsubscribe"]) {
+    assert.ok(openExact.includes(`"${p}"`), `${p} must be in OPEN_EXACT`);
+  }
+  assert.ok(src.includes('app.use("/api/v1/status/subscribe", statusSubscriptionLimiter)'));
+  assert.ok(src.includes('app.use("/api/v1/status/unsubscribe", statusSubscriptionLimiter)'));
+});
+
 /* ------------------------------------- 5. eligibility check relays a refusal */
 
 test("profile check: a backend maintenance reaches the app as MAINTENANCE_ACTIVE, not 'profile unavailable'", async () => {
