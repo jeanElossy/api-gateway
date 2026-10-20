@@ -20,6 +20,7 @@ const {
   getInsightsOrThrow,
 } = require("../src/services/transactions/orchestrator");
 const { invalidateUserListCache } = require("../src/services/transactions/listCache");
+const { relayEngineError } = require("../src/services/serviceControlRelay");
 
 const actorId = (req) => req?.user?._id || req?.user?.id || null;
 
@@ -82,6 +83,20 @@ function sendProxyError(res, err, fallbackMessage = "Erreur interne provider") {
         : ["provider_cooldown"],
       retryAfterSec: cd?.retryAfterSec,
     });
+  }
+
+  /**
+   * The engine answered with a JSON error: relay it WITH its machine code
+   * (`code`, `serviceControl`, limit details…) and its `Retry-After`. Before
+   * 2026-10-17 this function rebuilt `{ message, error, details }` and the code
+   * was lost — the app could not tell a limit, a maintenance or a fraud refusal
+   * apart. Contract: docs/architecture/service-control.md §5.
+   */
+  const relayed = relayEngineError(err);
+
+  if (relayed && relayed.status >= 400) {
+    for (const [name, value] of Object.entries(relayed.headers)) res.setHeader(name, value);
+    return res.status(relayed.status).json(relayed.body);
   }
 
   const status = err?.response?.status || err?.status || 502;

@@ -17,6 +17,7 @@
  */
 
 const axios = require("axios");
+const { isDeliberateRefusal, relayEngineError } = require("../services/serviceControlRelay");
 
 let config = {};
 try {
@@ -504,6 +505,20 @@ module.exports = async function requireTransactionEligibility(req, res, next) {
 
     return next();
   } catch (err) {
+    /**
+     * A DELIBERATE refusal of the backend (maintenance, update required —
+     * docs/architecture/service-control.md) is relayed as is: the user must
+     * read "PayNoval is in maintenance", not "unable to check your profile",
+     * and a blocked app version must reach the update screen.
+     */
+    if (isDeliberateRefusal(err?.response)) {
+      const relayed = relayEngineError(err);
+      if (relayed) {
+        for (const [name, value] of Object.entries(relayed.headers)) res.setHeader(name, value);
+        return res.status(relayed.status).json(relayed.body);
+      }
+    }
+
     const status = err?.response?.status || err?.status || 503;
 
     logger.error?.("[Gateway][TX eligibility] profile check failed", {

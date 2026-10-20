@@ -12,6 +12,7 @@
 
 const axios = require("axios");
 const { createCircuitBreaker } = require("../circuitBreaker");
+const { isDeliberateRefusal } = require("../serviceControlRelay");
 
 function reqAny(paths) {
   for (const p of paths) {
@@ -204,6 +205,27 @@ async function safeAxiosRequest(opts) {
 
     return response;
   } catch (err) {
+    /**
+     * A deliberate refusal (maintenance, read-only, lockdown, update required)
+     * proves the service is UP and answering: it is a success for the breaker,
+     * never a failure. Counting it opened the circuit on the whole Tx-Core
+     * origin — provider-webhook relay included — for up to 5 min, and kept it
+     * open after the reopening. Contract: docs/architecture/service-control.md.
+     */
+    if (isDeliberateRefusal(err.response)) {
+      breaker.onSuccess(circuitKey);
+
+      const e = new Error(err.message || "Refus du contrôle de service");
+      e.status = err.response.status;
+      e.response = err.response;
+      e.isServiceControl = true;
+      e.isCloudflareChallenge = false;
+      e.isRateLimited = false;
+      e.isProviderCooldown = false;
+      e.cooldown = null;
+      throw e;
+    }
+
     const status = err.response?.status || err.status || 502;
     const data = err.response?.data || null;
     const message = err.message || "Erreur axios inconnue";

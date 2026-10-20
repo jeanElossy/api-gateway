@@ -96,6 +96,7 @@ const {
   authAccountLimiter,
   meLimiter,
   announcementsLimiter,
+  serviceStatusLimiter,
   adminTransactionsLimiter,
   adminAdjustmentsLimiter,
   userLimiter,
@@ -369,6 +370,19 @@ const ALLOWED_HEADERS = [
   "idempotency-key",
   "x-idempotency-key",
 
+  // Service-control console: 2FA re-authentication of a critical action
+  // (docs/architecture/service-control.md §11). Without it the browser's
+  // preflight refused EVERY critical action of the console.
+  "X-Step-Up-Token",
+  "x-step-up-token",
+
+  // App identity (contract §9) — sent by the web public pages too.
+  "X-App-Version",
+  "X-App-Platform",
+  "X-App-Build",
+  "X-App-Update-Id",
+  "X-App-Runtime-Version",
+
   "x-internal-token",
   "x-paynoval-internal-token",
 
@@ -393,6 +407,9 @@ const ALLOWED_HEADERS = [
 
 const EXPOSED_HEADERS = [
   "Retry-After",
+  "X-PayNoval-Service-Control",
+  // Staff 2FA grace period signal, read by the console (2026-10-18).
+  "X-Staff-2FA-Required",
   "X-RateLimit-Limit",
   "X-RateLimit-Remaining",
   "X-Request-Id",
@@ -569,6 +586,8 @@ if (shouldLogVerbose) {
 app.use("/api/v1/auth/login", authLoginLimiter, authAccountLimiter);
 app.use("/api/v1/auth/login-2fa", authLoginLimiter);
 app.use("/api/v1/announcements", announcementsLimiter);
+app.use("/api/v1/app/status", serviceStatusLimiter);
+app.use("/api/v1/status/public", serviceStatusLimiter);
 
 app.use("/api/v1", (req, res, next) => {
   res.setHeader(
@@ -884,6 +903,8 @@ const PRINCIPAL_PREFIXES = [
   "/api/v1/moderation",
   "/api/v1/announcements",
   "/api/v1/app-version",
+  "/api/v1/app",
+  "/api/v1/status",
   "/api/v1/referrals",
 
   /**
@@ -1202,6 +1223,16 @@ const OPEN_EXACT = [
    * En EXACT : seul `/check` est ouvert, le reste du préfixe reste protégé.
    */
   "/api/v1/app-version/check",
+
+  /**
+   * Centre de contrôle de service (2026-10-17) — état lu par l'app AVANT la
+   * connexion (écran de maintenance, mise à jour) et par la page de statut
+   * publique. Ne divulgue rien d'interne : ni motif, ni administrateur, ni
+   * infrastructure. En EXACT : `/api/v1/app/*` et `/api/v1/status/*` restent
+   * protégés. Contrat : docs/architecture/service-control.md §10.
+   */
+  "/api/v1/app/status",
+  "/api/v1/status/public",
 
   /**
    * Collecte analytique du site public. Appelée par le navigateur d'un visiteur
