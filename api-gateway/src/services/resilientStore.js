@@ -130,6 +130,11 @@ function createResilientStore({
   return {
     /** express-rate-limit lit cette propriété pour avertir en cas de mauvaise config. */
     localKeys: false,
+    // express-rate-limit tells limiters apart by this prefix: without it, two
+    // limiters on the same key read as one request counted twice.
+    get prefix() {
+      return primary?.prefix;
+    },
 
     init(options) {
       try { primary.init?.(options); } catch {}

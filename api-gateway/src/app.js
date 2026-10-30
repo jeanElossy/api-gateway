@@ -76,6 +76,7 @@ const morgan = require("morgan");
 const { createReadiness } = require("./services/readiness");
 const axios = require("axios");
 const rateLimit = require("./middlewares/rateLimiter");
+const { trustProxy } = require("./utils/trustProxy");
 const {
   createProxyMiddleware,
   fixRequestBody,
@@ -197,7 +198,7 @@ const readiness = createReadiness({
 // et quand l'arrêt commence.
 app.set("readiness", readiness);
 
-app.set("trust proxy", 1);
+app.set("trust proxy", trustProxy);
 
 /**
  * ═══ MÉTRIQUES ════════════════════════════════════════════════════════════
@@ -853,7 +854,9 @@ function applyClientIpAttestation(proxyReq, req) {
   } catch (err) {
     // Not fatal for the request, but never silent: the principal will fall
     // back to the gateway address for this call.
-    logger.warn("[PROXY] attestation d'IP non posée", { message: err?.message });
+    // `reason`, not `message`: winston would replace the log line with it, and
+    // this warning used to read as an anonymous header error.
+    logger.warn("[PROXY] attestation d'IP non posée", { reason: err?.message });
   }
 }
 
@@ -978,10 +981,6 @@ function makePrincipalProxy() {
     onProxyReq: (proxyReq, req, res) => {
       if (res?.headersSent || res?.writableEnded) return;
 
-      try {
-        fixRequestBody(proxyReq, req);
-      } catch {}
-
       applyClientIpAttestation(proxyReq, req);
 
       const requestId = req.headers["x-request-id"];
@@ -1061,6 +1060,17 @@ function makePrincipalProxy() {
 
       try {
         proxyReq.setHeader("x-forwarded-service", "api-gateway");
+      } catch {}
+
+      /**
+       * ⚠️ TOUJOURS EN DERNIER. `fixRequestBody` écrit le corps, ce qui envoie
+       * les en-têtes : tout `setHeader` placé après lève
+       * ERR_HTTP_HEADERS_SENT. Sur chaque POST, l'attestation d'IP n'était donc
+       * jamais posée et le principal voyait l'adresse de la passerelle à la
+       * place du visiteur (2026-10-30).
+       */
+      try {
+        fixRequestBody(proxyReq, req);
       } catch {}
     },
 
