@@ -379,6 +379,12 @@ const ALLOWED_HEADERS = [
   "X-Step-Up-Token",
   "x-step-up-token",
 
+  // Staff console session (paynoval-backend services/auth/staffSessions.js).
+  "X-PayNoval-Console",
+  "x-paynoval-console",
+  "X-Staff-Idle-Ms",
+  "x-staff-idle-ms",
+
   // App identity (contract §9) — sent by the web public pages too.
   "X-App-Version",
   "X-App-Platform",
