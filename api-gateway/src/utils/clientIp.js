@@ -7,13 +7,13 @@
  *
  * Constat du 2026-10-08 : les limiteurs de la passerelle prenaient pour clé
  * `cf-connecting-ip`, puis l'entrée GAUCHE de `X-Forwarded-For`, puis
- * `x-real-ip` — trois en-têtes que le CLIENT écrit (aucun Cloudflare devant).
- * Changer l'en-tête à chaque requête donnait un compteur neuf : la limite de
- * connexion ne protégeait plus rien.
+ * `x-real-ip` — trois en-têtes que le CLIENT écrit. Changer l'en-tête à chaque
+ * requête donnait un compteur neuf : la limite de connexion ne protégeait plus
+ * rien.
  *
  * Seule source fiable ici : `req.ip`, calculée par Express selon `trust proxy`
- * (= 1 saut, le répartiteur Render, qui AJOUTE l'adresse réelle à droite de la
- * chaîne). Pour les clés de limitation, une adresse IPv6 est ramenée à son
+ * (voir `utils/trustProxy.js` : le répartiteur Render, puis Cloudflare devant
+ * lui, constaté en production le 2026-10-30). Pour les clés de limitation, une adresse IPv6 est ramenée à son
  * préfixe /64 (un client en possède des milliards), comme `ipKeyGenerator`
  * d'express-rate-limit 7.
  */
