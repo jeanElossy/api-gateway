@@ -13,6 +13,7 @@ const router = express.Router();
 
 const authMod = require("../src/middlewares/auth");
 const { requireRole } = require("../src/middlewares/authz");
+const { requireStepUp } = require("../src/middlewares/requireStepUp");
 const { relayerVers } = require("../src/services/txCoreRelay");
 
 const authMiddleware = authMod.authMiddleware || authMod.protect || authMod;
@@ -22,7 +23,7 @@ const relais = relayerVers("/api/v1/limit-policies");
 
 router.get("/", authMiddleware, requireRole(LIMIT_STAFF), relais);
 router.post("/", authMiddleware, requireRole(LIMIT_STAFF), relais);
-router.post("/:version/approve", authMiddleware, requireRole(LIMIT_STAFF), relais);
+router.post("/:version/approve", authMiddleware, requireRole(LIMIT_STAFF), requireStepUp, relais);
 router.post("/:version/reject", authMiddleware, requireRole(LIMIT_STAFF), relais);
 
 module.exports = router;
