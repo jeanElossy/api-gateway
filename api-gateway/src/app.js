@@ -896,6 +896,7 @@ const PRINCIPAL_PREFIXES = [
   "/api/v1/verification",
   "/api/v1/kyc",
   "/api/v1/legal",
+  "/api/v1/demo-invitations",
   "/api/v1/badges",
   "/api/v1/upload",
   "/api/v1/rates",
@@ -1384,6 +1385,12 @@ const OPEN_PREFIX = [
    * ouvert : le reste de `/api/v1/sandbox` exige le JWT.
    */
   "/api/v1/sandbox/3ds",
+
+  /**
+   * Invitation à un accès démo : la personne n'a pas encore de compte. Le jeton
+   * à usage unique de l'URL (haché, à durée limitée) est l'autorisation.
+   */
+  "/api/v1/demo-invitations",
 
   /**
    * ⚠️ `/api/v1/analytics` figurait ici, en PRÉFIXE.
