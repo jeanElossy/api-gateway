@@ -50,3 +50,12 @@ test("the claims match the backend that issues the token", () => {
   assert.ok(source.includes(`PURPOSE = "${PURPOSE}"`));
   assert.ok(source.includes(`AUDIENCE = "${AUDIENCE}"`));
 });
+
+test("publishing a price asks for a recent 2FA, like a limit", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "../../routes/pricingChangeRequestsRoutes.js"),
+    "utf8"
+  );
+  assert.match(source, /"\/:id\/approve",[^;]*requireStepUp[^;]*relais/);
+  assert.match(source, /"\/:id\/retry-apply",[^;]*requireStepUp[^;]*relais/);
+});
