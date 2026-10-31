@@ -24,6 +24,19 @@ const { startupReport: envStartupReport } = require('./services/appEnv');
 }
 
 /**
+ * ═══ FRONTIÈRE DES MONDES — AVANT TOUT LE RESTE ═══════════════════════════
+ *
+ * La production refuse tout ce qui ouvrirait la simulation ; la simulation
+ * refuse toute clé d'un service réel. Voir `services/sandboxEnvironment.js`.
+ */
+try {
+  require('./services/sandboxEnvironment').assertEnvironmentBoundary();
+} catch (err) {
+  console.error(`❌ Démarrage refusé — ${err?.message}`);
+  process.exit(1);
+}
+
+/**
  * ═══ SUIVI D'ERREURS — AVANT `./app` ════════════════════════════════════
  *
  * ⚠️ `./app` monte Express et tous les middlewares. Depuis la v8 du SDK,
