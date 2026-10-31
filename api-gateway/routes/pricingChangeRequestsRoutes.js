@@ -20,6 +20,7 @@ const router = express.Router();
 
 const authMod = require("../src/middlewares/auth");
 const { requireRole } = require("../src/middlewares/authz");
+const { requireStepUp } = require("../src/middlewares/requireStepUp");
 const { relayerVers } = require("../src/services/txCoreRelay");
 
 const authMiddleware = authMod.authMiddleware || authMod.protect || authMod;
@@ -33,7 +34,8 @@ router.post("/", authMiddleware, requireRole(STAFF), relais);
 router.get("/:id", authMiddleware, requireRole(STAFF), relais);
 router.get("/:id/preview", authMiddleware, requireRole(STAFF), relais);
 
-router.post("/:id/approve", authMiddleware, requireRole(STAFF), relais);
+/* Publishing a price reaches every customer: recent 2FA, as for limits. */
+router.post("/:id/approve", authMiddleware, requireRole(STAFF), requireStepUp, relais);
 router.post("/:id/reject", authMiddleware, requireRole(STAFF), relais);
 router.post("/:id/cancel", authMiddleware, requireRole(STAFF), relais);
 
@@ -42,6 +44,7 @@ router.post(
   "/:id/retry-apply",
   authMiddleware,
   requireRole(["superadmin"]),
+  requireStepUp,
   relais
 );
 
