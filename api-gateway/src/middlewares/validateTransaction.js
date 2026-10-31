@@ -245,6 +245,8 @@ const txMetaSchema = {
   reference: Joi.string().max(128).optional(),
 
   quoteId: Joi.string().max(128).optional(),
+
+  promoCode: Joi.string().trim().max(40).optional(),
   pricingId: Joi.string().max(128).optional(),
   pricingLockId: Joi.string().max(128).optional(),
   lockId: Joi.string().max(128).optional(),

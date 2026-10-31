@@ -21,7 +21,7 @@ test("every limit-policy route requires a staff role", () => {
   const src = read("routes/limitPoliciesRoutes.js");
   const routes = src.match(/router\.(get|post|put|patch|delete)\([^\n]+/g) || [];
   assert.equal(routes.length, 4);
-  for (const line of routes) assert.match(line, /authMiddleware, requireRole\(LIMIT_STAFF\), relais/);
+  for (const line of routes) assert.match(line, /authMiddleware, requireRole\(LIMIT_STAFF\)(, requireStepUp)?, relais/);
   assert.match(src, /LIMIT_STAFF = \["admin", "superadmin", "compliance"\]/);
 });
 
