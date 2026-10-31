@@ -60,7 +60,7 @@
  * On tranche donc par le rayon d'impact, et on le dit :
  *
  *   · rôles STAFF (admin, superadmin, support, compliance, security,
- *     fraud-analyst) → FERMETURE. Un état de révocation illisible pour un compte
+ *     fraud-analyst, finance, readonly) → FERMETURE. Un état de révocation illisible pour un compte
  *     à privilèges est un refus. Ils sont peu nombreux ; leur verrouillage
  *     temporaire est acceptable, le contraire ne l'est pas.
  *   · utilisateurs ordinaires → OUVERTURE, avec journal d'erreur et métrique.
@@ -82,6 +82,8 @@ const ROLES_SENSIBLES = Object.freeze([
   "compliance",
   "security",
   "fraud-analyst",
+  "finance",
+  "readonly",
 ]);
 
 const PREFIXE = "authrev:";

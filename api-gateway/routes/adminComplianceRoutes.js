@@ -67,7 +67,7 @@ router.use(protect);
  */
 router.get(
   "/transactions",
-  requireRole(["admin", "superadmin"]),
+  requireRole(["admin", "superadmin", "compliance", "fraud-analyst", "readonly"]),
   relayerVers("/api/v1/internal/admin/compliance")
 );
 
