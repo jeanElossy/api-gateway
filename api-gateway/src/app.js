@@ -131,6 +131,7 @@ const { makePublicEmailUnsubscribe } = require("./middlewares/publicEmailUnsubsc
 const pricingRulesRoutes = require("../routes/pricingRulesRoutes");
 const pricingChangeRequestsRoutes = require("../routes/pricingChangeRequestsRoutes");
 const limitsRoutes = require("../routes/limitsRoutes");
+const promotionsRoutes = require("../routes/promotionsRoutes");
 const limitPoliciesRoutes = require("../routes/limitPoliciesRoutes");
 const requireNotRestricted = require("./middlewares/requireNotRestricted");
 const validateInternalToken = require("./middlewares/validateInternalToken");
@@ -1745,6 +1746,7 @@ app.use("/api/v1/pricing-change-requests", pricingChangeRequestsRoutes);
  * plafonds, le back-office gouverne la politique (quatre yeux côté Tx-Core).
  */
 app.use("/api/v1/limits", limitsRoutes);
+app.use("/api/v1/promotions", promotionsRoutes);
 app.use("/api/v1/limit-policies", limitPoliciesRoutes);
 
 /**
