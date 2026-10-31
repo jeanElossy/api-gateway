@@ -73,6 +73,7 @@ const mongoSanitize = require("express-mongo-sanitize");
 const xssClean = require("xss-clean");
 const hpp = require("hpp");
 const morgan = require("morgan");
+const { redactSecretPath } = require("./utils/secretPath");
 const { createReadiness } = require("./services/readiness");
 const axios = require("axios");
 const rateLimit = require("./middlewares/rateLimiter");
@@ -541,6 +542,7 @@ app.use(
 );
 
 if (shouldLogVerbose) {
+  morgan.token("url", (req) => redactSecretPath(req.originalUrl || req.url));
   app.use(morgan(config.logging?.level === "debug" ? "dev" : "combined"));
 }
 

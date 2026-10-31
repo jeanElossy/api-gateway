@@ -169,5 +169,13 @@ router.put("/scenario", relay({ method: "put", chemin: "/sandbox/scenario" }));
 router.post("/faucet", relay({ method: "post", chemin: "/sandbox/faucet", invalidate: true }));
 router.post("/drain", relay({ method: "post", chemin: "/sandbox/drain", invalidate: true }));
 router.post("/reset", relay({ method: "post", chemin: "/sandbox/reset", invalidate: true }));
+router.get("/transfers/pending", relay({ method: "get", chemin: "/sandbox/transfers/pending" }));
+router.post("/transfers/:id/confirm", (req, res) =>
+  relay({
+    method: "post",
+    chemin: `/sandbox/transfers/${encodeURIComponent(req.params.id)}/confirm`,
+    invalidate: true,
+  })(req, res)
+);
 
 module.exports = router;

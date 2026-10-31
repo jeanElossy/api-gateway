@@ -2,6 +2,7 @@ const { getClientIp } = require("../utils/clientIp");
 // src/middlewares/logger.js
 
 const logger = require('../logger');
+const { redactSecretPath } = require('../utils/secretPath');
 
 // Champs à masquer dans les logs (RGPD, PCI DSS, etc.)
 const SENSITIVE_FIELDS = [
@@ -68,7 +69,7 @@ module.exports.loggerMiddleware = (req, res, next) => {
     const logMsg = {
       timestamp: new Date().toISOString(),
       method,
-      url: originalUrl,
+      url: redactSecretPath(originalUrl),
       status: res.statusCode,
       duration: `${duration}ms`,
       user: req.user?.email || null,
