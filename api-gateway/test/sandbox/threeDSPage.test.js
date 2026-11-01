@@ -16,6 +16,7 @@ const page = require("../../src/services/sandbox/threeDSPage");
 test("le retour n'accepte QUE les schémas de l'application", () => {
   assert.equal(page.safeReturnUrl("paynoval://payment-auth/return"), "paynoval://payment-auth/return");
   assert.equal(page.safeReturnUrl("exp+paynoval://payment-auth/return"), "exp+paynoval://payment-auth/return");
+  assert.equal(page.safeReturnUrl("paynoval-demo://payment-auth/return"), "paynoval-demo://payment-auth/return");
   assert.equal(page.safeReturnUrl("exp://192.168.1.10:8081/--/payment-auth/return"), "exp://192.168.1.10:8081/--/payment-auth/return");
 
   for (const bad of [

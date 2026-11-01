@@ -73,6 +73,7 @@ const mongoSanitize = require("express-mongo-sanitize");
 const xssClean = require("xss-clean");
 const hpp = require("hpp");
 const morgan = require("morgan");
+const { redactSecretPath } = require("./utils/secretPath");
 const { createReadiness } = require("./services/readiness");
 const axios = require("axios");
 const rateLimit = require("./middlewares/rateLimiter");
@@ -541,6 +542,7 @@ app.use(
 );
 
 if (shouldLogVerbose) {
+  morgan.token("url", (req) => redactSecretPath(req.originalUrl || req.url));
   app.use(morgan(config.logging?.level === "debug" ? "dev" : "combined"));
 }
 
@@ -896,6 +898,7 @@ const PRINCIPAL_PREFIXES = [
   "/api/v1/verification",
   "/api/v1/kyc",
   "/api/v1/legal",
+  "/api/v1/demo-invitations",
   "/api/v1/badges",
   "/api/v1/upload",
   "/api/v1/rates",
@@ -1384,6 +1387,12 @@ const OPEN_PREFIX = [
    * ouvert : le reste de `/api/v1/sandbox` exige le JWT.
    */
   "/api/v1/sandbox/3ds",
+
+  /**
+   * Invitation à un accès démo : la personne n'a pas encore de compte. Le jeton
+   * à usage unique de l'URL (haché, à durée limitée) est l'autorisation.
+   */
+  "/api/v1/demo-invitations",
 
   /**
    * ⚠️ `/api/v1/analytics` figurait ici, en PRÉFIXE.

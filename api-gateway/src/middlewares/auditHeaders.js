@@ -1,4 +1,5 @@
 // /src/middlewares/auditHeaders.js
+const { redactSecretPath } = require("../utils/secretPath");
 const { randomUUID: uuidv4 } = require('crypto');
 const config = require('../config');
 const logger = require('../logger');
@@ -74,7 +75,7 @@ module.exports = function auditHeaders(req, res, next) {
       requestId: req.headers['x-request-id'],
       userId: req.headers['x-user-id'] || null,
       sessionId: req.headers['x-session-id'] || null,
-      path: req.path,
+      path: redactSecretPath(req.path),
     });
   } catch (e) {
     // noop, logging failure ne doit pas bloquer

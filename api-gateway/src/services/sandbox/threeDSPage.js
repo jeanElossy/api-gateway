@@ -26,7 +26,7 @@
  *    ouvert vers un site web.
  */
 
-const RETURN_URL = /^(paynoval|exp\+paynoval|exp):\/\/[^\s"'<>\\]{0,400}$/i;
+const RETURN_URL = /^(paynoval|paynoval-demo|exp\+paynoval|exp):\/\/[^\s"'<>\\]{0,400}$/i;
 
 function escapeHtml(value) {
   return String(value ?? "")

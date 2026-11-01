@@ -1,5 +1,6 @@
 "use strict";
 
+const { redactSecretPath } = require("../utils/secretPath");
 const crypto = require("crypto");
 const rateLimit = require("./rateLimiter");
 const config = require("../config");
@@ -124,7 +125,7 @@ const globalIpLimiter = rateLimit({
       subject: verifiedUserId(req) ? "account" : "ip",
       userId: verifiedUserId(req) || null,
       ip: getClientIp(req),
-      path: req.originalUrl,
+      path: redactSecretPath(req.originalUrl),
       method: req.method,
     });
 
@@ -150,7 +151,7 @@ const ipCeilingLimiter = rateLimit({
   handler: (req, res, _next, options) => {
     logger.warn("[RateLimit][ip-ceiling] Limit hit", {
       ip: getClientIp(req),
-      path: req.originalUrl,
+      path: redactSecretPath(req.originalUrl),
       method: req.method,
     });
 
@@ -186,7 +187,7 @@ const authLoginLimiter = rateLimit({
   handler: (req, res) => {
     logger.warn("[RateLimit][login] Limit hit", {
       ip: getClientIp(req),
-      path: req.originalUrl,
+      path: redactSecretPath(req.originalUrl),
       identifierDigest: loginIdentifierDigest(req),
       method: req.method,
     });
@@ -256,7 +257,7 @@ const meLimiter = rateLimit({
     logger.warn("[RateLimit][users/me] Limit hit", {
       userId: req.user && (req.user.id || req.user._id),
       ip: getClientIp(req),
-      path: req.originalUrl,
+      path: redactSecretPath(req.originalUrl),
       method: req.method,
     });
 
@@ -291,7 +292,7 @@ const announcementsLimiter = rateLimit({
   handler: (req, res, _next, options) => {
     logger.warn("[RateLimit][announcements] Limit hit", {
       ip: getClientIp(req),
-      path: req.originalUrl,
+      path: redactSecretPath(req.originalUrl),
       method: req.method,
       query: req.query || {},
     });
@@ -379,7 +380,7 @@ const adminTransactionsLimiter = rateLimit({
     logger.warn("[RateLimit][admin-transactions] Limit hit", {
       userId: req.user && (req.user.id || req.user._id),
       ip: getClientIp(req),
-      path: req.originalUrl,
+      path: redactSecretPath(req.originalUrl),
       method: req.method,
     });
 
@@ -430,7 +431,7 @@ const adminAdjustmentsLimiter = rateLimit({
     logger.warn("[RateLimit][admin-adjustments] Limit hit", {
       userId: req.user && (req.user.id || req.user._id),
       ip: getClientIp(req),
-      path: req.originalUrl,
+      path: redactSecretPath(req.originalUrl),
       method: req.method,
     });
 
@@ -478,7 +479,7 @@ const userLimiter = rateLimit({
     logger.warn("[RateLimit][user] Limit hit", {
       userId: req.user && (req.user.id || req.user._id),
       ip: getClientIp(req),
-      path: req.originalUrl,
+      path: redactSecretPath(req.originalUrl),
       method: req.method,
     });
 
@@ -525,7 +526,7 @@ const publicCollectionLimiter = rateLimit({
   handler: (req, res, _next, options) => {
     logger.warn("[RateLimit][public-collection] Limit hit", {
       ip: getClientIp(req),
-      path: req.originalUrl,
+      path: redactSecretPath(req.originalUrl),
       method: req.method,
     });
 

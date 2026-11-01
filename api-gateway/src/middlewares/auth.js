@@ -16,6 +16,8 @@ const { estRevoque } = require("../services/tokenRevocation");
  * complet, et `test/security/gatewayIsStateless.test.js` pour la garde.
  */
 const { verifyAccessTokenOrThrow } = require("../utils/accessToken");
+const { APP_ENV } = require("../services/appEnv");
+const { evaluateTokenEnvironment } = require("../services/sandboxEnvironment");
 
 /**
  * Émetteur, audiences et trousseau : `utils/accessToken.js` — mêmes variables
@@ -204,6 +206,16 @@ const authMiddleware = async (req, res, next) => {
         });
       }
       throw err;
+    }
+
+    // Un jeton n'est accepté que dans son monde (`services/sandboxEnvironment.js`).
+    const world = evaluateTokenEnvironment({ appEnv: APP_ENV, claimedEnv: payload?.env });
+    if (!world.ok) {
+      return res.status(world.status).json({
+        success: false,
+        error: world.message,
+        code: world.code,
+      });
     }
 
     const userId = resolveUserIdFromPayload(payload);
