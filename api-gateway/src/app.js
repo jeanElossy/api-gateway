@@ -1395,6 +1395,13 @@ const OPEN_PREFIX = [
   "/api/v1/demo-invitations",
 
   /**
+   * Réclamation d'un transfert par son destinataire (2026-11-04) : il n'a pas
+   * de compte. Le jeton à usage unique du lien reçu par SMS est l'autorisation,
+   * avec le code SMS et la réponse de sécurité ; Tx-Core vérifie tout.
+   */
+  "/api/v1/transfer-claims",
+
+  /**
    * ⚠️ `/api/v1/analytics` figurait ici, en PRÉFIXE.
    *
    * Tout le sous-arbre était donc réputé public — y compris les lectures
@@ -1630,6 +1637,9 @@ app.use("/api/v1/transactions", userTransactionRoutes);
  * de test (publique, jeton à usage unique). Relayés à Tx-Core, qui décide.
  */
 app.use("/api/v1/sandbox", require("../routes/sandbox"));
+
+/** Réclamation d'un transfert par son destinataire — relayée à Tx-Core (2026-11-04). */
+app.use("/api/v1/transfer-claims", require("../routes/transferClaims"));
 
 /**
  * IMPORTANT :
@@ -1871,9 +1881,10 @@ app.use((err, req, res, _next) => {
     ip: getClientIp(req),
     userAgent: req.headers["user-agent"],
     user: req.user?.email,
-    // Le corps n'est journalisé qu'hors production : il peut contenir des
-    // données personnelles ou des identifiants.
-    ...(IS_PRODUCTION ? {} : { body: req.body }),
+    // Le corps n'est journalisé qu'hors production, et MASQUÉ (2026-11-04) :
+    // jeton de réclamation, code SMS ou réponse de sécurité n'ont rien à faire
+    // dans un journal, fût-il de développement (règle B.4).
+    ...(IS_PRODUCTION ? {} : { body: require("./utils/redactSensitive").redactSensitive(req.body) }),
   });
 
   setCorsHeaders(req, res);

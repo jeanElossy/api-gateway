@@ -177,5 +177,13 @@ router.post("/transfers/:id/confirm", (req, res) =>
     invalidate: true,
   })(req, res)
 );
+// Nouveau lien de la page du destinataire d'un transfert vers un portefeuille
+// ou une carte (2026-11-04) : aucun SMS en démonstration.
+router.post("/transfers/:id/claim-link", (req, res) =>
+  relay({
+    method: "post",
+    chemin: `/sandbox/transfers/${encodeURIComponent(req.params.id)}/claim-link`,
+  })(req, res)
+);
 
 module.exports = router;
