@@ -5,8 +5,11 @@ const logger = require('../logger');
 const { redactSecretPath } = require('../utils/secretPath');
 
 // Champs à masquer dans les logs (RGPD, PCI DSS, etc.)
+// `answer` et `securityAnswer` ajoutés le 2026-11-04 : la réponse de sécurité
+// voyage dans le corps de `/transfer-claims/claim` et de `/transactions/confirm`.
 const SENSITIVE_FIELDS = [
-  'password', 'cardNumber', 'cvc', 'securityCode', 'token', 'code', 'otp'
+  'password', 'cardNumber', 'cvc', 'securityCode', 'token', 'code', 'otp',
+  'answer', 'securityAnswer',
 ];
 
 // Fonction récursive qui masque les champs sensibles dans les objets imbriqués
