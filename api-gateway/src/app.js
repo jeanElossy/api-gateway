@@ -70,7 +70,8 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const mongoSanitize = require("express-mongo-sanitize");
-const xssClean = require("xss-clean");
+// Équivalent exact de xss-clean (abandonné), 2026-11-11 : `middlewares/inputHtmlEscape.js`.
+const xssClean = require("./middlewares/inputHtmlEscape");
 const hpp = require("hpp");
 const morgan = require("morgan");
 const { redactSecretPath } = require("./utils/secretPath");
