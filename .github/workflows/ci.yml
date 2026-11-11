@@ -21,6 +21,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Chaque lundi, même sans poussée : une faille publiée dans la semaine se
+  # voit tout de suite (2026-11-11). Et à la main depuis l'onglet Actions.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -72,13 +77,13 @@ jobs:
       - run: npm ci
 
       # ─────────────────────────────────────────────────────────────────────
-      # CLIQUET — mesuré le 2026-08-26 : ZÉRO vulnérabilité, tous niveaux
-      # confondus. C'est le seul dépôt dans ce cas.
-      #
-      # Le seuil est donc réglé au maximum de sévérité : `low`. Toute
-      # dépendance vulnérable, même mineure, est refusée. C'est gratuit tant
-      # que le dépôt est propre, et c'est exactement le moment de le verrouiller
-      # — un dépôt sain se garde sain, il ne se nettoie pas deux fois.
+      # FAILLES DES DÉPENDANCES — UNE RÈGLE, LES CINQ DÉPÔTS (2026-11-11).
+      # `scripts/audit-gate.cjs` (identique à l'octet près partout) : critique
+      # ou haute ⇒ bloque ; moyenne dans le code livré ⇒ bloque ; le reste est
+      # signalé. Exceptions nommées, justifiées, compensées et datées (180 jours
+      # au plus) dans `audit-exceptions.json`. `npm audit` muet ⇒ échec.
+      # Remplace les seuils d'avant, différents par dépôt (une faille critique
+      # de Mongoose était passée sous « critical » / « high »).
       # ─────────────────────────────────────────────────────────────────────
-      - name: "npm audit (seuil : low — ce dépôt est propre, il doit le rester)"
-        run: npm audit --audit-level=low
+      - name: "Failles des dépendances (règle commune PayNoval)"
+        run: node scripts/audit-gate.cjs
