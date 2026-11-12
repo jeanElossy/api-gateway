@@ -42,6 +42,13 @@ const PROVIDERS = ["paynoval", "mobilemoney", "visa_direct", "card"];
 /** Opérateurs du rail mobile money — des prestataires, pas des rails. */
 const MOBILEMONEY_OPERATORS = ["orange", "mtn", "moov", "wave"];
 
+/**
+ * Opérateur du rail carte, tel que le téléphone le déclare au devis ET à
+ * l'initiation (`payNoval-master/utils/moneyMovement.js#moveRail`). Liste
+ * FERMÉE : un autre réseau sera ajouté ici le jour où un devis le portera.
+ */
+const CARD_OPERATORS = ["visa"];
+
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -355,6 +362,20 @@ const initiateSchemas = {
   visa_direct: Joi.object({
     ...baseInitiateSchema,
     ...outboundChallengeSchema,
+    /**
+     * ⚠️ `operator` FAIT PARTIE DU PRIX — 2026-11-12.
+     *
+     * Tx-Core compare l'opérateur du devis à celui de l'initiation
+     * (`api-paynoval/src/services/pricing/quoteConsumption.js`,
+     * `CHAMPS_ENGAGEANTS`). Ce schéma ne le déclarait pas et `stripUnknown` le
+     * retirait : le devis disait `visa`, la demande arrivait sans, et TOUT
+     * dépôt ou retrait par carte était refusé `409 QUOTE_MISMATCH` (mesuré en
+     * base : sept refus le 2026-11-12, différence `operator: visa → null`).
+     * Même défaut que la question de sécurité effacée le 2026-10-08.
+     * Vide accepté (un transfert qui n'en déclare pas) ; inconnu REFUSÉ ici,
+     * jamais effacé en silence.
+     */
+    operator: Joi.string().trim().lowercase().valid(...CARD_OPERATORS).allow("", null).optional(),
     cardId: Joi.string().trim().min(1).max(128).required(),
     cardLast4: Joi.string().pattern(/^\d{4}$/).optional(),
     cardHolder: Joi.string().max(64).optional(),
