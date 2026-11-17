@@ -3,8 +3,9 @@
 
 // Mapping code devise → symbole (clé = ISO)
 const CURRENCY_SYMBOLS = {
-  XOF: "F CFA",
-  XAF: "F CFA",
+  // « FCFA » (2026-11-17) : la même graphie que l'application et les e-mails.
+  XOF: "FCFA",
+  XAF: "FCFA",
   EUR: "€",
   USD: "$",
   CAD: "$CAD",
