@@ -509,7 +509,9 @@ function validateTransaction(action) {
      * travail du bord ; décider d'un montant maximal autorisé ne l'est pas.
      */
     const BORNE_NUMERIQUE = 1e15;
-    let currencyForMsg = "F CFA";
+    // Devise du message : celle de la demande, sinon AUCUNE — jamais une devise
+    // devinée (« F CFA » s'affichait pour un compte canadien, 2026-11-17).
+    let currencyForMsg = "";
 
     if (action === "initiate") {
       currencyForMsg = resolveCurrencyForLimits(body) || currencyForMsg;
@@ -561,7 +563,7 @@ function validateTransaction(action) {
         if (/less than or equal to (\d+)/i.test(msg)) {
           return msg.replace(
             /less than or equal to (\d+)/i,
-            (_m, p1) => `less than or equal to ${p1} ${currencyForMsg}`
+            (_m, p1) => `less than or equal to ${p1}${currencyForMsg ? ` ${currencyForMsg}` : ""}`
           );
         }
 
