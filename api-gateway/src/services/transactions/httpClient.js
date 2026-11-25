@@ -79,12 +79,72 @@ function getServiceKeyFromUrl(url) {
  * Signale un échec au disjoncteur. Le nom est conservé : plusieurs modules
  * l'importent, et la forme de retour n'a pas changé.
  */
+/**
+ * UN DISJONCTEUR PAR OPÉRATION, PAS PAR SERVICE (2026-11-25).
+ *
+ * Constaté : un transfert, un dépôt ou un retrait était refusé au premier essai
+ * (« Service PayNoval temporairement indisponible »), accepté au second. La
+ * clé du disjoncteur était l'ORIGINE de Tx-Core : la liste des transactions
+ * (relue sans cesse par l'app), le relais des webhooks, le bac à sable et les
+ * envois d'argent partageaient UN compteur. Cinq lectures en échec coupaient
+ * les envois de tous les utilisateurs pendant 30 s. Comme Hystrix ou
+ * resilience4j (un disjoncteur par commande) : la clé est l'origine, la
+ * nature de l'appel (lecture / écriture) et sa famille de route
+ * (`transactions`, `internal`, `sandbox`…). Une panne réelle de Tx-Core
+ * ouvre toujours chaque disjoncteur touché.
+ */
+const READ_METHODS = new Set(["get", "head", "options"]);
+
+function routeFamily(pathname) {
+  const segments = String(pathname || "").split("/").filter(Boolean);
+  const start = segments[0] === "api" && /^v\d+$/.test(segments[1] || "") ? 2 : 0;
+  return (segments[start] || "root").toLowerCase().slice(0, 40);
+}
+
+function circuitKeyFor(url, method = "get") {
+  const kind = READ_METHODS.has(String(method || "get").toLowerCase()) ? "read" : "write";
+  try {
+    const u = new URL(url);
+    return `${u.origin}|${kind}|${routeFamily(u.pathname)}`;
+  } catch {
+    return `${String(url || "").slice(0, 120)}|${kind}`;
+  }
+}
+
+/** L'appel vise-t-il Tx-Core, notre propre moteur (et non un prestataire externe) ? */
+function isInternalTxCoreUrl(url) {
+  const base = process.env.PAYNOVAL_SERVICE_URL || config?.microservices?.paynoval || "";
+  try {
+    return Boolean(base) && new URL(url).origin === new URL(base).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Un 429 de Tx-Core porteur d'un code machine est la limite d'UN client
+ * (par compte, vélocité AML) : il ne dit rien de la santé de Tx-Core. Un 429
+ * d'un prestataire EXTERNE reste compté : c'est la passerelle entière qu'il
+ * freine.
+ */
+function isClientQuotaRefusal({ url, status, data }) {
+  return (
+    Number(status) === 429 &&
+    isInternalTxCoreUrl(url) &&
+    Boolean(data) &&
+    typeof data === "object" &&
+    typeof data.code === "string" &&
+    data.code.length > 0
+  );
+}
+
 function setProviderCooldown(url, reason, extra = {}) {
-  const key = getServiceKeyFromUrl(url);
+  const key = circuitKeyFor(url, extra.method);
 
   breaker.onFailure(key, {
     status: extra.status,
     transportError: extra.transportError === true,
+    clientQuota: extra.clientQuota === true,
     reason: reason || "provider_unavailable",
     retryAfterSec: extra.retryAfterSec,
   });
@@ -110,8 +170,8 @@ function setProviderCooldown(url, reason, extra = {}) {
  * serait alors refusée alors que le disjoncteur voulait justement la laisser
  * passer.
  */
-function getProviderCooldown(url) {
-  const key = getServiceKeyFromUrl(url);
+function getProviderCooldown(url, method = "get") {
+  const key = circuitKeyFor(url, method);
   const st = breaker.inspect(key);
 
   if (st.state !== "open") return null;
@@ -157,7 +217,7 @@ async function safeAxiosRequest(opts) {
     finalOpts.headers["User-Agent"] || finalOpts.headers["user-agent"];
   if (!hasUA) finalOpts.headers["User-Agent"] = GATEWAY_USER_AGENT;
 
-  const circuitKey = getServiceKeyFromUrl(finalOpts.url);
+  const circuitKey = circuitKeyFor(finalOpts.url, finalOpts.method);
   const gate = breaker.canRequest(circuitKey);
 
   if (!gate.allowed) {
@@ -191,6 +251,7 @@ async function safeAxiosRequest(opts) {
     if (isCloudflareChallengeResponse(response)) {
       const cd2 = setProviderCooldown(finalOpts.url, "cloudflare_challenge", {
         retryAfterSec: 60,
+        method: finalOpts.method,
       });
 
       const e = new Error("Cloudflare challenge détecté");
@@ -264,6 +325,8 @@ async function safeAxiosRequest(opts) {
         retryAfterSec: Number.isFinite(ra) && ra > 0 ? ra : undefined,
         status: err.response ? status : undefined,
         transportError,
+        method: finalOpts.method,
+        clientQuota: isClientQuotaRefusal({ url: finalOpts.url, status, data }),
       });
 
       if (cd3.state === "open") {
@@ -305,6 +368,8 @@ module.exports = {
   setProviderCooldown,
   isCloudflareChallengeResponse,
   getServiceKeyFromUrl,
+  circuitKeyFor,
+  isClientQuotaRefusal,
 
   /** Exposé pour les journaux d'exploitation, les métriques et les tests. */
   breaker,

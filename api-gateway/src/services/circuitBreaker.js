@@ -97,8 +97,15 @@ function isClientFault(status) {
  * Fonction **pure**, et la plus importante du module : c'est elle qui empêche
  * les utilisateurs d'ouvrir le disjoncteur à la place du fournisseur.
  */
-function countsAsFailure({ status = null, transportError = false } = {}) {
+function countsAsFailure({ status = null, transportError = false, clientQuota = false } = {}) {
   if (transportError) return true;
+  /**
+   * La LIMITE D'UN CLIENT n'est pas une panne du service (2026-11-25). Un 429
+   * de Tx-Core porteur d'un code (limiteur par compte, vélocité AML) dit
+   * « CE compte va trop vite », pas « Tx-Core est tombé » : le compter
+   * ouvrait le disjoncteur pour TOUS les utilisateurs.
+   */
+  if (clientQuota === true) return false;
   if (status === null || status === undefined) return true;
   if (isClientFault(status)) return false;
 
