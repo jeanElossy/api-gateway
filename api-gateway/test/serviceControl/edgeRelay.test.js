@@ -54,7 +54,7 @@ function fakeAxios() {
 require.cache[axiosPath].exports = fakeAxios;
 
 const relay = require("../../src/services/serviceControlRelay");
-const { safeAxiosRequest, breaker } = require("../../src/services/transactions/httpClient");
+const { safeAxiosRequest, breaker, circuitKeyFor } = require("../../src/services/transactions/httpClient");
 const { auditForwardHeaders } = require("../../src/services/transactions/phoneSecurity");
 
 async function call(url) {
@@ -83,7 +83,8 @@ test("a deliberate refusal never opens the breaker — 20 in a row", async () =>
   }
 
   assert.equal(
-    breaker.inspect("http://tx-core-deliberate.test").state,
+    // Clé par opération depuis le 2026-11-25 (origine | lecture-écriture | famille).
+    breaker.inspect(circuitKeyFor(url, "post")).state,
     "closed",
     "Maintenance refusals opened the circuit: webhooks relayed through the same origin would be refused."
   );
@@ -95,7 +96,7 @@ test("a real 503 (no service-control header) still opens the breaker", async () 
 
   for (let i = 0; i < 10; i += 1) await call(url);
 
-  assert.equal(breaker.inspect("http://tx-core-outage.test").state, "open");
+  assert.equal(breaker.inspect(circuitKeyFor(url, "post")).state, "open");
 });
 
 test("a forged / unknown service-control value is NOT treated as deliberate", () => {
